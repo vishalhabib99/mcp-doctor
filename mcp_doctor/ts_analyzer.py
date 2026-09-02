@@ -149,6 +149,15 @@ def _resolve(node, consts: dict[str, "Node"], depth: int = 0):
     if node.type == "identifier":
         target = consts.get(node.text.decode("utf-8", errors="ignore"))
         return _resolve(target, consts, depth + 1) if target is not None else node
+    if node.type == "binary_expression":
+        operator = node.child_by_field_name("operator")
+        # `paramName || "literal-default"` — a common optional-override-with-default
+        # idiom. The literal is the name actually used at runtime unless a caller
+        # overrides it, so resolve to that rather than treating the name as dynamic.
+        if operator is not None and operator.text == b"||":
+            right = node.child_by_field_name("right")
+            if right is not None:
+                return _resolve(right, consts, depth + 1)
     return node
 
 

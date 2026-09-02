@@ -95,6 +95,22 @@ def test_dynamic_tool_name_is_skipped_not_crashed(tmp_path):
     assert findings == []
 
 
+def test_override_name_with_literal_fallback_uses_the_fallback(tmp_path):
+    write(tmp_path, "server.ts", """
+        server.tool(
+          toolName || "web_search_exa",
+          "Search the web",
+          { query: z.string().describe("Search query") },
+          async ({ query }) => {
+            return { content: [] };
+          },
+        );
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert len(findings) == 1
+    assert findings[0].name == "web_search_exa"
+
+
 def test_fastmcp_add_tool_single_object_style(tmp_path):
     write(tmp_path, "server.ts", """
         import { z } from "zod";
