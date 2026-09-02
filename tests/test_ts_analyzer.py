@@ -574,3 +574,41 @@ def test_shared_const_schema_without_describe_still_flagged(tmp_path):
     tool = findings[0]
     param_issue = next(i for i in tool.issues if i.check == "param_docs")
     assert "1/1" in param_issue.message
+
+
+def test_shorthand_tools_property_is_resolved(tmp_path):
+    write(tmp_path, "server.ts", """
+        const tools = [
+          { name: "a_tool", description: "Does a thing", inputSchema: { type: "object", properties: {} } },
+        ];
+
+        server.setRequestHandler(ListToolsRequestSchema, async () => {
+          return { tools };
+        });
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert len(findings) == 1
+    assert findings[0].name == "a_tool"
+
+
+def test_same_name_declared_twice_in_one_file_is_not_resolved(tmp_path):
+    # `tools` here refers to two unrelated local variables in two different
+    # functions — the name-based registry can't tell them apart, so it must
+    # not silently resolve to whichever one it happened to see last.
+    write(tmp_path, "server.ts", """
+        function unrelated() {
+          const tools = this.repository.getAITools();
+          return tools;
+        }
+
+        const realTools = [
+          { name: "a_tool", description: "Does a thing", inputSchema: { type: "object", properties: {} } },
+        ];
+
+        server.setRequestHandler(ListToolsRequestSchema, async () => {
+          const tools = realTools;
+          return { tools };
+        });
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert findings == []

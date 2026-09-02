@@ -113,11 +113,18 @@ def _string_value(node, src: bytes) -> str | None:
 
 
 def _object_pairs(node, src: bytes) -> dict[str, "Node"]:
-    """For an `object` node, map property name -> value node. Skips computed/shorthand keys."""
+    """For an `object` node, map property name -> value node. Skips computed keys."""
     if node is None or node.type != "object":
         return {}
     pairs = {}
     for child in node.children:
+        if child.type == "shorthand_property_identifier":
+            # `{ tools }` — shorthand for `{ tools: tools }`. The node itself
+            # is both the key name and a reference to the same-named local
+            # variable, so it doubles as its own value node; `_resolve` treats
+            # it exactly like a regular `identifier` when looking it up.
+            pairs[_text(child, src)] = child
+            continue
         if child.type != "pair":
             continue
         key_node = child.child_by_field_name("key")
@@ -264,15 +271,35 @@ def _collect_const_objects(tree_root, src: bytes) -> dict[str, tuple["Node", byt
     """Map `const NAME = <expr>` at any scope to (<expr>'s node, this file's src),
     for resolving identifiers used as a config or schema argument. The src travels
     with the node since a name can be resolved via the cross-file registry in
-    `find_ts_tools`, at which point it belongs to a different file's byte buffer."""
+    `find_ts_tools`, at which point it belongs to a different file's byte buffer.
+
+    Name-based, not scope-aware: if the same name is declared more than once in
+    this file (two unrelated local variables in two different functions, say),
+    there's no way to know which declaration a given reference actually means —
+    so that name is left out of the registry entirely rather than silently
+    resolved to whichever declaration happened to be walked last. An identifier
+    that isn't in the registry is left unresolved by `_resolve`, which is the
+    same safe fallback already used for a genuinely dynamic value; the risk
+    being avoided here is worse than under-reporting — resolving to the *wrong*
+    same-named variable's value and reporting it as fact.
+    """
     registry: dict[str, tuple["Node", bytes]] = {}
+    ambiguous: set[str] = set()
     for n in _walk(tree_root):
         if n.type != "variable_declarator":
             continue
         name_node = n.child_by_field_name("name")
         value_node = n.child_by_field_name("value")
-        if name_node is not None and name_node.type == "identifier" and value_node is not None:
-            registry[_text(name_node, src)] = (value_node, src)
+        if name_node is None or name_node.type != "identifier" or value_node is None:
+            continue
+        name = _text(name_node, src)
+        if name in ambiguous:
+            continue
+        if name in registry and registry[name][0] is not value_node:
+            ambiguous.add(name)
+            del registry[name]
+            continue
+        registry[name] = (value_node, src)
     return registry
 
 
@@ -287,7 +314,7 @@ def _resolve(node, src: bytes, consts: dict[str, tuple["Node", bytes]], depth: i
         # is always the first child. Unwrap to keep resolving through it.
         inner = node.children[0] if node.children else None
         return _resolve(inner, src, consts, depth + 1) if inner is not None else (node, src)
-    if node.type == "identifier":
+    if node.type in ("identifier", "shorthand_property_identifier"):
         target = consts.get(node.text.decode("utf-8", errors="ignore"))
         if target is not None:
             target_node, target_src = target
