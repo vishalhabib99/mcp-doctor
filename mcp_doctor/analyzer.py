@@ -136,6 +136,41 @@ def _annotated_elts_have_description(elts: list[ast.expr], alias_registry: dict[
     return False
 
 
+def _annotation_base_name(annotation: ast.expr | None) -> str | None:
+    if annotation is None:
+        return None
+    if isinstance(annotation, ast.Name):
+        return annotation.id
+    if isinstance(annotation, ast.Attribute):
+        return annotation.attr
+    return None
+
+
+def _is_context_param(arg: ast.arg) -> bool:
+    """A `Context`-typed parameter (`ctx: Context`, `mcp.server.fastmcp.Context`,
+    `Context | None`, `Optional[Context]`) is injected by FastMCP at call time
+    and stripped from the tool's exposed schema before it's ever built — same
+    treatment as `self`/`cls`, not something an agent ever sees or documents.
+    Name-based, like everywhere else here: doesn't verify the annotation
+    actually resolves to fastmcp's Context class."""
+    annotation = arg.annotation
+    if _annotation_base_name(annotation) == "Context":
+        return True
+    if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+        return (
+            _annotation_base_name(annotation.left) == "Context"
+            or _annotation_base_name(annotation.right) == "Context"
+        )
+    if isinstance(annotation, ast.Subscript):
+        base_name = _annotation_base_name(annotation.value)
+        if base_name == "Optional":
+            return _annotation_base_name(annotation.slice) == "Context"
+        if base_name == "Union":
+            elts = annotation.slice.elts if isinstance(annotation.slice, ast.Tuple) else [annotation.slice]
+            return any(_annotation_base_name(e) == "Context" for e in elts)
+    return False
+
+
 def _param_documented_via_field(
     arg: ast.arg, default: ast.expr | None, alias_registry: dict[str, bool] | None = None
 ) -> bool:
@@ -343,7 +378,14 @@ def _analyze_function_as_tool(
     # FastMCP's `exclude_args=[...]` removes a param from the exposed tool
     # schema entirely — an agent can never pass it, so it isn't part of what
     # needs documenting, typing, or counting as a schema parameter at all.
-    args = [a for a in all_args if a.arg not in ("self", "cls") and a.arg not in excluded]
+    # A `Context`-typed parameter gets the same treatment automatically,
+    # without needing exclude_args: FastMCP injects it at call time and
+    # strips it from the schema before the schema is ever built (verified
+    # against fastmcp's own function_parsing.py, without_injected_parameters).
+    args = [
+        a for a in all_args
+        if a.arg not in ("self", "cls") and a.arg not in excluded and not _is_context_param(a)
+    ]
     typed = sum(1 for a in args if a.annotation is not None)
     doc_params = _get_docstring_sections(docstring)
 

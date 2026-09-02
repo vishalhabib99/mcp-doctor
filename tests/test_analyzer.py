@@ -497,6 +497,36 @@ def test_exclude_args_param_not_required_to_be_documented(tmp_path):
     assert tool.param_count == 1
 
 
+def test_context_param_not_required_to_be_documented(tmp_path):
+    # Found dogfooding CursorTouch/Windows-MCP: FastMCP injects a Context-typed
+    # parameter at call time and strips it from the tool's exposed schema
+    # before it's ever built (verified against fastmcp's own
+    # function_parsing.py, without_injected_parameters) — same treatment as
+    # self/cls, without needing an explicit exclude_args entry. Every one of
+    # the target repo's tools had this param, and every one was false-flagged
+    # for "undocumented" because of it, even when every real param had a
+    # Field(description=...).
+    write(tmp_path, "server.py", """
+        from typing import Annotated
+        from fastmcp import Context
+        from mcp.server.fastmcp import FastMCP
+        from pydantic import Field
+        mcp = FastMCP("x")
+
+        @mcp.tool(name="Notification")
+        def notification_tool(
+            title: Annotated[str, Field(description="The notification title.")],
+            ctx: Context = None,
+        ) -> str:
+            return title
+        """)
+    report = analyze_repo(tmp_path)
+    tool = report.tools[0]
+    checks = {i.check for i in tool.issues}
+    assert "param_docs" not in checks
+    assert tool.param_count == 1
+
+
 def test_undocumented_non_excluded_param_still_flagged(tmp_path):
     write(tmp_path, "server.py", """
         from typing import Any
