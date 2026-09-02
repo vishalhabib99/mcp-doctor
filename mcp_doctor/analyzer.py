@@ -210,6 +210,16 @@ def _kwarg_str(call: ast.Call, key: str) -> str | None:
     return None
 
 
+def _kwarg_str_list(call: ast.Call, key: str) -> set[str]:
+    for kw in call.keywords:
+        if kw.arg == key and isinstance(kw.value, (ast.List, ast.Tuple, ast.Set)):
+            return {
+                elt.value for elt in kw.value.elts
+                if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+            }
+    return set()
+
+
 def _contains_try_except(node: ast.AST) -> tuple[bool, bool]:
     has_try = False
     has_bare = False
@@ -228,12 +238,17 @@ def _analyze_function_as_tool(
     description_override: str | None = None,
     alias_registry: dict[str, bool] | None = None,
     name_override: str | None = None,
+    excluded_arg_names: set[str] | None = None,
 ) -> ToolFinding:
     tool_name = name_override or fn.name
     docstring = ast.get_docstring(fn)
     description = description_override or (docstring.splitlines()[0].strip() if docstring else "")
     all_args = fn.args.args
-    args = [a for a in all_args if a.arg not in ("self", "cls")]
+    excluded = excluded_arg_names or set()
+    # FastMCP's `exclude_args=[...]` removes a param from the exposed tool
+    # schema entirely — an agent can never pass it, so it isn't part of what
+    # needs documenting, typing, or counting as a schema parameter at all.
+    args = [a for a in all_args if a.arg not in ("self", "cls") and a.arg not in excluded]
     typed = sum(1 for a in args if a.annotation is not None)
     doc_params = _get_docstring_sections(docstring)
 
@@ -323,7 +338,10 @@ def _find_fastmcp_tools(tree: ast.Module, file: str, alias_registry: dict[str, b
                 break
             description_override = _kwarg_str(call, "description")
             name_override = _kwarg_str(call, "name")
-            findings.append(_analyze_function_as_tool(node, file, description_override, alias_registry, name_override))
+            excluded_args = _kwarg_str_list(call, "exclude_args")
+            findings.append(_analyze_function_as_tool(
+                node, file, description_override, alias_registry, name_override, excluded_args
+            ))
             break
     return findings
 

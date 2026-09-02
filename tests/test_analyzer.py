@@ -268,6 +268,55 @@ def test_cross_file_field_alias_counts_as_param_docs(tmp_path):
     assert "param_docs" not in checks
 
 
+def test_exclude_args_param_not_required_to_be_documented(tmp_path):
+    write(tmp_path, "server.py", """
+        from typing import Any
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        @mcp.tool(exclude_args=["extractor"])
+        def search_posts(keywords: str, extractor: Any | None = None) -> str:
+            \"\"\"Search posts.
+
+            Args:
+                keywords: Search keywords.
+            \"\"\"
+            try:
+                return keywords
+            except ValueError as e:
+                return str(e)
+        """)
+    report = analyze_repo(tmp_path)
+    tool = report.tools[0]
+    checks = {i.check for i in tool.issues}
+    assert "param_docs" not in checks
+    assert tool.param_count == 1
+
+
+def test_undocumented_non_excluded_param_still_flagged(tmp_path):
+    write(tmp_path, "server.py", """
+        from typing import Any
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        @mcp.tool(exclude_args=["extractor"])
+        def search_posts(keywords: str, note: str, extractor: Any | None = None) -> str:
+            \"\"\"Search posts.
+
+            Args:
+                keywords: Search keywords.
+            \"\"\"
+            try:
+                return keywords
+            except ValueError as e:
+                return str(e)
+        """)
+    report = analyze_repo(tmp_path)
+    tool = report.tools[0]
+    checks = {i.check for i in tool.issues}
+    assert "param_docs" in checks
+
+
 def test_bold_bulleted_parameters_heading_recognized(tmp_path):
     write(tmp_path, "server.py", """
         from mcp.server.fastmcp import FastMCP
