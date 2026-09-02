@@ -249,6 +249,90 @@ def test_cross_file_dynamic_description_is_skipped_not_crashed(tmp_path):
     assert any(i.check == "description" for i in tool.issues)
 
 
+def test_low_level_server_list_tools_handler(tmp_path):
+    write(tmp_path, "shared/tools.ts", """
+        export const TOOL_NAMES = {
+          BROWSER: {
+            GET_TABS: "get_windows_and_tabs",
+          },
+        };
+
+        export const TOOL_SCHEMAS = [
+          {
+            name: TOOL_NAMES.BROWSER.GET_TABS,
+            description: "Get all currently open browser windows and tabs",
+            inputSchema: {
+              type: "object",
+              properties: {
+                verbose: { type: "boolean", description: "Include full tab metadata" },
+              },
+              required: [],
+            },
+          },
+          {
+            name: "chrome_navigate",
+            description: "",
+            inputSchema: { type: "object", properties: {}, required: [] },
+          },
+        ];
+        """)
+    write(tmp_path, "server.ts", """
+        import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+        import { TOOL_SCHEMAS } from "./shared/tools.js";
+
+        async function listDynamicTools() {
+          return [];
+        }
+
+        export const setupTools = (server) => {
+          server.setRequestHandler(ListToolsRequestSchema, async () => {
+            const dynamicTools = await listDynamicTools();
+            return { tools: [...TOOL_SCHEMAS, ...dynamicTools] };
+          });
+          server.setRequestHandler(CallToolRequestSchema, async (request) => handle(request));
+        };
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert len(findings) == 2
+    by_name = {t.name: t for t in findings}
+    assert set(by_name) == {"get_windows_and_tabs", "chrome_navigate"}
+
+    tabs_tool = by_name["get_windows_and_tabs"]
+    assert tabs_tool.file == "shared/tools.ts"  # reported at its own definition, not the call site
+    assert tabs_tool.param_count == 1
+    checks = {i.check for i in tabs_tool.issues}
+    assert "description" not in checks
+    assert "param_docs" not in checks
+    assert "error_handling" not in checks  # no per-tool handler to inspect for this style
+
+    nav_tool = by_name["chrome_navigate"]
+    assert any(i.check == "description" for i in nav_tool.issues)
+
+
+def test_low_level_server_list_tools_deduped_across_call_sites(tmp_path):
+    # The same static tool array wired into two transport entrypoints (a real
+    # pattern: separate stdio/HTTP servers sharing one tool list) must be
+    # reported once per tool, not once per call site.
+    write(tmp_path, "shared/tools.ts", """
+        export const TOOL_SCHEMAS = [
+          { name: "chrome_screenshot", description: "Take a screenshot", inputSchema: { type: "object", properties: {}, required: [] } },
+        ];
+        """)
+    write(tmp_path, "stdio-server.ts", """
+        import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+        import { TOOL_SCHEMAS } from "./shared/tools.js";
+        server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [...TOOL_SCHEMAS] }));
+        """)
+    write(tmp_path, "http-server.ts", """
+        import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+        import { TOOL_SCHEMAS } from "./shared/tools.js";
+        server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [...TOOL_SCHEMAS] }));
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert len(findings) == 1
+    assert findings[0].name == "chrome_screenshot"
+
+
 def test_analyze_repo_includes_ts_tools(tmp_path):
     write(tmp_path, "server.ts", """
         server.registerTool("x", { description: "Does x thing", inputSchema: z.object({}) }, async () => {

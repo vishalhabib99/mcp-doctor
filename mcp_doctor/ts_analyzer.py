@@ -1,12 +1,18 @@
 """Static analysis of TypeScript/JavaScript MCP server implementations.
 
 Mirrors analyzer.py's checks (description, per-parameter docs, error handling)
-for the official TS SDK's two registration styles, plus the community
-`fastmcp` (punkpeye/fastmcp) package's single-object style:
+for the official TS SDK's two high-level registration styles, the community
+`fastmcp` (punkpeye/fastmcp) package's single-object style, and the low-level
+`Server` SDK's static-list style:
 
     server.registerTool(name, { description, inputSchema: ZodObjectOrConst }, handler)
     server.tool(name, description, zodShapeOrConst, handler)
     server.addTool({ name, description, parameters: ZodObjectOrConst, execute })
+    server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: [...ToolArrayConst] }))
+
+The last style has no per-tool handler closure to check for a try/catch (one
+generic dispatcher serves every tool by name, often proxying elsewhere
+entirely), so error_handling is intentionally not checked for it.
 
 The name, config object, and Zod schema are commonly a `const` reference
 rather than an inline literal, and the name is often a member-expression
@@ -37,6 +43,9 @@ except ImportError:  # pragma: no cover - exercised via TS_AVAILABLE branch
 REGISTER_METHODS = {"registerTool", "tool"}
 # fastmcp's single-object style: server.addTool({ name, description, parameters, execute })
 SINGLE_OBJECT_METHODS = {"addTool"}
+# low-level Server SDK style: server.setRequestHandler(ListToolsRequestSchema, handler)
+LIST_TOOLS_METHOD = "setRequestHandler"
+LIST_TOOLS_SCHEMA = "ListToolsRequestSchema"
 
 
 def _text(node, src: bytes) -> str:
@@ -129,6 +138,40 @@ def _zod_object_arg(node):
     return None
 
 
+def _find_tools_array(handler_node, src: bytes):
+    """Search a `setRequestHandler(ListToolsRequestSchema, handler)` handler body
+    for the object literal it builds its response from (`{ tools: [...] }`,
+    however it's returned) and return that `tools` property's raw value node."""
+    for n in _walk(handler_node):
+        if n.type == "object":
+            tools_val = _object_pairs(n, src).get("tools")
+            if tools_val is not None:
+                return tools_val
+    return None
+
+
+def _collect_tool_array_elements(array_node, src: bytes, consts: dict, depth: int = 0):
+    """Return [(tool_object_node, its_src), ...] for every literal `Tool` object
+    a `tools` array directly contains, following `...someConstArray` spreads
+    (repo-wide, via `consts`) into their own elements recursively. A spread of
+    something that doesn't resolve to an array literal (e.g. a function call's
+    result, built at runtime) is genuinely dynamic and is skipped, not guessed at.
+    """
+    if array_node is None or array_node.type != "array" or depth > 5:
+        return []
+    out: list[tuple["Node", bytes]] = []
+    for child in array_node.children:
+        if child.type == "object":
+            out.append((child, src))
+        elif child.type == "spread_element":
+            inner = child.children[-1] if child.children else None
+            if inner is not None:
+                resolved, resolved_src = _resolve(inner, src, consts)
+                if resolved.type == "array":
+                    out.extend(_collect_tool_array_elements(resolved, resolved_src, consts, depth + 1))
+    return out
+
+
 def _find_try(node) -> bool:
     return any(n.type == "try_statement" for n in _walk(node))
 
@@ -199,6 +242,51 @@ def _resolve_str(node, src: bytes, consts: dict[str, tuple["Node", bytes]]) -> s
     return _string_value(resolved, resolved_src)
 
 
+def _finding_with_description_and_param_issues(
+    name: str, file: str, line: int, description: str, param_count: int, documented: int,
+    param_doc_label: str,
+) -> ToolFinding:
+    """Build a ToolFinding with the description/param-docs issues that are common
+    across every TS registration style. Caller fills in and appends the
+    error_handling issue (or omits it), since not every style has a per-tool
+    handler to inspect for one."""
+    finding = ToolFinding(
+        name=name,
+        file=file,
+        line=line,
+        has_description=bool(description.strip()),
+        description_len=len(description.strip()),
+        param_count=param_count,
+        typed_param_count=param_count,
+        has_docstring_params=documented >= param_count and param_count > 0,
+        has_try_except=True,
+        has_bare_except=False,
+    )
+
+    if not finding.has_description:
+        finding.issues.append(ToolIssue(
+            name, file, line, "description",
+            "Tool has no description. An agent cannot decide when to call this.",
+            "error",
+        ))
+    elif finding.description_len < 10:
+        finding.issues.append(ToolIssue(
+            name, file, line, "description",
+            f"Description is only {finding.description_len} chars — likely just restates the name.",
+            "warning",
+        ))
+
+    if param_count and not finding.has_docstring_params:
+        finding.issues.append(ToolIssue(
+            name, file, line, "param_docs",
+            f"{param_count - documented}/{param_count} {param_doc_label} — "
+            "the model only sees names, not intent.",
+            "warning",
+        ))
+
+    return finding
+
+
 def _analyze_ts_tool(
     name: str, config_or_desc, config_src: bytes, schema_arg, schema_src: bytes,
     handler, consts: dict, file: str, line: int
@@ -221,39 +309,11 @@ def _analyze_ts_tool(
 
     has_try = _find_try(handler) if handler is not None else False
 
-    finding = ToolFinding(
-        name=name,
-        file=file,
-        line=line,
-        has_description=bool(description.strip()),
-        description_len=len(description.strip()),
-        param_count=param_count,
-        typed_param_count=param_count,  # Zod schemas are typed by construction
-        has_docstring_params=documented >= param_count and param_count > 0,
-        has_try_except=has_try,
-        has_bare_except=False,
+    finding = _finding_with_description_and_param_issues(
+        name, file, line, description, param_count, documented,
+        "Zod schema properties have no .describe(...)",
     )
-
-    if not finding.has_description:
-        finding.issues.append(ToolIssue(
-            name, file, line, "description",
-            "Tool has no description. An agent cannot decide when to call this.",
-            "error",
-        ))
-    elif finding.description_len < 10:
-        finding.issues.append(ToolIssue(
-            name, file, line, "description",
-            f"Description is only {finding.description_len} chars — likely just restates the name.",
-            "warning",
-        ))
-
-    if param_count and not finding.has_docstring_params:
-        finding.issues.append(ToolIssue(
-            name, file, line, "param_docs",
-            f"{param_count - documented}/{param_count} Zod schema properties have no .describe(...) — "
-            "the model only sees names, not intent.",
-            "warning",
-        ))
+    finding.has_try_except = has_try
 
     if handler is not None and not has_try:
         finding.issues.append(ToolIssue(
@@ -265,6 +325,43 @@ def _analyze_ts_tool(
         ))
 
     return finding
+
+
+def _analyze_json_schema_tool(
+    name: str, desc_node, schema_node, schema_src: bytes, consts: dict, src: bytes, file: str, line: int
+) -> ToolFinding:
+    """For the low-level `Server` SDK's `setRequestHandler(ListToolsRequestSchema, ...)`
+    style: tools are plain `Tool` objects (raw JSON Schema, not Zod) returned from
+    a static or const-referenced array, not individual `registerTool`/`.tool()`
+    call sites. There's no per-tool handler closure to inspect for a try/catch —
+    a single generic dispatcher (keyed by name, often proxying to a different
+    process entirely, as with a Chrome-extension-backed server) serves every
+    tool — so error_handling is deliberately not checked for this style."""
+    description = _resolve_str(desc_node, src, consts) or ""
+
+    schema, resolved_schema_src = (
+        _resolve(schema_node, schema_src, consts) if schema_node is not None else (None, schema_src)
+    )
+    props: dict[str, "Node"] = {}
+    if schema is not None and schema.type == "object":
+        properties_node = _object_pairs(schema, resolved_schema_src).get("properties")
+        if properties_node is not None:
+            resolved_props, resolved_props_src = _resolve(properties_node, resolved_schema_src, consts)
+            if resolved_props.type == "object":
+                props = _object_pairs(resolved_props, resolved_props_src)
+
+    documented = 0
+    for v in props.values():
+        v_resolved, v_resolved_src = _resolve(v, resolved_schema_src, consts)
+        if v_resolved.type == "object":
+            prop_desc = _object_pairs(v_resolved, v_resolved_src).get("description")
+            if _string_value(prop_desc, v_resolved_src):
+                documented += 1
+
+    return _finding_with_description_and_param_issues(
+        name, file, line, description, len(props), documented,
+        "JSON-schema properties have no description",
+    )
 
 
 def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
@@ -315,6 +412,13 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
         for const_name, entry in _collect_const_objects(file_root, file_src).items():
             global_consts.setdefault(const_name, entry)
 
+    # Maps each file's src buffer (by identity — buffers are never copied, only
+    # passed around by reference through resolution) back to its relative path,
+    # so a tool object resolved from a static array can be reported at its own
+    # definition site rather than the (possibly different-file) call site.
+    src_to_rel: dict[int, str] = {id(s): str(f.relative_to(root)) for f, _, s in parsed}
+    seen_list_tools: set[tuple[str, str, int]] = set()
+
     for f, file_root, src in parsed:
         rel = str(f.relative_to(root))
         local_consts = _collect_const_objects(file_root, src)
@@ -324,12 +428,48 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
             if node.type != "call_expression":
                 continue
             method = _callee_name(node)
-            if method not in REGISTER_METHODS and method not in SINGLE_OBJECT_METHODS:
+            if (
+                method not in REGISTER_METHODS
+                and method not in SINGLE_OBJECT_METHODS
+                and method != LIST_TOOLS_METHOD
+            ):
                 continue
             args_node = node.child_by_field_name("arguments")
             if args_node is None:
                 continue
             arg_nodes = [c for c in args_node.children if c.type not in ("(", ")", ",")]
+
+            if method == LIST_TOOLS_METHOD:
+                if len(arg_nodes) < 2 or arg_nodes[0].type != "identifier":
+                    continue
+                if _text(arg_nodes[0], src) != LIST_TOOLS_SCHEMA:
+                    continue
+                tools_array_raw = _find_tools_array(arg_nodes[1], src)
+                if tools_array_raw is None:
+                    continue
+                tools_array, tools_array_src = _resolve(tools_array_raw, src, consts)
+                for tool_obj, tool_src in _collect_tool_array_elements(tools_array, tools_array_src, consts):
+                    pairs = _object_pairs(tool_obj, tool_src)
+                    name_val = _resolve_str(pairs.get("name"), tool_src, consts)
+                    if name_val is None:
+                        continue  # dynamic tool name — can't attribute a finding to it
+                    tool_file = src_to_rel.get(id(tool_src), rel)
+                    tool_line = tool_obj.start_point[0] + 1
+                    # The same static tool list is commonly wired into more than
+                    # one setRequestHandler call site (e.g. separate stdio/HTTP
+                    # transport entrypoints) — dedupe by the tool's own
+                    # definition, not the call site, so it's reported once.
+                    dedup_key = (name_val, tool_file, tool_line)
+                    if dedup_key in seen_list_tools:
+                        continue
+                    seen_list_tools.add(dedup_key)
+                    findings.append(
+                        _analyze_json_schema_tool(
+                            name_val, pairs.get("description"), pairs.get("inputSchema"), tool_src,
+                            consts, tool_src, tool_file, tool_line,
+                        )
+                    )
+                continue
 
             if method in SINGLE_OBJECT_METHODS:
                 if len(arg_nodes) != 1:
