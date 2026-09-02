@@ -82,6 +82,145 @@ def test_bare_except_is_an_error(tmp_path):
     assert bare_issue.severity == "error"
 
 
+def test_delegation_to_handled_helper_same_file_clears_error_handling(tmp_path):
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        def do_work(x):
+            try:
+                return 1 / x
+            except ZeroDivisionError:
+                return 0
+
+        @mcp.tool()
+        def divide(x: int) -> int:
+            \"\"\"Divide.
+
+            Args:
+                x: The divisor.
+            \"\"\"
+            return do_work(x)
+        """)
+    report = analyze_repo(tmp_path)
+    tool = report.tools[0]
+    checks = {i.check for i in tool.issues}
+    assert "error_handling" not in checks
+
+
+def test_delegation_to_handled_helper_multi_hop_cross_file_clears_error_handling(tmp_path):
+    # Mirrors the real pattern found dogfooding against tradingview-mcp:
+    # tool -> service function -> fetch function -> the function with the
+    # actual try/except, three calls deep and across two files.
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        from service import analyze_sentiment
+        mcp = FastMCP("x")
+
+        @mcp.tool()
+        def market_sentiment(symbol: str) -> dict:
+            \"\"\"Sentiment for a symbol.
+
+            Args:
+                symbol: The ticker.
+            \"\"\"
+            return analyze_sentiment(symbol)
+        """)
+    write(tmp_path, "service.py", """
+        def analyze_sentiment(symbol):
+            articles = _get_articles(symbol)
+            return {"symbol": symbol, "articles": articles}
+
+        def _get_articles(symbol):
+            return _request(symbol)
+
+        def _request(symbol):
+            try:
+                return fetch(symbol)
+            except Exception:
+                return None
+        """)
+    report = analyze_repo(tmp_path)
+    tool = next(t for t in report.tools if t.name == "market_sentiment")
+    checks = {i.check for i in tool.issues}
+    assert "error_handling" not in checks
+
+
+def test_delegation_through_aliased_import_clears_error_handling(tmp_path):
+    # Mirrors the real pattern found dogfooding against tradingview-mcp:
+    # `from strategies import compare_strategies as _compare_strategies`,
+    # called at the tool site as `_compare_strategies(...)`.
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        from strategies import compare_strategies as _compare_strategies
+        mcp = FastMCP("x")
+
+        @mcp.tool()
+        def compare(symbol: str) -> dict:
+            \"\"\"Compare strategies.
+
+            Args:
+                symbol: The ticker.
+            \"\"\"
+            return _compare_strategies(symbol)
+        """)
+    write(tmp_path, "strategies.py", """
+        def compare_strategies(symbol):
+            try:
+                return {"symbol": symbol}
+            except Exception:
+                return {}
+        """)
+    report = analyze_repo(tmp_path)
+    tool = next(t for t in report.tools if t.name == "compare")
+    checks = {i.check for i in tool.issues}
+    assert "error_handling" not in checks
+
+
+def test_delegation_to_unhandled_helper_still_flagged(tmp_path):
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        def do_work(x):
+            return 1 / x
+
+        @mcp.tool()
+        def divide(x: int) -> int:
+            \"\"\"Divide.
+
+            Args:
+                x: The divisor.
+            \"\"\"
+            return do_work(x)
+        """)
+    report = analyze_repo(tmp_path)
+    tool = report.tools[0]
+    checks = {i.check for i in tool.issues}
+    assert "error_handling" in checks
+
+
+def test_delegation_to_external_call_still_flagged(tmp_path):
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        import requests
+        mcp = FastMCP("x")
+
+        @mcp.tool()
+        def fetch_url(url: str) -> str:
+            \"\"\"Fetch a URL.
+
+            Args:
+                url: The URL.
+            \"\"\"
+            return requests.get(url).text
+        """)
+    report = analyze_repo(tmp_path)
+    tool = report.tools[0]
+    checks = {i.check for i in tool.issues}
+    assert "error_handling" in checks
+
+
 def test_lowlevel_tool_constructor_detected(tmp_path):
     write(tmp_path, "server.py", """
         from mcp.types import Tool

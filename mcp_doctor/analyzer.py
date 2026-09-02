@@ -232,6 +232,87 @@ def _contains_try_except(node: ast.AST) -> tuple[bool, bool]:
     return has_try, has_bare
 
 
+def _direct_call_names(node: ast.AST, import_aliases: dict[str, str] | None = None) -> set[str]:
+    """Bare-name function calls (`foo(...)`, not `self.foo(...)`) directly
+    inside a node's subtree, resolved through `from x import y as z`-style
+    aliases back to the real function name (e.g. `_compare_strategies()` in
+    the caller resolves to `compare_strategies`, the name it's actually
+    defined under) so registry lookups keyed by def name still hit."""
+    names = {
+        n.func.id for n in ast.walk(node)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+    }
+    if not import_aliases:
+        return names
+    return {import_aliases.get(n, n) for n in names}
+
+
+def _build_import_aliases(trees: list[tuple[str, ast.Module]]) -> dict[str, str]:
+    """Repo-wide map of `from x import y as z` -> {z: y}, so a call site using
+    the alias can be resolved back to the name a function is actually
+    `def`-ed under. Same name-only simplification as everywhere else here —
+    doesn't check that the alias's source module is the one that really
+    defines `y`."""
+    aliases: dict[str, str] = {}
+    for _, tree in trees:
+        for n in ast.walk(tree):
+            if isinstance(n, ast.ImportFrom):
+                for alias in n.names:
+                    if alias.asname and alias.asname != alias.name:
+                        aliases[alias.asname] = alias.name
+    return aliases
+
+
+def _build_error_handling_registry(
+    trees: list[tuple[str, ast.Module]], import_aliases: dict[str, str]
+) -> dict[str, bool]:
+    """Repo-wide, name-based (not import-resolved — same simplification as the
+    Field alias registry) map of function name -> whether it handles errors
+    itself or by delegating to another locally-defined function that does,
+    transitively. A tool that only calls a helper with its own try/except
+    two or three calls deep (a real pattern seen dogfooding — e.g. a tool
+    calling a service function that calls a network-request function with
+    the actual try/except) shouldn't be flagged as having no error handling.
+
+    Resolution is by function name only, not by which module it's imported
+    from, so two same-named functions in different files are not
+    distinguished — an accepted risk, consistent with the alias registry."""
+    functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+    for _, tree in trees:
+        for n in ast.walk(tree):
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                functions[n.name] = n
+
+    memo: dict[str, bool] = {}
+
+    def resolve(name: str, depth: int = 0) -> bool:
+        if name in memo:
+            return memo[name]
+        if depth > 5:
+            return False
+        node = functions.get(name)
+        if node is None:
+            return False
+        memo[name] = False  # cycle guard: assume unhandled while resolving
+        has_own, _ = _contains_try_except(node)
+        result = has_own or any(
+            resolve(callee, depth + 1) for callee in _direct_call_names(node, import_aliases)
+        )
+        memo[name] = result
+        return result
+
+    for name in list(functions):
+        resolve(name)
+    # A tool calling the alias directly (e.g. `_compare_strategies()` for a
+    # function actually `def`-ed as `compare_strategies`) should still hit —
+    # make the registry itself alias-aware rather than requiring every call
+    # site to resolve through import_aliases too.
+    for alias_name, real_name in import_aliases.items():
+        if real_name in memo:
+            memo.setdefault(alias_name, memo[real_name])
+    return memo
+
+
 def _analyze_function_as_tool(
     fn: ast.FunctionDef | ast.AsyncFunctionDef,
     file: str,
@@ -239,6 +320,7 @@ def _analyze_function_as_tool(
     alias_registry: dict[str, bool] | None = None,
     name_override: str | None = None,
     excluded_arg_names: set[str] | None = None,
+    error_handling_registry: dict[str, bool] | None = None,
 ) -> ToolFinding:
     tool_name = name_override or fn.name
     docstring = ast.get_docstring(fn)
@@ -259,6 +341,13 @@ def _analyze_function_as_tool(
     documented_count = len(doc_params | field_documented_names)
 
     has_try, has_bare = _contains_try_except(fn)
+    if not has_try and error_handling_registry:
+        # No try/except in this function's own body, but it may delegate its
+        # real work to a locally-defined helper (possibly several calls deep)
+        # that already handles errors — see _build_error_handling_registry.
+        has_try = any(
+            error_handling_registry.get(callee, False) for callee in _direct_call_names(fn)
+        )
 
     finding = ToolFinding(
         name=tool_name,
@@ -307,9 +396,10 @@ def _analyze_function_as_tool(
             "No try/except in this function's own body. FastMCP still catches an unhandled "
             "exception here and returns a structured error rather than a raw traceback, but "
             "the model only sees the generic exception text — a tool-level catch that raises "
-            "a specific, actionable message gives the model something it can act on. (If this "
-            "tool delegates its real work to a helper function that already has its own "
-            "try/except, this is a false positive — see Known Limitations.)",
+            "a specific, actionable message gives the model something it can act on. (Delegation "
+            "to a locally-defined Python helper with its own try/except is already resolved "
+            "before this warning fires; a helper outside this repo, or a TS/JS helper, isn't — "
+            "see Known Limitations.)",
             "warning",
         ))
     if has_bare:
@@ -322,7 +412,12 @@ def _analyze_function_as_tool(
     return finding
 
 
-def _find_fastmcp_tools(tree: ast.Module, file: str, alias_registry: dict[str, bool] | None = None) -> list[ToolFinding]:
+def _find_fastmcp_tools(
+    tree: ast.Module,
+    file: str,
+    alias_registry: dict[str, bool] | None = None,
+    error_handling_registry: dict[str, bool] | None = None,
+) -> list[ToolFinding]:
     findings = []
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -334,13 +429,16 @@ def _find_fastmcp_tools(tree: ast.Module, file: str, alias_registry: dict[str, b
                 attr = dec.attr if isinstance(dec, ast.Attribute) else (dec.id if isinstance(dec, ast.Name) else None)
                 if attr not in FASTMCP_DECORATOR_NAMES:
                     continue
-                findings.append(_analyze_function_as_tool(node, file, alias_registry=alias_registry))
+                findings.append(_analyze_function_as_tool(
+                    node, file, alias_registry=alias_registry, error_handling_registry=error_handling_registry
+                ))
                 break
             description_override = _kwarg_str(call, "description")
             name_override = _kwarg_str(call, "name")
             excluded_args = _kwarg_str_list(call, "exclude_args")
             findings.append(_analyze_function_as_tool(
-                node, file, description_override, alias_registry, name_override, excluded_args
+                node, file, description_override, alias_registry, name_override,
+                excluded_args, error_handling_registry,
             ))
             break
     return findings
@@ -475,9 +573,11 @@ def analyze_repo(root: Path) -> Report:
     for _, tree in trees:
         _collect_field_aliases(tree, alias_registry)
 
+    error_handling_registry = _build_error_handling_registry(trees, _build_import_aliases(trees))
+
     tools: list[ToolFinding] = []
     for rel, tree in trees:
-        tools.extend(_find_fastmcp_tools(tree, rel, alias_registry))
+        tools.extend(_find_fastmcp_tools(tree, rel, alias_registry, error_handling_registry))
         tools.extend(_find_lowlevel_tools(tree, rel))
 
     ts_tools, ts_unparseable = find_ts_tools(root)
