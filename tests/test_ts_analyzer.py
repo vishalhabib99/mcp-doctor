@@ -420,3 +420,157 @@ def test_analyze_repo_includes_ts_tools(tmp_path):
     report = analyze_repo(tmp_path)
     assert len(report.tools) == 1
     assert report.tools[0].name == "x"
+
+
+def test_define_tool_with_direct_object_literal(tmp_path):
+    write(tmp_path, "server.ts", """
+        import { zod } from "./third_party";
+        import { defineTool } from "./ToolDefinition";
+
+        export const selectPage = defineTool({
+          name: "select_page",
+          description: "Select a page as a context for future tool calls.",
+          schema: {
+            pageId: zod.number().describe("The ID of the page to select."),
+          },
+          handler: async (request, response, context) => {
+            try {
+              return {};
+            } catch (e) {
+              throw e;
+            }
+          },
+        });
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert len(findings) == 1
+    tool = findings[0]
+    assert tool.name == "select_page"
+    checks = {i.check for i in tool.issues}
+    assert "description" not in checks
+    assert "param_docs" not in checks
+    assert "error_handling" not in checks
+
+
+def test_define_tool_with_factory_function_and_missing_error_handling(tmp_path):
+    write(tmp_path, "server.ts", """
+        import { defineTool } from "./ToolDefinition";
+
+        export const listPages = defineTool(args => {
+          return {
+            name: "list_pages",
+            description: "Get a list of pages open in the browser.",
+            schema: {},
+            handler: async (_request, response) => {
+              response.setIncludePages(true);
+            },
+          };
+        });
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert len(findings) == 1
+    tool = findings[0]
+    assert tool.name == "list_pages"
+    assert any(i.check == "error_handling" for i in tool.issues)
+
+
+def test_define_page_tool_wrapper_is_recognized(tmp_path):
+    write(tmp_path, "server.ts", """
+        import { definePageTool } from "./ToolDefinition";
+
+        export const closePage = definePageTool({
+          name: "close_page",
+          description: "",
+          schema: { pageId: zod.number() },
+          handler: async () => ({}),
+        });
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert len(findings) == 1
+    tool = findings[0]
+    assert tool.name == "close_page"
+    assert any(i.check == "description" for i in tool.issues)
+    param_issue = next(i for i in tool.issues if i.check == "param_docs")
+    assert "1/1" in param_issue.message
+
+
+def test_define_tool_dynamic_factory_body_is_skipped_not_crashed(tmp_path):
+    write(tmp_path, "server.ts", """
+        import { defineTool } from "./ToolDefinition";
+
+        export const conditionalTool = defineTool(args => {
+          if (args?.slim) {
+            return buildSlimTool();
+          }
+          return buildFullTool();
+        });
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert findings == []
+
+
+def test_description_built_with_string_concatenation(tmp_path):
+    write(tmp_path, "server.ts", """
+        import { defineTool } from "./ToolDefinition";
+
+        export const installPwa = defineTool({
+          name: "install_pwa",
+          description:
+            "Installs a Progressive Web App identified by its manifest ID. " +
+            "This installs through the PWA CDP domain without a user gesture.",
+          schema: {},
+          handler: async () => ({}),
+        });
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert len(findings) == 1
+    tool = findings[0]
+    assert not any(i.check == "description" for i in tool.issues)
+    assert tool.description_len > 10
+
+
+def test_shared_const_schema_describe_is_resolved_through_identifier(tmp_path):
+    write(tmp_path, "server.ts", """
+        import { zod } from "./third_party";
+        import { defineTool } from "./ToolDefinition";
+
+        const manifestIdSchema = zod
+          .string()
+          .describe("The manifest ID of the web app.");
+
+        export const installPwa = defineTool({
+          name: "install_pwa",
+          description: "Installs a PWA.",
+          schema: {
+            manifestId: manifestIdSchema,
+            installUrl: zod.string().describe("The install URL."),
+          },
+          handler: async () => ({}),
+        });
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert len(findings) == 1
+    tool = findings[0]
+    assert not any(i.check == "param_docs" for i in tool.issues)
+
+
+def test_shared_const_schema_without_describe_still_flagged(tmp_path):
+    write(tmp_path, "server.ts", """
+        import { zod } from "./third_party";
+        import { defineTool } from "./ToolDefinition";
+
+        const undocumentedSchema = zod.string();
+
+        export const installPwa = defineTool({
+          name: "install_pwa",
+          description: "Installs a PWA.",
+          schema: {
+            manifestId: undocumentedSchema,
+          },
+          handler: async () => ({}),
+        });
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    tool = findings[0]
+    param_issue = next(i for i in tool.issues if i.check == "param_docs")
+    assert "1/1" in param_issue.message

@@ -9,6 +9,8 @@ for the official TS SDK's two high-level registration styles, the community
     server.tool(name, description, zodShapeOrConst, handler)
     server.addTool({ name, description, parameters: ZodObjectOrConst, execute })
     server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: [...ToolArrayConst] }))
+    defineTool({ name, description, schema, handler })   // or definePageTool(...)
+    defineTool(args => ({ name, description, schema, handler }))
 
 The last style has no per-tool handler closure to check for a try/catch (one
 generic dispatcher serves every tool by name, often proxying elsewhere
@@ -46,6 +48,14 @@ SINGLE_OBJECT_METHODS = {"addTool"}
 # low-level Server SDK style: server.setRequestHandler(ListToolsRequestSchema, handler)
 LIST_TOOLS_METHOD = "setRequestHandler"
 LIST_TOOLS_SCHEMA = "ListToolsRequestSchema"
+# a "define the tool, register it elsewhere" wrapper factory: the call itself
+# *is* the definition site (e.g. Chrome DevTools MCP's `defineTool({...})` /
+# `definePageTool({...})`), taking either an object literal directly or a
+# function that returns one — the actual `server.registerTool(...)` call that
+# consumes it is a runtime loop over a collected array, which doesn't need to
+# be resolved since every `defineTool`/`definePageTool` call site already is
+# one tool definition on its own.
+WRAPPER_FACTORY_METHODS = {"defineTool", "definePageTool"}
 
 
 def _text(node, src: bytes) -> str:
@@ -88,6 +98,17 @@ def _string_value(node, src: bytes) -> str | None:
         # and omitting it can only under-count length, never fabricate content.
         fragments = [_text(c, src) for c in node.children if c.type == "string_fragment"]
         return "".join(fragments)
+    if node.type == "binary_expression":
+        # `'...' + '...'` — a common way to wrap a long description across
+        # multiple lines. Only resolves if both sides are themselves literal;
+        # a concatenation involving a variable is left unresolved rather than
+        # guessed at (better to under-count than to fabricate content).
+        operator = node.child_by_field_name("operator")
+        if operator is not None and operator.text == b"+":
+            left_val = _string_value(node.child_by_field_name("left"), src)
+            right_val = _string_value(node.child_by_field_name("right"), src)
+            if left_val is not None and right_val is not None:
+                return left_val + right_val
     return None
 
 
@@ -114,8 +135,14 @@ def _object_pairs(node, src: bytes) -> dict[str, "Node"]:
     return pairs
 
 
-def _has_describe_call(node) -> bool:
-    """True if `.describe(...)` appears anywhere in this expression's call chain."""
+def _has_describe_call(node, src: bytes | None = None, consts: dict | None = None) -> bool:
+    """True if `.describe(...)` appears anywhere in this expression's call chain.
+    If consts is given, first resolves a bare identifier — a Zod schema is
+    commonly factored into a shared const and reused across several tools —
+    to its definition, so a shared schema's own `.describe(...)` isn't missed
+    just because this particular property references it by name."""
+    if consts is not None:
+        node, _ = _resolve(node, src, consts)
     for n in _walk(node):
         if n.type == "call_expression" and _callee_name(n) == "describe":
             return True
@@ -193,6 +220,40 @@ def _collect_tool_array_elements(array_node, src: bytes, consts: dict, depth: in
                 if resolved.type == "array":
                     out.extend(_collect_tool_array_elements(resolved, resolved_src, consts, depth + 1))
     return out
+
+
+def _extract_definition_object(node, src: bytes):
+    """For a `defineTool`/`definePageTool` call's single argument, return the
+    tool-definition `object` literal — whether passed directly, or built by a
+    factory function (`args => ({...})` or `args => { return {...}; }`).
+    A function body with no top-level `return {...}` is genuinely dynamic
+    (e.g. conditional returns) and yields (None, src) rather than a guess."""
+    if node is None:
+        return None, src
+    if node.type == "object":
+        return node, src
+    if node.type not in ("arrow_function", "function_expression"):
+        return None, src
+    body = node.child_by_field_name("body")
+    if body is None:
+        return None, src
+    if body.type == "object":
+        return body, src
+    if body.type == "parenthesized_expression":
+        inner = next((c for c in body.children if c.type == "object"), None)
+        return (inner, src) if inner is not None else (None, src)
+    if body.type == "statement_block":
+        for child in body.children:
+            if child.type != "return_statement":
+                continue
+            for c in child.children:
+                if c.type == "object":
+                    return c, src
+                if c.type == "parenthesized_expression":
+                    inner = next((x for x in c.children if x.type == "object"), None)
+                    if inner is not None:
+                        return inner, src
+    return None, src
 
 
 def _find_try(node) -> bool:
@@ -333,8 +394,9 @@ def _analyze_ts_tool(
         pairs = _object_pairs(config_or_desc, config_src)
         description = _resolve_str(pairs.get("description"), config_src, consts) or ""
         if schema_arg is None:
-            # registerTool uses inputSchema; fastmcp's addTool uses parameters.
-            schema_key = pairs.get("inputSchema") or pairs.get("parameters")
+            # registerTool uses inputSchema; fastmcp's addTool uses parameters;
+            # the defineTool/definePageTool wrapper style uses schema.
+            schema_key = pairs.get("inputSchema") or pairs.get("parameters") or pairs.get("schema")
             if schema_key is not None:
                 schema_arg, schema_src = _resolve(schema_key, config_src, consts)
     else:
@@ -343,7 +405,7 @@ def _analyze_ts_tool(
     zod_obj = _zod_object_arg(schema_arg) if schema_arg is not None else None
     props = _object_pairs(zod_obj, schema_src) if zod_obj is not None else {}
     param_count = len(props)
-    documented = sum(1 for v in props.values() if _has_describe_call(v))
+    documented = sum(1 for v in props.values() if _has_describe_call(v, schema_src, consts))
 
     has_try = _find_try(handler) if handler is not None else False
 
@@ -409,7 +471,7 @@ def _analyze_json_schema_tool(
         if zod_obj is not None:
             zod_props = _object_pairs(zod_obj, zod_src)
             param_count = len(zod_props)
-            documented = sum(1 for v in zod_props.values() if _has_describe_call(v))
+            documented = sum(1 for v in zod_props.values() if _has_describe_call(v, zod_src, consts))
             param_doc_label = "Zod schema properties have no .describe(...)"
 
     return _finding_with_description_and_param_issues(
@@ -484,6 +546,7 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
             if (
                 method not in REGISTER_METHODS
                 and method not in SINGLE_OBJECT_METHODS
+                and method not in WRAPPER_FACTORY_METHODS
                 and method != LIST_TOOLS_METHOD
             ):
                 continue
@@ -522,6 +585,31 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
                             consts, tool_src, tool_file, tool_line,
                         )
                     )
+                continue
+
+            if method in WRAPPER_FACTORY_METHODS:
+                if len(arg_nodes) != 1:
+                    continue
+                definition, definition_src = _extract_definition_object(arg_nodes[0], src)
+                if definition is None:
+                    continue
+                definition, definition_src = _resolve(definition, definition_src, consts)
+                if definition.type != "object":
+                    continue
+                pairs = _object_pairs(definition, definition_src)
+                name_val = _resolve_str(pairs.get("name"), definition_src, consts)
+                if name_val is None:
+                    continue  # dynamic tool name — can't attribute a finding to it
+                handler_val = pairs.get("handler")
+                handler = handler_val if handler_val is not None and handler_val.type in (
+                    "arrow_function", "function_expression"
+                ) else None
+                findings.append(
+                    _analyze_ts_tool(
+                        name_val, definition, definition_src, None, definition_src, handler, consts,
+                        rel, node.start_point[0] + 1,
+                    )
+                )
                 continue
 
             if method in SINGLE_OBJECT_METHODS:
