@@ -454,7 +454,14 @@ def _find_lowlevel_tools(tree: ast.Module, file: str) -> list[ToolFinding]:
         name_id = func.attr if isinstance(func, ast.Attribute) else (func.id if isinstance(func, ast.Name) else None)
         if name_id != "Tool":
             continue
-        name = _kwarg_str(node, "name") or "<unnamed>"
+        name = _kwarg_str(node, "name")
+        if name is None:
+            # A dynamic name (e.g. `Tool(name=tool.name, ...)` inside a loop over
+            # a registry of tool objects — a real, common pattern for class-based
+            # tool frameworks) can't be attributed to a single finding. Skip it
+            # rather than emit a misleading "<unnamed>" report, matching the TS
+            # analyzer's handling of an equally dynamic tool name.
+            continue
         description = _kwarg_str(node, "description") or ""
         schema_kw = next((kw for kw in node.keywords if kw.arg == "inputSchema"), None)
         param_count = 0

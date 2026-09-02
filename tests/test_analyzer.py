@@ -244,6 +244,32 @@ def test_lowlevel_tool_constructor_detected(tmp_path):
     assert report.tools[0].issues == []
 
 
+def test_lowlevel_tool_with_dynamic_name_is_skipped_not_unnamed(tmp_path):
+    # A common class-based tool framework: a registry of tool objects, converted
+    # to Tool(...) constructor calls in a loop. The name isn't a string literal,
+    # so it can't be attributed to a single finding — must be skipped entirely,
+    # not misreported as a fabricated "<unnamed>" tool.
+    write(tmp_path, "server.py", """
+        from mcp.types import Tool
+
+        TOOLS = {"chat": ChatTool()}
+
+        def handle_list_tools():
+            tools = []
+            for tool in TOOLS.values():
+                tools.append(
+                    Tool(
+                        name=tool.name,
+                        description=tool.description,
+                        inputSchema=tool.get_input_schema(),
+                    )
+                )
+            return tools
+        """)
+    report = analyze_repo(tmp_path)
+    assert report.tools == []
+
+
 def test_unparseable_file_is_flagged_not_silently_skipped(tmp_path):
     write(tmp_path, "server.py", """
         def broken(
