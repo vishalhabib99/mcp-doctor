@@ -9,6 +9,8 @@ A static analysis CLI that audits **MCP (Model Context Protocol) server** implem
 
 The MCP ecosystem is growing faster than the conventions around building a *good* server have settled. Most servers are hand-written in an afternoon and never checked against anything. `mcp-doctor` is a linter for that gap — point it at a repo, get a score and a concrete list of what to fix.
 
+Dogfooded against 15+ real, in-the-wild MCP servers (up to 16k★) — 12 genuine bugs found and fixed, one PR [merged upstream](https://github.com/homeassistant-ai/ha-mcp/pull/2327) into a 4.5k★ repo. See [Real-world spot check](#real-world-spot-check) below.
+
 ```
 $ mcp-doctor examples/bad_server
 mcp-doctor report
@@ -114,6 +116,27 @@ Audits both Python and TypeScript/JavaScript servers in the same repo. Python de
 
 ## Real-world spot check
 
+Run against 15+ real MCP servers in the wild, not just the fixtures in `examples/`. Every fix below was verified against the actual repo before/after, not just against a synthetic test case.
+
+| Repo | Stars | Lang | What mcp-doctor found |
+|---|---|---|---|
+| [`ha-mcp`](https://github.com/homeassistant-ai/ha-mcp) | 4.5k | Python | Secret-scanner false positives on test fixtures; missing `Annotated[..., Field(description=...)]` recognition — real doc coverage was 89%, not the falsely-reported 55%. Fix led to a [merged upstream PR](https://github.com/homeassistant-ai/ha-mcp/pull/2327). |
+| [`firecrawl-mcp-server`](https://github.com/mendableai/firecrawl-mcp-server) | 7k | TS | Reported **0 of 28 tools** — didn't recognize the community `fastmcp` package's single-object `addTool({...})` call shape. Fixed → real 84%/B. |
+| [`exa-mcp-server`](https://github.com/exa-labs/exa-mcp-server) | 5k | TS | 2 headline tools invisible (`name \|\| "default"` fallback idiom treated as fully dynamic). 9→11 tools found. |
+| [`linkedin-mcp-server`](https://github.com/stickerdaniel/linkedin-mcp-server) | 3.3k | Python | 13 of 19 tools falsely flagged undocumented — didn't know FastMCP's `exclude_args` hides a param from the schema entirely. 93%→100%. |
+| [`tradingview-mcp`](https://github.com/atilaahmettaner/tradingview-mcp) | 4.3k | Python | Delegation blind spot on 12 of 39 tools (real error handling lived 2-3 calls deep). Built transitive, alias-aware delegation resolution. 93%→99%. |
+| [`Figma-Context-MCP`](https://github.com/GLips/Figma-Context-MCP) | 15k | TS | Reported **0 of 2 tools** — cross-file `const` object registered via member-expression, not a same-file reference. Fixed → 2/2 found. |
+| [`mcp-chrome`](https://github.com/hangwin/mcp-chrome) | 12k | TS | Reported **0 of 27 tools** — low-level `Server` SDK's static-array registration style wasn't supported at all. Added real support → 27/27, 100%/A. |
+| [`pal-mcp-server`](https://github.com/BeehiveInnovations/pal-mcp-server) | 11k | Python | Class-based tool registry fabricated a bogus `"<unnamed>"` tool instead of correctly skipping a dynamic name. Fixed to skip, not guess. |
+| [`DesktopCommanderMCP`](https://github.com/wonderwhy-er/DesktopCommanderMCP) | 9k | TS | Reported **0 of 26 tools** (hidden behind `.filter()`); template-literal descriptions were discarded wholesale. Fixed both → 26/26, 98%/A. |
+| [`SurfSense`](https://github.com/MODSetter/SurfSense) | 16k | Python | All 28 tools falsely flagged for missing error handling — delegation through `obj.method()` calls wasn't followed. 89%→98%. |
+| [`hexstrike-ai`](https://github.com/0x4m4/hexstrike-ai) | 11k | Python | Clean pass on 151 tools — confirmed 2 genuine bugs in the repo itself (a shadowed duplicate tool name, a bare `except:`), correctly held off filing given low maintainer activity. |
+| [`Windows-MCP`](https://github.com/CursorTouch/Windows-MCP) | 6k | Python | All 19 tools falsely flagged — didn't know FastMCP strips `Context`-typed params from the schema before it ever reaches the model. 89%→90%. |
+| [`git-mcp`](https://github.com/idosal/git-mcp) | 8k | TS | Correctly reports 0 tools — genuinely no fixed tool catalog to audit (per-repo dynamic tool generation). |
+
+<details>
+<summary>Full write-up of each pass (methodology, root cause, verification)</summary>
+
 Run against three servers from the official [`modelcontextprotocol/servers`](https://github.com/modelcontextprotocol/servers) repo:
 
 - **`src/fetch`** — **100% / A**. Clean.
@@ -146,6 +169,8 @@ An eleventh pass against `MODSetter/SurfSense` (16k+ stars, Python; audited via 
 A twelfth pass covered three more real repos. `0x4m4/hexstrike-ai` (11k+ stars, Python, 151 tools) came back clean on the mcp-doctor side — a useful data point on its own, since it's the largest real repo audited so far and every finding held up on manual verification: a genuine duplicate tool name (two different `@mcp.tool()`-decorated functions both named `httpx_probe`, so FastMCP silently lets the second shadow the first — the tech-detection variant is unreachable) and a genuine bare `except:` swallowing a JSON-parse error. Correctly held off filing either upstream: the maintainer hasn't merged any of the last 10 PRs and hasn't committed in a month, so the odds of engagement are low enough that it wouldn't produce the kind of real back-and-forth that made the `ha-mcp` arc valuable. `idosal/git-mcp` (8k+ stars, TypeScript) reports 0 tools correctly, not a bug: it's a multi-tenant service that generates a different tool set per proxied GitHub repo (different handler classes — `DefaultRepoHandler`, `ThreejsRepoHandler`, etc.) — there's no one fixed catalog to audit, the same category of correct decline as `playwright-mcp`/`XcodeBuildMCP`, just for a different underlying reason.
 
 The pass against `CursorTouch/Windows-MCP` (6k+ stars, Python) did find a real bug, and a suspicious one: every one of its 19 tools was false-flagged for undocumented parameters — another 100% hit rate worth investigating rather than trusting (the same instinct that paid off on the SurfSense pass). The cause: every tool takes a `ctx: Context = None` parameter (FastMCP's context-injection convention), and the parameter counter didn't know that FastMCP strips `Context`-typed parameters from the tool's exposed schema entirely before it's ever built — verified directly against fastmcp's own source (`function_parsing.py`'s `without_injected_parameters`). So a tool with every real parameter fully documented via `Annotated[T, Field(description=...)]` still failed the count, since the always-undocumented, always-uncountable `ctx` param was being counted as a real one needing docs. Fixed by giving `Context`-typed parameters (including `Context | None`/`Optional[Context]`) the same treatment `self`/`cls`/`exclude_args` already get. Re-verified: 89%→90%/A on Windows-MCP, with the tools that really were fully documented now correctly cleared and the ones that genuinely aren't (documented only in prose on the tool description, not per-parameter) still correctly flagged. 1 new regression test (56 total); also fixed a real, previously-invisible improvement on `ha-mcp` (97%→98%, same root cause, unnoticed until now) with no regression on `pal-mcp-server`, `tradingview-mcp`, or `SurfSense`.
+
+</details>
 
 ## Known limitations
 
