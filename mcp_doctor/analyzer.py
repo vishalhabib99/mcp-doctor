@@ -233,18 +233,31 @@ def _contains_try_except(node: ast.AST) -> tuple[bool, bool]:
 
 
 def _direct_call_names(node: ast.AST, import_aliases: dict[str, str] | None = None) -> set[str]:
-    """Bare-name function calls (`foo(...)`, not `self.foo(...)`) directly
-    inside a node's subtree, resolved through `from x import y as z`-style
-    aliases back to the real function name (e.g. `_compare_strategies()` in
-    the caller resolves to `compare_strategies`, the name it's actually
-    defined under) so registry lookups keyed by def name still hit."""
+    """Direct calls inside a node's subtree, by the name they'd be `def`-ed
+    under: bare-name calls (`foo(...)`) by their name, and attribute/method
+    calls (`self.foo(...)`, `client.request(...)`) by the attribute name —
+    a real, common delegation shape (a service/context object's method doing
+    the actual work) that's just as legitimate a place for error handling to
+    live as a bare function. Bare names are additionally resolved through
+    `from x import y as z`-style aliases back to the real function name (e.g.
+    `_compare_strategies()` in the caller resolves to `compare_strategies`,
+    the name it's actually defined under) so registry lookups keyed by def
+    name still hit. Both forms are name-only, not type- or import-resolved —
+    a method call is matched against ANY def/method in the repo with that
+    name, so a very common method name (`get`, `run`, `close`) can collide
+    with an unrelated definition; an accepted risk, the same simplification
+    already applied to bare-name collisions across files."""
     names = {
         n.func.id for n in ast.walk(node)
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
     }
-    if not import_aliases:
-        return names
-    return {import_aliases.get(n, n) for n in names}
+    if import_aliases:
+        names = {import_aliases.get(n, n) for n in names}
+    method_names = {
+        n.func.attr for n in ast.walk(node)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+    }
+    return names | method_names
 
 
 def _build_import_aliases(trees: list[tuple[str, ast.Module]]) -> dict[str, str]:

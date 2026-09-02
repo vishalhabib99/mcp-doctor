@@ -146,6 +146,45 @@ def test_delegation_to_handled_helper_multi_hop_cross_file_clears_error_handling
     assert "error_handling" not in checks
 
 
+def test_delegation_through_method_call_clears_error_handling(tmp_path):
+    # Mirrors the real pattern found dogfooding MODSetter/SurfSense: a tool
+    # calls a bare helper function, which delegates to an object *method*
+    # (`client.request(...)`) rather than another bare function — the actual
+    # try/except lives inside that method. All 28 of the repo's real tools
+    # used this shape and were false-flagged before method calls were
+    # resolved, since only bare-name calls (`foo(...)`) were followed.
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        from service import run_scraper
+        mcp = FastMCP("x")
+
+        @mcp.tool()
+        def scrape(query: str) -> str:
+            \"\"\"Scrape something.
+
+            Args:
+                query: The search query.
+            \"\"\"
+            return run_scraper(query)
+        """)
+    write(tmp_path, "service.py", """
+        class Client:
+            def request(self, query):
+                try:
+                    return {"query": query}
+                except Exception:
+                    return {}
+
+        def run_scraper(query):
+            client = Client()
+            return client.request(query)
+        """)
+    report = analyze_repo(tmp_path)
+    tool = next(t for t in report.tools if t.name == "scrape")
+    checks = {i.check for i in tool.issues}
+    assert "error_handling" not in checks
+
+
 def test_delegation_through_aliased_import_clears_error_handling(tmp_path):
     # Mirrors the real pattern found dogfooding against tradingview-mcp:
     # `from strategies import compare_strategies as _compare_strategies`,
