@@ -11,6 +11,7 @@ pytestmark = pytest.mark.skipif(not TS_AVAILABLE, reason="tree_sitter not instal
 
 def write(tmp_path: Path, name: str, content: str) -> Path:
     p = tmp_path / name
+    p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(dedent(content))
     return p
 
@@ -176,6 +177,76 @@ def test_add_tool_dynamic_config_is_skipped_not_crashed(tmp_path):
         """)
     findings, _ = find_ts_tools(tmp_path)
     assert findings == []
+
+
+def test_cross_file_member_expression_name_and_description(tmp_path):
+    write(tmp_path, "tools/get-figma-data-tool.ts", """
+        import { z } from "zod";
+
+        const parametersSchema = z.object({
+          fileKey: z.string().describe("The Figma file key"),
+        });
+
+        export const getFigmaDataTool = {
+          name: "get_figma_data",
+          description: "Get comprehensive Figma file data",
+          parametersSchema,
+          handler: async () => {},
+        } as const;
+        """)
+    write(tmp_path, "server.ts", """
+        import { getFigmaDataTool } from "./tools/get-figma-data-tool.js";
+
+        server.registerTool(
+          getFigmaDataTool.name,
+          {
+            title: "Get Figma Data",
+            description: getFigmaDataTool.description,
+            inputSchema: getFigmaDataTool.parametersSchema,
+          },
+          async (params) => getFigmaDataTool.handler(params),
+        );
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert len(findings) == 1
+    tool = findings[0]
+    assert tool.name == "get_figma_data"
+    checks = {i.check for i in tool.issues}
+    assert "description" not in checks
+    assert "param_docs" not in checks
+
+
+def test_cross_file_dynamic_description_is_skipped_not_crashed(tmp_path):
+    # `fooTool.getDescription(x)` — a genuine runtime call, not a property
+    # access. Must not be resolved to a false description; still a real,
+    # correctly-attributed finding (not a dropped tool).
+    write(tmp_path, "tools/download-tool.ts", """
+        function getDescription(dir) {
+          return dir ? `Download to ${dir}` : "Download images";
+        }
+
+        export const downloadTool = {
+          name: "download_figma_images",
+          getDescription,
+        } as const;
+        """)
+    write(tmp_path, "server.ts", """
+        import { downloadTool } from "./tools/download-tool.js";
+
+        server.registerTool(
+          downloadTool.name,
+          {
+            description: downloadTool.getDescription(options.imageDir),
+            inputSchema: z.object({}),
+          },
+          async () => {},
+        );
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert len(findings) == 1
+    tool = findings[0]
+    assert tool.name == "download_figma_images"
+    assert any(i.check == "description" for i in tool.issues)
 
 
 def test_analyze_repo_includes_ts_tools(tmp_path):
