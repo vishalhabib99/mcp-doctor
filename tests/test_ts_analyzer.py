@@ -333,6 +333,77 @@ def test_low_level_server_list_tools_deduped_across_call_sites(tmp_path):
     assert findings[0].name == "chrome_screenshot"
 
 
+def test_list_tools_handler_with_filter_and_template_description(tmp_path):
+    # Two real patterns found dogfooding wonderwhy-er/DesktopCommanderMCP:
+    # (1) the base tools array is filtered before being returned, which must
+    #     not make the whole list look dynamic; (2) a description built as a
+    #     template literal with one interpolated suffix must not be discarded
+    #     entirely just because it isn't a fully static string.
+    write(tmp_path, "server.ts", """
+        import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+
+        const CMD_PREFIX = `Use with care.`;
+
+        function shouldIncludeTool(name) {
+          return true;
+        }
+
+        server.setRequestHandler(ListToolsRequestSchema, async () => {
+          const allTools = [
+            {
+              name: "read_file",
+              description: `Read a file from disk. ${CMD_PREFIX}`,
+              inputSchema: { type: "object", properties: {}, required: [] },
+            },
+          ];
+          const filteredTools = allTools.filter(tool => shouldIncludeTool(tool.name));
+          return { tools: filteredTools };
+        });
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert len(findings) == 1
+    tool = findings[0]
+    assert tool.name == "read_file"
+    assert not any(i.check == "description" for i in tool.issues)
+
+
+def test_list_tools_handler_zod_to_json_schema_unwrapped(tmp_path):
+    # `inputSchema: zodToJsonSchema(SomeArgsSchema)` — the zod-to-json-schema
+    # package, used to keep one Zod source of truth while serving raw JSON
+    # Schema over the low-level SDK. Must still check param docs by unwrapping
+    # to the underlying Zod schema, not go blind because it's not a literal.
+    write(tmp_path, "schemas.ts", """
+        import { z } from "zod";
+
+        export const ReadFileArgsSchema = z.object({
+          path: z.string().describe("Path to the file"),
+          offset: z.number().optional(),
+        });
+        """)
+    write(tmp_path, "server.ts", """
+        import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+        import { zodToJsonSchema } from "zod-to-json-schema";
+        import { ReadFileArgsSchema } from "./schemas.js";
+
+        server.setRequestHandler(ListToolsRequestSchema, async () => ({
+          tools: [
+            {
+              name: "read_file",
+              description: "Read a file from disk.",
+              inputSchema: zodToJsonSchema(ReadFileArgsSchema),
+            },
+          ],
+        }));
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert len(findings) == 1
+    tool = findings[0]
+    assert tool.param_count == 2
+    param_issue = next(i for i in tool.issues if i.check == "param_docs")
+    assert "1/2" in param_issue.message
+    assert "Zod schema properties" in param_issue.message
+
+
 def test_analyze_repo_includes_ts_tools(tmp_path):
     write(tmp_path, "server.ts", """
         server.registerTool("x", { description: "Does x thing", inputSchema: z.object({}) }, async () => {

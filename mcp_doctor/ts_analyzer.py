@@ -80,11 +80,14 @@ def _string_value(node, src: bytes) -> str | None:
         frag = next((c for c in node.children if c.type == "string_fragment"), None)
         return _text(frag, src) if frag is not None else ""
     if node.type == "template_string":
-        # Only trust a template literal with no ${...} interpolation.
-        if any(c.type == "template_substitution" for c in node.children):
-            return None
-        frag = next((c for c in node.children if c.type == "string_fragment"), None)
-        return _text(frag, src) if frag is not None else ""
+        # Join every literal fragment, dropping `${...}` substitutions rather
+        # than discarding the whole string. A description built as static
+        # boilerplate plus one interpolated suffix (e.g. a shared
+        # `${CMD_PREFIX_DESCRIPTION}` appended to every tool) is common and
+        # still has real, checkable text — only the dynamic part is unknown,
+        # and omitting it can only under-count length, never fabricate content.
+        fragments = [_text(c, src) for c in node.children if c.type == "string_fragment"]
+        return "".join(fragments)
     return None
 
 
@@ -136,6 +139,26 @@ def _zod_object_arg(node):
                     if a.type == "object":
                         return a
     return None
+
+
+def _zod_wrapped_schema(node, src: bytes, consts: dict):
+    """If a raw-JSON-Schema `inputSchema` value is actually
+    `zodToJsonSchema(SomeArgsSchema)` (the well-known `zod-to-json-schema`
+    package), resolve to the underlying Zod schema argument so it can still be
+    analyzed as one. Returns (node, src) — never None for the tuple itself,
+    though the node may be None if there's nothing to resolve."""
+    if node is None or node.type != "call_expression":
+        return None, src
+    func = node.child_by_field_name("function")
+    if func is None or func.type != "identifier" or _text(func, src) != "zodToJsonSchema":
+        return None, src
+    args_node = node.child_by_field_name("arguments")
+    if args_node is None:
+        return None, src
+    arg_nodes = [c for c in args_node.children if c.type not in ("(", ")", ",")]
+    if not arg_nodes:
+        return None, src
+    return _resolve(arg_nodes[0], src, consts)
 
 
 def _find_tools_array(handler_node, src: bytes):
@@ -232,6 +255,21 @@ def _resolve(node, src: bytes, consts: dict[str, tuple["Node", bytes]], depth: i
                 prop_val = pairs.get(_text(prop_node, src))
                 if prop_val is not None:
                     return _resolve(prop_val, resolved_src, consts, depth + 1)
+    if node.type == "call_expression":
+        # `allTools.filter(tool => shouldIncludeTool(tool.name))` — a common way
+        # to conditionally hide some tools from a base list at list-time. The
+        # predicate can't be evaluated statically, but filtering never invents a
+        # tool or changes its definition, only whether it's visible at runtime —
+        # so for auditing purposes, resolve straight through to the base array
+        # rather than treating the whole list as dynamic and skipping everything
+        # in it.
+        func = node.child_by_field_name("function")
+        if func is not None and func.type == "member_expression":
+            prop = func.child_by_field_name("property")
+            obj_node = func.child_by_field_name("object")
+            if prop is not None and prop.type == "property_identifier" and obj_node is not None:
+                if _text(prop, src) == "filter":
+                    return _resolve(obj_node, src, consts, depth + 1)
     return node, src
 
 
@@ -342,25 +380,40 @@ def _analyze_json_schema_tool(
     schema, resolved_schema_src = (
         _resolve(schema_node, schema_src, consts) if schema_node is not None else (None, schema_src)
     )
-    props: dict[str, "Node"] = {}
+
+    param_count = 0
+    documented = 0
+    param_doc_label = "JSON-schema properties have no description"
+
     if schema is not None and schema.type == "object":
         properties_node = _object_pairs(schema, resolved_schema_src).get("properties")
         if properties_node is not None:
             resolved_props, resolved_props_src = _resolve(properties_node, resolved_schema_src, consts)
             if resolved_props.type == "object":
                 props = _object_pairs(resolved_props, resolved_props_src)
-
-    documented = 0
-    for v in props.values():
-        v_resolved, v_resolved_src = _resolve(v, resolved_schema_src, consts)
-        if v_resolved.type == "object":
-            prop_desc = _object_pairs(v_resolved, v_resolved_src).get("description")
-            if _string_value(prop_desc, v_resolved_src):
-                documented += 1
+                param_count = len(props)
+                for v in props.values():
+                    v_resolved, v_resolved_src = _resolve(v, resolved_props_src, consts)
+                    if v_resolved.type == "object":
+                        prop_desc = _object_pairs(v_resolved, v_resolved_src).get("description")
+                        if _string_value(prop_desc, v_resolved_src):
+                            documented += 1
+    elif schema is not None and schema.type == "call_expression":
+        # `inputSchema: zodToJsonSchema(SomeArgsSchema)` — the well-known
+        # zod-to-json-schema package, used to keep one Zod schema as the single
+        # source of truth while serving raw JSON Schema over the low-level SDK.
+        # Unwrap to the underlying Zod schema so param docs are still checked,
+        # rather than going blind on every tool that uses this (common) idiom.
+        zod_node, zod_src = _zod_wrapped_schema(schema, resolved_schema_src, consts)
+        zod_obj = _zod_object_arg(zod_node)
+        if zod_obj is not None:
+            zod_props = _object_pairs(zod_obj, zod_src)
+            param_count = len(zod_props)
+            documented = sum(1 for v in zod_props.values() if _has_describe_call(v))
+            param_doc_label = "Zod schema properties have no .describe(...)"
 
     return _finding_with_description_and_param_issues(
-        name, file, line, description, len(props), documented,
-        "JSON-schema properties have no description",
+        name, file, line, description, param_count, documented, param_doc_label,
     )
 
 
