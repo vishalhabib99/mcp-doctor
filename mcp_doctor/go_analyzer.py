@@ -42,6 +42,25 @@ literal (`ToolConversationsHistory = "conversations_history"`), which is
 resolved the same name-based, ambiguity-safe way as the struct/function
 registries above.
 
+Also recognizes a project-local factory function wrapping registration —
+verified against `github/github-mcp-server` (the official, 32k+-star GitHub
+MCP server), which builds every tool through its own generic helper rather
+than calling `AddTool` at each definition site:
+
+    st := NewTool(toolsetMeta, mcp.Tool{Name: "...", Description: t("KEY", "...")},
+        scopeAccess, handler)
+
+Any call passing an `mcp.Tool{...}`/`&mcp.Tool{...}` literal with a *literal*
+`Name` field is recognized regardless of the outer function's name — the
+`AddTool` name itself was never load-bearing, just the common case. A `Name`
+built from a variable (as in that repo's handful of shared single-field-update
+factories, e.g. `prUpdateTool`) is left unresolved rather than guessed at,
+same as the existing dynamic-name skip elsewhere in this module. The
+`Description` field also resolves the common i18n convention
+`t(key, defaultValue string) string` (confirmed against that repo's own
+`TranslationHelperFunc` signature) to its literal fallback argument, since
+that's the real text a model sees whenever the key isn't translated.
+
 Error handling is intentionally not checked for Go tools at all (v1): unlike
 Python's try/except or TS's try/catch, Go has no exception mechanism — a
 handler communicates failure via its `error` return value, which the SDK
@@ -136,6 +155,35 @@ def _composite_fields(node, src: bytes) -> dict[str, "Node"]:
         if key_inner is not None and key_inner.type == "identifier":
             fields[_text(key_inner, src)] = value_inner
     return fields
+
+
+def _composite_type_name(node, src: bytes) -> str | None:
+    """Text of a `composite_literal`'s type field, e.g. 'mcp.Tool' for
+    `mcp.Tool{...}`. None for anything else, including a bare `literal_value`
+    (which has no type of its own — see `_composite_fields`)."""
+    if node is None or node.type != "composite_literal":
+        return None
+    type_node = node.child_by_field_name("type")
+    return _text(type_node, src) if type_node is not None else None
+
+
+def _resolve_string_field(node, src: bytes) -> str | None:
+    """Resolve a string literal directly, or — for the common i18n convention
+    `t(key, defaultValue string) string` (verified against
+    `github/github-mcp-server`'s own `TranslationHelperFunc` signature) — the
+    literal default-value argument of a call whose last argument is a string
+    literal. A non-literal fallback or dynamic key is left unresolved rather
+    than guessed at."""
+    direct = _string_value(node, src)
+    if direct is not None:
+        return direct
+    if node is not None and node.type == "call_expression":
+        args_node = node.child_by_field_name("arguments")
+        if args_node is not None:
+            call_args = [c for c in args_node.children if c.type not in ("(", ")", ",")]
+            if call_args:
+                return _string_value(call_args[-1], src)
+    return None
 
 
 def _unwrap_pointer(node):
@@ -308,7 +356,7 @@ def _analyze_new_tool_call(new_tool_call, src: bytes, const_registry: dict[str, 
         opt_args = [c for c in opt_args_node.children if c.type not in ("(", ")", ",")] if opt_args_node is not None else []
         if method == "WithDescription":
             if opt_args:
-                description = _string_value(opt_args[0], src) or ""
+                description = _resolve_string_field(opt_args[0], src) or ""
         elif method in MARK3LABS_PARAM_OPTIONS:
             param_count += 1
             has_desc = any(
@@ -387,17 +435,21 @@ def _resolve_input_schema(schema_value, src: bytes) -> tuple[int, int] | None:
     return param_count, documented
 
 
-def _handler_third_param_type(handler_node) -> "Node | None":
+def _handler_last_param_type(handler_node) -> "Node | None":
     """For a `func(ctx, req, args ArgsType) (...)` literal or matching named
-    function declaration, return the type node of the third parameter — the
-    generic `ToolHandlerFor[In, Out]`'s `In`, i.e. the tool's argument struct."""
+    function declaration, return the type node of the *last* parameter — the
+    generic `ToolHandlerFor[In, Out]`'s `In`, i.e. the tool's argument struct.
+    Taking the last parameter (not literally the third) also covers a
+    dependency-injecting wrapper's extra leading param, e.g.
+    `func(ctx, deps ToolDependencies, req, args ArgsType) (...)` — verified
+    against `github/github-mcp-server`'s own local handler shape."""
     params = handler_node.child_by_field_name("parameters")
     if params is None:
         return None
     decls = [c for c in params.children if c.type == "parameter_declaration"]
     if len(decls) < 3:
         return None
-    return decls[2].child_by_field_name("type")
+    return decls[-1].child_by_field_name("type")
 
 
 def _resolve_handler(node, func_registry: dict, src: bytes, depth: int = 0):
@@ -506,14 +558,15 @@ def find_go_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
             if node.type != "call_expression":
                 continue
             func = node.child_by_field_name("function")
-            if _selector_field(func) != "AddTool":
-                continue
+            is_add_tool = _selector_field(func) == "AddTool"
             args_node = node.child_by_field_name("arguments")
             if args_node is None:
                 continue
             arg_nodes = [c for c in args_node.children if c.type not in ("(", ")", ",")]
+            if not is_add_tool and not arg_nodes:
+                continue
 
-            if len(arg_nodes) == 2:
+            if is_add_tool and len(arg_nodes) == 2:
                 # mark3labs/mcp-go's fluent-builder style: `s.AddTool(mcp.NewTool(...), handler)`.
                 new_tool_call = arg_nodes[0]
                 if new_tool_call.type != "call_expression" or _selector_field(new_tool_call.child_by_field_name("function")) != "NewTool":
@@ -556,18 +609,36 @@ def find_go_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
                 findings.append(finding)
                 continue
 
-            if len(arg_nodes) != 3:
-                continue
-            tool_arg = _unwrap_pointer(arg_nodes[1])
+            if is_add_tool:
+                if len(arg_nodes) != 3:
+                    continue
+                tool_arg = _unwrap_pointer(arg_nodes[1])
+                handler_arg = arg_nodes[2]
+            else:
+                # A project-local factory wrapping registration — see module
+                # docstring. Recognize any call passing an `mcp.Tool{...}`/
+                # `&mcp.Tool{...}` literal, regardless of the outer function's
+                # name; the handler is taken as the call's last argument,
+                # matching every real factory shape seen so far.
+                tool_arg = None
+                for a in arg_nodes:
+                    unwrapped = _unwrap_pointer(a)
+                    if _composite_type_name(unwrapped, src) == "mcp.Tool":
+                        tool_arg = unwrapped
+                        break
+                if tool_arg is None:
+                    continue
+                handler_arg = arg_nodes[-1]
+
             if tool_arg is None or tool_arg.type != "composite_literal":
                 continue
             fields = _composite_fields(tool_arg, src)
             name_val = _string_value(fields.get("Name"), src)
             if name_val is None:
                 continue  # dynamic/referenced tool name — can't attribute a finding to it
-            description = _string_value(fields.get("Description"), src) or ""
+            description = _resolve_string_field(fields.get("Description"), src) or ""
 
-            handler_node = _resolve_handler(arg_nodes[2], func_registry, src)
+            handler_node = _resolve_handler(handler_arg, func_registry, src)
 
             param_count = 0
             documented = 0
@@ -579,7 +650,7 @@ def find_go_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
                 param_count, documented = explicit
                 param_doc_label = "input-schema properties have no Description"
             elif handler_node is not None:
-                type_node = _handler_third_param_type(handler_node)
+                type_node = _handler_last_param_type(handler_node)
                 if type_node is not None and type_node.type == "type_identifier":
                     entry = struct_registry.get(_text(type_node, src))
                     if entry is not None:

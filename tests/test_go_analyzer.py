@@ -412,3 +412,105 @@ def test_same_const_name_declared_twice_with_different_values_is_not_resolved(tm
         """)
     findings, _ = find_go_tools(tmp_path)
     assert findings == []
+
+
+def test_factory_wrapped_tool_with_literal_name_is_detected(tmp_path):
+    # github/github-mcp-server's own shape: a project-local generic `NewTool`
+    # helper, not a literal `.AddTool(...)` call, wrapping the mcp.Tool literal.
+    write(tmp_path, "server.go", """
+        package main
+
+        type searchArgs struct {
+            Query string `json:"query" jsonschema:"search terms"`
+        }
+
+        func registerSearch() inventory.ServerTool {
+            return NewTool(
+                ToolsetMetadataSearch,
+                mcp.Tool{
+                    Name:        "search_repositories",
+                    Description: "Search GitHub repositories",
+                },
+                scopes.PublicRead(scopes.Repo),
+                func(ctx context.Context, deps ToolDependencies, req *mcp.CallToolRequest, args searchArgs) (*mcp.CallToolResult, any, error) {
+                    return nil, nil, nil
+                },
+            )
+        }
+        """)
+    findings, _ = find_go_tools(tmp_path)
+    assert len(findings) == 1
+    tool = findings[0]
+    assert tool.name == "search_repositories"
+    assert tool.param_count == 1
+    checks = {i.check for i in tool.issues}
+    assert "description" not in checks
+    assert "param_docs" not in checks
+
+
+def test_factory_wrapped_tool_with_dynamic_name_is_skipped(tmp_path):
+    # The same factory called from a shared single-field-update helper (the
+    # real `prUpdateTool` shape) — Name comes from a function parameter, not a
+    # literal, so it can't be attributed to any one real tool and is skipped
+    # rather than guessed at.
+    write(tmp_path, "server.go", """
+        package main
+
+        func prUpdateTool(name string) inventory.ServerTool {
+            return NewTool(
+                ToolsetMetadataPullRequests,
+                mcp.Tool{
+                    Name:        name,
+                    Description: "Updates a field on a pull request",
+                },
+                scopes.RequireAll(scopes.Repo),
+                handler,
+            )
+        }
+        """)
+    findings, _ = find_go_tools(tmp_path)
+    assert findings == []
+
+
+def test_translation_helper_literal_fallback_resolved_as_description(tmp_path):
+    # `t(key, defaultValue string) string` — verified against
+    # github-mcp-server's own TranslationHelperFunc signature. The literal
+    # fallback is the real text a model sees whenever the key isn't translated.
+    write(tmp_path, "server.go", """
+        package main
+
+        func main() {
+            s.AddTool(mcp.NewTool("list_labels",
+                mcp.WithDescription(t("TOOL_LIST_LABELS_DESCRIPTION", "List labels in a repository")),
+            ), handler)
+        }
+        """)
+    findings, _ = find_go_tools(tmp_path)
+    tool = findings[0]
+    assert tool.description_text == "List labels in a repository"
+    assert not any(i.check == "description" for i in tool.issues)
+
+
+def test_translation_helper_dynamic_fallback_not_guessed(tmp_path):
+    # When the fallback itself is a variable (built from runtime branching,
+    # as in github-mcp-server's search_issues), it's genuinely unresolvable —
+    # correctly left blank rather than fabricated.
+    write(tmp_path, "server.go", """
+        package main
+
+        func registerSearchIssues() inventory.ServerTool {
+            return NewTool(
+                ToolsetMetadataIssues,
+                mcp.Tool{
+                    Name:        "search_issues",
+                    Description: t("TOOL_SEARCH_ISSUES_DESCRIPTION", toolDescription),
+                },
+                scopes.PublicRead(scopes.Repo),
+                handler,
+            )
+        }
+        """)
+    findings, _ = find_go_tools(tmp_path)
+    tool = findings[0]
+    assert tool.description_text == ""
+    assert any(i.check == "description" for i in tool.issues)

@@ -9,7 +9,7 @@ A static analysis CLI that audits **MCP (Model Context Protocol) server** implem
 
 The MCP ecosystem is growing faster than the conventions around building a *good* server have settled. Most servers are hand-written in an afternoon and never checked against anything. `mcp-doctor` is a linter for that gap — point it at a repo, get a score and a concrete list of what to fix.
 
-Dogfooded against 19+ real, in-the-wild MCP servers across Python, TypeScript, and Go (up to 50k★) — 17 genuine bugs found and fixed post-release, plus Go support itself (both the official SDK's style and `mark3labs/mcp-go`'s) built and verified against real Go servers before ever shipping. One fix led to a PR [merged upstream](https://github.com/homeassistant-ai/ha-mcp/pull/2327) into a 4.5k★ repo. See [Real-world spot check](#real-world-spot-check) below.
+Dogfooded against 20+ real, in-the-wild MCP servers across Python, TypeScript, and Go (up to 50k★, including GitHub's own official server at 32.6k★) — 18 genuine bugs found and fixed post-release, plus Go support itself (both the official SDK's style and `mark3labs/mcp-go`'s) built and verified against real Go servers before ever shipping. One fix led to a PR [merged upstream](https://github.com/homeassistant-ai/ha-mcp/pull/2327) into a 4.5k★ repo. See [Real-world spot check](#real-world-spot-check) below.
 
 ```
 $ mcp-doctor examples/bad_server
@@ -150,6 +150,7 @@ Run against 15+ real MCP servers in the wild, not just the fixtures in `examples
 | [`n8n-mcp`](https://github.com/czlonkowski/n8n-mcp) | 23k | TS | Found (and fixed) a real correctness bug independent of this repo: an unrecognized `{ tools }` JS shorthand property led to a same-named local variable elsewhere in the file being silently resolved instead — a wrong answer, not just a missing one. Still correctly reports 0 tools here; the real registered set is assembled via runtime-only `.push()`/`.map()` logic too dynamic to safely resolve. |
 | [`xiaohongshu-mcp`](https://github.com/xpzouying/xiaohongshu-mcp) | 15.6k | Go | First real Go server audited — used to build and verify Go language support itself (the official `modelcontextprotocol/go-sdk`'s `AddTool` style, including every handler being wrapped in a `withPanicRecovery(...)` helper call, which had to be unwrapped to find the real handler). 0→18 tools found, 99%/A. |
 | [`slack-mcp-server`](https://github.com/korotovsky/slack-mcp-server) | 1.8k | Go | Second Go server audited — used to build and verify `mark3labs/mcp-go`'s older fluent-builder style, a real, distinct registration pattern from the official SDK. Params cross-checked by hand against source. 0→21 tools found, 100%/A. |
+| [`github-mcp-server`](https://github.com/github/github-mcp-server) | 32.6k | Go | Official GitHub-maintained server. Reported **0 of 114+ tools** — every tool built via a project-local generic `NewTool(...)` factory wrapping the official SDK's `mcp.Tool{...}` literal, never a literal `.AddTool(...)` call, plus a dependency-injecting `(ctx, deps, req, args)` handler shape and `t(key, fallback)`-style i18n descriptions. Fixed all three, verified param counts and descriptions by hand → 0→114 tools, 98%/A. |
 
 <details>
 <summary>Full write-up of each pass (methodology, root cause, verification)</summary>
