@@ -1,0 +1,19 @@
+[
+  {"owner": "homeassistant-ai", "repo": "ha-mcp", "language": "Python"},
+  {"owner": "mendableai", "repo": "firecrawl-mcp-server", "language": "TS"},
+  {"owner": "exa-labs", "repo": "exa-mcp-server", "language": "TS"},
+  {"owner": "stickerdaniel", "repo": "linkedin-mcp-server", "language": "Python"},
+  {"owner": "atilaahmettaner", "repo": "tradingview-mcp", "language": "Python"},
+  {"owner": "GLips", "repo": "Figma-Context-MCP", "language": "TS"},
+  {"owner": "hangwin", "repo": "mcp-chrome", "language": "TS"},
+  {"owner": "BeehiveInnovations", "repo": "pal-mcp-server", "language": "Python"},
+  {"owner": "wonderwhy-er", "repo": "DesktopCommanderMCP", "language": "TS"},
+  {"owner": "MODSetter", "repo": "SurfSense", "language": "Python", "subdir": "surfsense_mcp"},
+  {"owner": "0x4m4", "repo": "hexstrike-ai", "language": "Python"},
+  {"owner": "CursorTouch", "repo": "Windows-MCP", "language": "Python"},
+  {"owner": "idosal", "repo": "git-mcp", "language": "TS"},
+  {"owner": "ChromeDevTools", "repo": "chrome-devtools-mcp", "language": "TS"},
+  {"owner": "czlonkowski", "repo": "n8n-mcp", "language": "TS"},
+  {"owner": "xpzouying", "repo": "xiaohongshu-mcp", "language": "Go"},
+  {"owner": "korotovsky", "repo": "slack-mcp-server", "language": "Go"}
+]

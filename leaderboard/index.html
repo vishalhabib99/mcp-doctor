@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MCP Server Leaderboard — powered by mcp-doctor</title>
+  <meta name="description" content="Real popular MCP servers, scored for quality and security by mcp-doctor — an open-source static analyzer for Model Context Protocol servers.">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="page-header">
+    <h1>MCP Server Leaderboard</h1>
+    <p class="tagline">
+      Real, popular <a href="https://modelcontextprotocol.io" target="_blank" rel="noopener">MCP servers</a>,
+      scored for quality and security by <a href="https://github.com/vishalhabib99/mcp-doctor" target="_blank" rel="noopener">mcp-doctor</a> —
+      an open-source static analyzer for Python, TypeScript, and Go MCP implementations.
+    </p>
+  </header>
+
+  <main>
+    <section class="methodology" aria-labelledby="methodology-heading">
+      <h2 id="methodology-heading">How this works</h2>
+      <p>
+        Every repo below is cloned fresh and scanned with the current version of
+        <code>mcp-doctor</code> — the same open-source tool anyone can run with
+        <code>pip install mcp-server-lint</code>. Two independent scores are shown:
+      </p>
+      <ul>
+        <li><strong>Quality</strong> — tool descriptions, parameter docs, error handling, README/test/license coverage.</li>
+        <li><strong>Security</strong> — prompt-injection-prone tool descriptions, dangerous dynamic execution, SSRF-prone outbound requests, unsafe deserialization, hardcoded secrets.</li>
+      </ul>
+      <p>
+        <strong>This page shows grades only, never raw finding details, for any repo other than mcp-doctor's own.</strong>
+        A security grade tells you it's worth a look, not exactly where — publishing exact
+        exploitable specifics about someone else's real security gaps would be irresponsible
+        disclosure. The security check for SSRF in particular is a documented heuristic
+        (flags outbound requests with a non-literal URL) and will read low for servers whose
+        entire purpose is proxying caller-supplied URLs — see the
+        <a href="https://github.com/vishalhabib99/mcp-doctor#security-checks" target="_blank" rel="noopener">Security checks</a>
+        section of the README for exactly what each check does and how precise it is.
+      </p>
+    </section>
+
+    <section class="table-section" aria-labelledby="table-heading">
+      <h2 id="table-heading" class="visually-hidden">Scored repositories</h2>
+      <div class="table-scroll">
+        <table id="leaderboard-table">
+          <thead>
+            <tr>
+              <th data-sort="repo">Repo</th>
+              <th data-sort="language">Language</th>
+              <th data-sort="stars" class="numeric">Stars</th>
+              <th data-sort="tool_count" class="numeric">Tools</th>
+              <th data-sort="quality_percent" class="numeric">Quality</th>
+              <th data-sort="security_percent" class="numeric">Security</th>
+              <th data-sort="last_scanned">Last scanned</th>
+            </tr>
+          </thead>
+          <tbody id="leaderboard-body">
+            <tr><td colspan="7" class="loading">Loading scan results…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="submit" aria-labelledby="submit-heading">
+      <h2 id="submit-heading">Get your server scored</h2>
+      <p>
+        Open a PR adding your repo to
+        <a href="https://github.com/vishalhabib99/mcp-doctor/blob/main/leaderboard/repos.json" target="_blank" rel="noopener"><code>leaderboard/repos.json</code></a>,
+        or <a href="https://github.com/vishalhabib99/mcp-doctor/issues/new" target="_blank" rel="noopener">open an issue</a> with the repo link.
+        It'll show up here after the next scan run.
+      </p>
+      <p>
+        Already scored and happy with your grade? Copy this into your README:
+      </p>
+      <pre id="badge-snippet" class="badge-snippet">[![Scanned by mcp-doctor](https://img.shields.io/badge/mcp--doctor-scanned-blue)](https://vishalhabib99.github.io/mcp-doctor/)</pre>
+    </section>
+  </main>
+
+  <footer class="page-footer">
+    <p>
+      <a href="https://github.com/vishalhabib99/mcp-doctor" target="_blank" rel="noopener">mcp-doctor on GitHub</a> ·
+      <a href="https://pypi.org/project/mcp-server-lint/" target="_blank" rel="noopener">PyPI</a> ·
+      Data regenerated on every push to <code>main</code> and weekly.
+    </p>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
