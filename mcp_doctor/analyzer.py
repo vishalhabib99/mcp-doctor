@@ -1,8 +1,13 @@
 """Static analysis of MCP (Model Context Protocol) server implementations.
 
-Walks a Python codebase, finds tool definitions authored with either the
-FastMCP decorator style (``@mcp.tool()``) or the low-level SDK style
-(``Tool(name=..., description=..., inputSchema=...)``), and scores them
+Walks a Python codebase, finds tool definitions authored with the FastMCP
+decorator style (``@mcp.tool()``), the low-level SDK style
+(``Tool(name=..., description=..., inputSchema=...)``), or a class-based
+registry (``class XyzTool(Tool):`` with an ``apply()`` method as the handler
+— verified against ``oraios/serena``, 28k+ stars: the tool name comes from
+the class name itself, stripped of a trailing "Tool" and snake_cased, and
+the description is the class's own docstring rather than any decorator
+argument), and scores them
 against a set of conformance and quality checks that matter for an agent
 actually calling the tool at runtime: does it have a description an LLM
 can act on, are parameters documented and typed, does it handle errors
@@ -134,6 +139,26 @@ def _get_docstring_sections(docstring: str | None) -> set[str]:
             if m:
                 params.add(m.group(1))
     return params
+
+
+_SPHINX_PARAM = re.compile(r":param\s+([^:]+):")
+
+
+def _get_sphinx_documented_params(docstring: str | None) -> set[str]:
+    """reST/Sphinx-style `:param name: ...` or `:param type name: ...` lines,
+    anywhere in the docstring (no dedicated heading, unlike the Google-style
+    `Args:` section `_get_docstring_sections` looks for) — verified against
+    `oraios/serena`'s own tool docstrings, which use this convention
+    exclusively. Takes the last whitespace-separated token before the colon
+    so an optional leading type doesn't get mistaken for the name."""
+    if not docstring:
+        return set()
+    names = set()
+    for m in _SPHINX_PARAM.finditer(docstring):
+        tokens = m.group(1).split()
+        if tokens:
+            names.add(tokens[-1])
+    return names
 
 
 def _field_call_has_description(node: ast.expr) -> bool:
@@ -392,7 +417,10 @@ def _analyze_function_as_tool(
 ) -> ToolFinding:
     tool_name = name_override or fn.name
     docstring = ast.get_docstring(fn)
-    description = description_override or (docstring.splitlines()[0].strip() if docstring else "")
+    description = (
+        description_override if description_override is not None
+        else (docstring.splitlines()[0].strip() if docstring else "")
+    )
     all_args = fn.args.args
     excluded = excluded_arg_names or set()
     # FastMCP's `exclude_args=[...]` removes a param from the exposed tool
@@ -407,7 +435,7 @@ def _analyze_function_as_tool(
         if a.arg not in ("self", "cls") and a.arg not in excluded and not _is_context_param(a)
     ]
     typed = sum(1 for a in args if a.annotation is not None)
-    doc_params = _get_docstring_sections(docstring)
+    doc_params = _get_docstring_sections(docstring) | _get_sphinx_documented_params(docstring)
 
     defaults_by_arg = dict(zip(all_args[len(all_args) - len(fn.args.defaults):], fn.args.defaults))
     field_documented_names = {
@@ -461,7 +489,7 @@ def _analyze_function_as_tool(
     if args and not finding.has_docstring_params:
         finding.issues.append(ToolIssue(
             tool_name, file, fn.lineno, "param_docs",
-            "Parameters aren't documented — no Args: docstring section and no per-parameter "
+            "Parameters aren't documented — no Args:/:param: docstring section and no per-parameter "
             "Field(description=...) — the model only sees names, not intent.",
             "warning",
         ))
@@ -597,6 +625,61 @@ def _find_lowlevel_tools(tree: ast.Module, file: str) -> list[ToolFinding]:
     return findings
 
 
+def _class_bases_include(cls_node: ast.ClassDef, name: str) -> bool:
+    for base in cls_node.bases:
+        base_name = base.attr if isinstance(base, ast.Attribute) else (base.id if isinstance(base, ast.Name) else None)
+        if base_name == name:
+            return True
+    return False
+
+
+def _tool_name_from_class_name(class_name: str) -> str:
+    """Serena's own convention, verified directly against its
+    `Tool.get_name_from_cls`: strip a trailing 'Tool' suffix, then convert
+    CamelCase to snake_case (e.g. `ReadFileTool` -> `read_file`)."""
+    name = class_name
+    if name.endswith("Tool"):
+        name = name[:-4]
+    return "".join("_" + c.lower() if c.isupper() else c for c in name).lstrip("_")
+
+
+def _find_class_based_tools(
+    tree: ast.Module,
+    file: str,
+    alias_registry: dict[str, bool] | None = None,
+    error_handling_registry: dict[str, bool] | None = None,
+) -> list[ToolFinding]:
+    """A class-based tool registry: `class XyzTool(Tool):` with an `apply()`
+    method as the handler — no decorator, no `Tool(...)` constructor call
+    anywhere. Verified against `oraios/serena` (28k+ stars, 0/30+ tools found
+    before this): the tool name is derived from the class name itself (see
+    `_tool_name_from_class_name`), the description is the class's own
+    docstring rather than a decorator argument, and parameters come from
+    `apply`'s signature/docstring exactly like any other tool function.
+    Matched by base-class name only, like every other name-based registry in
+    this module — doesn't verify the ancestor actually resolves to a real
+    "Tool" base class."""
+    findings = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef) or not _class_bases_include(node, "Tool"):
+            continue
+        apply_fn = next(
+            (n for n in node.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "apply"),
+            None,
+        )
+        if apply_fn is None:
+            continue
+        class_doc = ast.get_docstring(node)
+        findings.append(_analyze_function_as_tool(
+            apply_fn, file,
+            description_override=class_doc.strip() if class_doc else "",
+            alias_registry=alias_registry,
+            name_override=_tool_name_from_class_name(node.name),
+            error_handling_registry=error_handling_registry,
+        ))
+    return findings
+
+
 _JS_TEST_SUFFIXES = (".test.ts", ".test.tsx", ".test.js", ".test.jsx", ".spec.ts", ".spec.tsx", ".spec.js", ".spec.jsx")
 
 
@@ -666,6 +749,7 @@ def analyze_repo(root: Path) -> Report:
     for rel, tree in trees:
         tools.extend(_find_fastmcp_tools(tree, rel, alias_registry, error_handling_registry))
         tools.extend(_find_lowlevel_tools(tree, rel))
+        tools.extend(_find_class_based_tools(tree, rel, alias_registry, error_handling_registry))
 
     ts_tools, ts_unparseable = find_ts_tools(root)
     tools.extend(ts_tools)

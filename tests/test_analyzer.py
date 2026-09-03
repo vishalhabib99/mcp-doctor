@@ -325,6 +325,83 @@ def test_no_tools_found_gives_empty_report(tmp_path):
     assert report.tools == []
 
 
+def test_class_based_tool_detected_with_name_from_class_and_class_docstring(tmp_path):
+    # oraios/serena's own shape: no decorator, no Tool(...) constructor — the
+    # tool name is derived from the class name and the description from the
+    # class's own docstring, not `apply`'s.
+    write(tmp_path, "server.py", """
+        class ReadFileTool(Tool):
+            \"\"\"Reads a file within the project directory.\"\"\"
+
+            def apply(self, relative_path: str, start_line: int = 0) -> str:
+                \"\"\"
+                Reads the given file or a chunk of it.
+
+                :param relative_path: the relative path to the file to read
+                :param start_line: the 0-based index of the first line to retrieve
+                \"\"\"
+                try:
+                    return relative_path
+                except OSError as e:
+                    return str(e)
+        """)
+    report = analyze_repo(tmp_path)
+    assert len(report.tools) == 1
+    tool = report.tools[0]
+    assert tool.name == "read_file"
+    assert tool.description_text == "Reads a file within the project directory."
+    assert tool.issues == []
+
+
+def test_class_based_tool_without_apply_method_is_not_a_tool(tmp_path):
+    write(tmp_path, "server.py", """
+        class ToolMarker:
+            \"\"\"Not a real tool — a marker base class, no apply() method.\"\"\"
+        """)
+    report = analyze_repo(tmp_path)
+    assert report.tools == []
+
+
+def test_class_based_tool_with_no_class_docstring_flags_missing_description(tmp_path):
+    # Verified against serena's own SearchForPatternTool: a class with no
+    # docstring at all genuinely has no description at runtime — apply()'s
+    # own docstring must not be substituted in as a fallback.
+    write(tmp_path, "server.py", """
+        class SearchForPatternTool(Tool):
+            def apply(self, substring_pattern: str) -> str:
+                \"\"\"Searches for a pattern. :param substring_pattern: the pattern\"\"\"
+                return substring_pattern
+        """)
+    report = analyze_repo(tmp_path)
+    tool = report.tools[0]
+    assert tool.description_text == ""
+    assert any(i.check == "description" for i in tool.issues)
+
+
+def test_sphinx_style_param_docs_recognized_for_decorator_tool(tmp_path):
+    # :param name: ... (reST/Sphinx style) is a distinct, real convention from
+    # the Google-style `Args:` section already supported — no heading needed.
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        @mcp.tool()
+        def get_forecast(city: str, days: int) -> str:
+            \"\"\"Get a weather forecast.
+
+            :param city: the city name
+            :param int days: how many days out
+            \"\"\"
+            try:
+                return f"{city} {days}"
+            except ValueError as e:
+                return str(e)
+        """)
+    report = analyze_repo(tmp_path)
+    tool = report.tools[0]
+    assert not any(i.check == "param_docs" for i in tool.issues)
+
+
 def test_hardcoded_secret_flagged(tmp_path):
     write(tmp_path, "server.py", """
         api_key = "sk-ab12cd34ef56gh78ij90kl"
