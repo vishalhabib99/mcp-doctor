@@ -38,6 +38,7 @@ class ToolIssue:
     check: str
     message: str
     severity: str  # "error" | "warning"
+    category: str = "quality"  # "quality" | "security"
 
 
 @dataclass
@@ -52,6 +53,7 @@ class ToolFinding:
     has_docstring_params: bool
     has_try_except: bool
     has_bare_except: bool
+    description_text: str = ""
     issues: list[ToolIssue] = field(default_factory=list)
 
 
@@ -60,6 +62,19 @@ class RepoIssue:
     check: str
     message: str
     severity: str
+    category: str = "quality"  # "quality" | "security"
+
+
+def _grade_for_percent(pct: float) -> str:
+    if pct >= 90:
+        return "A"
+    if pct >= 80:
+        return "B"
+    if pct >= 70:
+        return "C"
+    if pct >= 60:
+        return "D"
+    return "F"
 
 
 @dataclass
@@ -68,27 +83,32 @@ class Report:
     repo_issues: list[RepoIssue]
     score: int
     max_score: int
+    security_score: int = 0
+    security_max_score: int = 1
 
     @property
     def grade(self) -> str:
         if self.max_score == 0:
             return "N/A"
-        pct = self.score / self.max_score * 100
-        if pct >= 90:
-            return "A"
-        if pct >= 80:
-            return "B"
-        if pct >= 70:
-            return "C"
-        if pct >= 60:
-            return "D"
-        return "F"
+        return _grade_for_percent(self.score / self.max_score * 100)
 
     @property
     def percent(self) -> int:
         if self.max_score == 0:
             return 0
         return round(self.score / self.max_score * 100)
+
+    @property
+    def security_grade(self) -> str:
+        if self.security_max_score == 0:
+            return "N/A"
+        return _grade_for_percent(self.security_score / self.security_max_score * 100)
+
+    @property
+    def security_percent(self) -> int:
+        if self.security_max_score == 0:
+            return 0
+        return round(self.security_score / self.security_max_score * 100)
 
 
 _ARGS_HEADING = re.compile(r"^#{0,6}\s*\*{0,2}(Args|Arguments|Params|Parameters)\*{0,2}:\*{0,2}\s*$")
@@ -415,6 +435,7 @@ def _analyze_function_as_tool(
         has_docstring_params=documented_count >= len(args) and len(args) > 0,
         has_try_except=has_try,
         has_bare_except=has_bare,
+        description_text=description,
     )
 
     if not finding.has_description:
@@ -552,6 +573,7 @@ def _find_lowlevel_tools(tree: ast.Module, file: str) -> list[ToolFinding]:
             has_docstring_params=typed_param_count >= param_count and param_count > 0,
             has_try_except=True,  # not attributable to a single function body here
             has_bare_except=False,
+            description_text=description,
         )
         if not finding.has_description:
             finding.issues.append(ToolIssue(
@@ -602,14 +624,16 @@ def _scan_secrets(py_files: list[Path]) -> list[RepoIssue]:
                     "secrets",
                     f"{f.name}:{i} looks like a hardcoded credential.",
                     "error",
+                    "security",
                 ))
     return issues
 
 
 def analyze_repo(root: Path) -> Report:
-    # Lazy import: ts_analyzer/go_analyzer import ToolFinding/ToolIssue from
-    # this module, so importing them at module load time would be circular.
+    # Lazy import: ts_analyzer/go_analyzer/security import ToolFinding/ToolIssue
+    # from this module, so importing them at module load time would be circular.
     from .go_analyzer import find_go_tools
+    from .security import scan_dangerous_exec, scan_prompt_injection, scan_ssrf, scan_unsafe_deserialization
     from .ts_analyzer import find_ts_tools
 
     py_files = [p for p in root.rglob("*.py") if "/.git/" not in str(p) and "/venv/" not in str(p) and "/node_modules/" not in str(p)]
@@ -650,6 +674,8 @@ def analyze_repo(root: Path) -> Report:
     go_tools, go_unparseable = find_go_tools(root)
     tools.extend(go_tools)
     unparseable.extend(go_unparseable)
+
+    scan_prompt_injection(tools)
 
     repo_issues: list[RepoIssue] = []
 
@@ -731,16 +757,28 @@ def analyze_repo(root: Path) -> Report:
         if "/vendor/" not in str(p) and "/.git/" not in str(p)
         and not _is_test_file(p)
     ]
-    repo_issues.extend(_scan_secrets(py_files + ts_js_files + go_files))
+    all_files = py_files + ts_js_files + go_files
+    repo_issues.extend(_scan_secrets(all_files))
+    repo_issues.extend(scan_dangerous_exec(all_files))
+    repo_issues.extend(scan_ssrf(all_files))
+    repo_issues.extend(scan_unsafe_deserialization(py_files))
 
     score = 0
     max_score = 0
+    security_score = 0
+    security_max_score = 0
 
     for t in tools:
         max_score += 10
+        security_max_score += 10
         score += 10
+        security_score += 10
         for issue in t.issues:
-            score -= 3 if issue.severity == "error" else 1
+            penalty = 3 if issue.severity == "error" else 1
+            if issue.category == "security":
+                security_score -= penalty
+            else:
+                score -= penalty
 
     max_score += 10  # readme presence
     if readme:
@@ -755,12 +793,21 @@ def analyze_repo(root: Path) -> Report:
     if not any(i.check == "packaging" for i in repo_issues):
         score += 5
     for i in repo_issues:
-        if i.check in ("secrets", "parse_error"):
+        if i.check in ("secrets", "dangerous_exec", "unsafe_deserialization"):
+            security_score -= 5
+        elif i.check == "ssrf":
+            security_score -= 2
+        elif i.check == "parse_error":
             score -= 5
         elif i.check == "tool_name":
             score -= 2
 
     score = max(0, score)
     max_score = max(max_score, 1)
+    security_score = max(0, security_score)
+    security_max_score = max(security_max_score, 1)
 
-    return Report(tools=tools, repo_issues=repo_issues, score=score, max_score=max_score)
+    return Report(
+        tools=tools, repo_issues=repo_issues, score=score, max_score=max_score,
+        security_score=security_score, security_max_score=security_max_score,
+    )

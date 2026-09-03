@@ -387,6 +387,7 @@ def _finding_with_description_and_param_issues(
         has_docstring_params=documented >= param_count and param_count > 0,
         has_try_except=True,
         has_bare_except=False,
+        description_text=description,
     )
 
     if not finding.has_description:

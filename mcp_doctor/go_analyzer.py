@@ -532,6 +532,7 @@ def find_go_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
                     has_docstring_params=documented >= param_count and param_count > 0,
                     has_try_except=True,  # not checked for Go — see module docstring
                     has_bare_except=False,
+                    description_text=description,
                 )
                 if not finding.has_description:
                     finding.issues.append(ToolIssue(
@@ -596,6 +597,7 @@ def find_go_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
                 has_docstring_params=documented >= param_count and param_count > 0,
                 has_try_except=True,  # not checked for Go — see module docstring
                 has_bare_except=False,
+                description_text=description,
             )
 
             if not finding.has_description:

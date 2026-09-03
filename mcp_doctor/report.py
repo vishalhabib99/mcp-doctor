@@ -27,9 +27,14 @@ def render_text(report: Report, use_color: bool = True) -> str:
     lines.append(c(BOLD, "mcp-doctor report"))
     grade_color = _color_for_grade(report.grade) if use_color else ""
     lines.append(
-        f"Score: {c(BOLD, str(report.percent) + '%')}  "
+        f"Quality:  {c(BOLD, str(report.percent) + '%')}  "
         f"Grade: {grade_color}{report.grade}{RESET if use_color else ''}  "
         f"({len(report.tools)} tool(s) found)"
+    )
+    security_color = _color_for_grade(report.security_grade) if use_color else ""
+    lines.append(
+        f"Security: {c(BOLD, str(report.security_percent) + '%')}  "
+        f"Grade: {security_color}{report.security_grade}{RESET if use_color else ''}"
     )
     lines.append("")
 
@@ -61,6 +66,10 @@ def render_json(report: Report) -> str:
         "max_score": report.max_score,
         "percent": report.percent,
         "grade": report.grade,
+        "security_score": report.security_score,
+        "security_max_score": report.security_max_score,
+        "security_percent": report.security_percent,
+        "security_grade": report.security_grade,
         "tools": [
             {
                 "name": t.name,

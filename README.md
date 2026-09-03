@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![GitHub Marketplace](https://img.shields.io/badge/Marketplace-mcp--doctor-blue?logo=github)](https://github.com/marketplace/actions/mcp-doctor)
 
-A static analysis CLI that audits **MCP (Model Context Protocol) server** implementations for the things that actually break an agent calling them: missing tool descriptions, undocumented parameters, no error handling, no README coverage.
+A static analysis CLI that audits **MCP (Model Context Protocol) server** implementations for the things that actually break an agent calling them: missing tool descriptions, undocumented parameters, no error handling, no README coverage — plus a separate **security** score covering prompt-injection-prone tool descriptions ("tool poisoning"), dangerous dynamic execution, SSRF-prone outbound requests, unsafe deserialization, and hardcoded secrets. Quality and security are scored independently: a repo can be a documented, well-tested A on quality and still have a real security gap, and the two shouldn't be blended into one number that hides which is true.
 
 The MCP ecosystem is growing faster than the conventions around building a *good* server have settled. Most servers are hand-written in an afternoon and never checked against anything. `mcp-doctor` is a linter for that gap — point it at a repo, get a score and a concrete list of what to fix.
 
@@ -14,7 +14,8 @@ Dogfooded against 19+ real, in-the-wild MCP servers across Python, TypeScript, a
 ```
 $ mcp-doctor examples/bad_server
 mcp-doctor report
-Score: 13%  Grade: F  (2 tool(s) found)
+Quality:  13%  Grade: F  (2 tool(s) found)
+Security: 100%  Grade: A
 
   [FAIL] do_thing (server.py:9)
       ERROR  Tool has no description. An agent cannot decide when to call this.
@@ -37,7 +38,8 @@ Repo-level
 ```
 $ mcp-doctor examples/good_server
 mcp-doctor report
-Score: 100%  Grade: A  (1 tool(s) found)
+Quality:  100%  Grade: A  (1 tool(s) found)
+Security: 100%  Grade: A
 
   [OK] get_forecast (server.py:9)
 ```
@@ -111,8 +113,19 @@ Audits Python, TypeScript/JavaScript, and Go servers in the same repo. Python de
 - LICENSE exists
 - Tests exist
 - Dependencies are declared (`pyproject.toml` / `requirements.txt` / `setup.py` / `package.json`)
-- No hardcoded-looking API keys/secrets/tokens in source
 - Tool names conform to the [spec's Tool Names guidance](https://modelcontextprotocol.io/specification/2026-07-28/server/tools#tool-names) (1–128 chars, `A-Z a-z 0-9 _ - .` only, unique within the server)
+
+## Security checks
+
+Scored as a **separate axis** from quality (its own percent/grade) — a repo can be a well-documented A on quality and still have a real security gap, and the two shouldn't be blended into one number that hides which is true. These matter specifically because an MCP tool is invoked autonomously by a model, not a human clicking through a UI: an unvalidated input here is triggered by model-generated tool-call arguments, not a person typing into a form.
+
+| Check | What it flags | Precision |
+|---|---|---|
+| Prompt injection / tool poisoning | A tool description containing directive language ("ignore previous instructions," "you must always," a fake `system:` prefix) that an agent can't distinguish from a real instruction — plus unusually long descriptions (>500 chars), a common way to smuggle hidden text past a human skimming the tool list | Precise on trigger phrases; the length check is a heuristic nudge to go read it |
+| Dangerous dynamic execution | `eval`/`exec`/`os.system`/`subprocess.*` (Python), `eval`/`child_process.exec` (JS/TS), `exec.Command` (Go) | Flags the primitive; doesn't trace whether a tool argument actually reaches it |
+| SSRF-prone outbound requests | An HTTP call (`requests.*`, `fetch`, `axios.*`, `http.Get`) whose URL argument is a variable rather than a literal | **Heuristic, false-positive-prone by design** — can't tell a tool-input-derived URL from a validated config value from text alone; treat as "worth a look," not a confirmed finding |
+| Unsafe deserialization | `pickle.loads`/`marshal.loads`, or `yaml.load(...)` without `Loader=yaml.SafeLoader` (Python only for now) | Precise — both are unconditionally unsafe on untrusted input |
+| Hardcoded secrets | Same check as before, now correctly categorized as security rather than quality — see below | Same false-positive guard as always (requires a digit in the value, skips identifier-style constants) |
 
 ## Real-world spot check
 
