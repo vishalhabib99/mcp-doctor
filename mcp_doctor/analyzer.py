@@ -580,7 +580,7 @@ _JS_TEST_SUFFIXES = (".test.ts", ".test.tsx", ".test.js", ".test.jsx", ".spec.ts
 
 def _is_test_file(path: Path) -> bool:
     name = path.name
-    if name.startswith("test_") or name.endswith("_test.py"):
+    if name.startswith("test_") or name.endswith("_test.py") or name.endswith("_test.go"):
         return True
     if name.endswith(_JS_TEST_SUFFIXES):
         return True
@@ -607,8 +607,9 @@ def _scan_secrets(py_files: list[Path]) -> list[RepoIssue]:
 
 
 def analyze_repo(root: Path) -> Report:
-    # Lazy import: ts_analyzer imports ToolFinding/ToolIssue from this module,
-    # so importing it at module load time would be circular.
+    # Lazy import: ts_analyzer/go_analyzer import ToolFinding/ToolIssue from
+    # this module, so importing them at module load time would be circular.
+    from .go_analyzer import find_go_tools
     from .ts_analyzer import find_ts_tools
 
     py_files = [p for p in root.rglob("*.py") if "/.git/" not in str(p) and "/venv/" not in str(p) and "/node_modules/" not in str(p)]
@@ -645,6 +646,10 @@ def analyze_repo(root: Path) -> Report:
     ts_tools, ts_unparseable = find_ts_tools(root)
     tools.extend(ts_tools)
     unparseable.extend(ts_unparseable)
+
+    go_tools, go_unparseable = find_go_tools(root)
+    tools.extend(go_tools)
+    unparseable.extend(go_unparseable)
 
     repo_issues: list[RepoIssue] = []
 
@@ -702,6 +707,7 @@ def analyze_repo(root: Path) -> Report:
         or any(root.rglob("*_test.py"))
         or any(root.rglob("*.test.ts"))
         or any(root.rglob("*.spec.ts"))
+        or any(root.rglob("*_test.go"))
         or (root / "tests").is_dir()
         or any(p.name == "__tests__" for p in root.rglob("__tests__"))
     )
@@ -710,8 +716,9 @@ def analyze_repo(root: Path) -> Report:
 
     has_py_packaging = (root / "pyproject.toml").exists() or (root / "requirements.txt").exists() or (root / "setup.py").exists()
     has_js_packaging = (root / "package.json").exists()
-    if not has_py_packaging and not has_js_packaging:
-        repo_issues.append(RepoIssue("packaging", "No pyproject.toml/requirements.txt/setup.py/package.json — dependencies aren't pinned.", "warning"))
+    has_go_packaging = (root / "go.mod").exists()
+    if not has_py_packaging and not has_js_packaging and not has_go_packaging:
+        repo_issues.append(RepoIssue("packaging", "No pyproject.toml/requirements.txt/setup.py/package.json/go.mod — dependencies aren't pinned.", "warning"))
 
     ts_js_files = [
         p for p in root.rglob("*")
@@ -719,7 +726,12 @@ def analyze_repo(root: Path) -> Report:
         and "/node_modules/" not in str(p) and "/.git/" not in str(p)
         and not _is_test_file(p)
     ]
-    repo_issues.extend(_scan_secrets(py_files + ts_js_files))
+    go_files = [
+        p for p in root.rglob("*.go")
+        if "/vendor/" not in str(p) and "/.git/" not in str(p)
+        and not _is_test_file(p)
+    ]
+    repo_issues.extend(_scan_secrets(py_files + ts_js_files + go_files))
 
     score = 0
     max_score = 0
