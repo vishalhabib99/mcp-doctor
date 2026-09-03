@@ -1,6 +1,6 @@
 [project]
 name = "mcp-server-lint"
-version = "0.5.0"
+version = "0.5.1"
 description = "Static analysis CLI that audits MCP (Model Context Protocol) server implementations for spec conformance and quality issues."
 readme = "README.md"
 requires-python = ">=3.9"

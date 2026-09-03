@@ -296,3 +296,119 @@ def test_handler_wrapped_in_helper_with_no_func_literal_is_not_crashed(tmp_path)
     findings, _ = find_go_tools(tmp_path)
     assert len(findings) == 1
     assert findings[0].param_count == 0
+
+
+def test_mark3labs_builder_style_fully_documented(tmp_path):
+    write(tmp_path, "server.go", """
+        package main
+
+        func main() {
+            s.AddTool(mcp.NewTool("get_weather",
+                mcp.WithDescription("Get the current weather for a city"),
+                mcp.WithString("city",
+                    mcp.Required(),
+                    mcp.Description("The city to get weather for"),
+                ),
+                mcp.WithNumber("days",
+                    mcp.Description("Number of forecast days"),
+                ),
+            ), weatherHandler)
+        }
+        """)
+    findings, _ = find_go_tools(tmp_path)
+    assert len(findings) == 1
+    tool = findings[0]
+    assert tool.name == "get_weather"
+    assert tool.param_count == 2
+    checks = {i.check for i in tool.issues}
+    assert "description" not in checks
+    assert "param_docs" not in checks
+
+
+def test_mark3labs_builder_style_partially_undocumented(tmp_path):
+    write(tmp_path, "server.go", """
+        package main
+
+        func main() {
+            s.AddTool(mcp.NewTool("search",
+                mcp.WithDescription("Search for something"),
+                mcp.WithString("query", mcp.Required()),
+                mcp.WithString("mode", mcp.Description("Search mode")),
+            ), searchHandler)
+        }
+        """)
+    findings, _ = find_go_tools(tmp_path)
+    tool = findings[0]
+    assert tool.param_count == 2
+    param_issue = next(i for i in tool.issues if i.check == "param_docs")
+    assert "1/2" in param_issue.message
+    assert "builder options" in param_issue.message
+
+
+def test_mark3labs_tool_name_resolved_via_const(tmp_path):
+    write(tmp_path, "server.go", """
+        package main
+
+        const (
+            ToolPing = "ping"
+        )
+
+        func main() {
+            s.AddTool(mcp.NewTool(ToolPing,
+                mcp.WithDescription("Pings the server"),
+            ), pingHandler)
+        }
+        """)
+    findings, _ = find_go_tools(tmp_path)
+    assert len(findings) == 1
+    assert findings[0].name == "ping"
+
+
+def test_mark3labs_missing_description_flagged(tmp_path):
+    write(tmp_path, "server.go", """
+        package main
+
+        func main() {
+            s.AddTool(mcp.NewTool("no_desc"), handler)
+        }
+        """)
+    findings, _ = find_go_tools(tmp_path)
+    tool = findings[0]
+    assert any(i.check == "description" for i in tool.issues)
+
+
+def test_mark3labs_dynamic_name_is_skipped_not_crashed(tmp_path):
+    write(tmp_path, "server.go", """
+        package main
+
+        func main() {
+            for _, spec := range toolSpecs {
+                s.AddTool(mcp.NewTool(spec.Name,
+                    mcp.WithDescription(spec.Description),
+                ), spec.Handler)
+            }
+        }
+        """)
+    findings, _ = find_go_tools(tmp_path)
+    assert findings == []
+
+
+def test_same_const_name_declared_twice_with_different_values_is_not_resolved(tmp_path):
+    write(tmp_path, "a.go", """
+        package main
+
+        const ToolName = "from_file_a"
+        """)
+    write(tmp_path, "b.go", """
+        package main
+
+        const ToolName = "from_file_b"
+
+        func main() {
+            s.AddTool(mcp.NewTool(ToolName,
+                mcp.WithDescription("Ambiguous tool name"),
+            ), handler)
+        }
+        """)
+    findings, _ = find_go_tools(tmp_path)
+    assert findings == []
