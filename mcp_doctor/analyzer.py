@@ -749,6 +749,7 @@ def analyze_repo(root: Path) -> Report:
     ts_js_files = [
         p for p in root.rglob("*")
         if p.suffix in (".ts", ".tsx", ".js", ".jsx")
+        and not p.name.endswith(".d.ts")  # ambient type declarations — no executable code, ever
         and "/node_modules/" not in str(p) and "/.git/" not in str(p)
         and not _is_test_file(p)
     ]
@@ -792,15 +793,35 @@ def analyze_repo(root: Path) -> Report:
     max_score += 5  # packaging
     if not any(i.check == "packaging" for i in repo_issues):
         score += 5
+
+    # Flat repo-wide security baseline, independent of tool count: the four
+    # pattern-scan checks below apply across the whole codebase regardless of
+    # how many (if any) tools were found, so — unlike quality, where per-tool
+    # findings dominate max_score — a repo with 0 tools would otherwise have
+    # no positive security max_score at all and any single finding would
+    # floor it straight to a nonsensical 0%.
+    security_max_score += 20
+    security_score += 20
+
+    # Each repo-level security check's scoring impact is capped at 3
+    # occurrences (every instance still appears in repo_issues/JSON output in
+    # full) — a systemic pattern across many files (e.g. a proxy server's
+    # entire purpose being to forward caller-supplied URLs, which trips the
+    # SSRF heuristic on every call site) shouldn't manufacture an artificially
+    # catastrophic score just by being repeated, when a human reviewer would
+    # weight "this pattern exists" once, not once per line it appears on.
+    SECURITY_CHECK_WEIGHT = {"secrets": 5, "dangerous_exec": 5, "unsafe_deserialization": 5, "ssrf": 2}
+    SECURITY_CHECK_CAP = 3
+    security_check_counts: dict[str, int] = {}
     for i in repo_issues:
-        if i.check in ("secrets", "dangerous_exec", "unsafe_deserialization"):
-            security_score -= 5
-        elif i.check == "ssrf":
-            security_score -= 2
+        if i.check in SECURITY_CHECK_WEIGHT:
+            security_check_counts[i.check] = security_check_counts.get(i.check, 0) + 1
         elif i.check == "parse_error":
             score -= 5
         elif i.check == "tool_name":
             score -= 2
+    for check, count in security_check_counts.items():
+        security_score -= SECURITY_CHECK_WEIGHT[check] * min(count, SECURITY_CHECK_CAP)
 
     score = max(0, score)
     max_score = max(max_score, 1)
