@@ -527,7 +527,14 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
         if any(part in skip_dirs or part.startswith(".") for part in rel_parts):
             continue
         stem = p.stem.lower()
-        if "test" in stem or "spec" in stem or "__tests__" in rel_parts:
+        # Directory-based exclusion matches the Python analyzer's `_is_test_file`
+        # (any "test"/"tests" path segment) — verified against a real miss:
+        # mcp-use/mcp-use's `libraries/typescript/packages/agent/tests/servers/
+        # simple_server.ts`, a genuine test fixture ("Minimal stdio MCP server
+        # ... for agent integration tests") whose filename stem alone
+        # (`simple_server`) and directory (`tests`, not Jest's `__tests__`)
+        # both slipped past the old check.
+        if "test" in stem or "spec" in stem or any(part in ("test", "tests", "__tests__") for part in rel_parts):
             continue
         files.append(p)
 

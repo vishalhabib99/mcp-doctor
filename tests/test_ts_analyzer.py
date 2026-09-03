@@ -612,3 +612,20 @@ def test_same_name_declared_twice_in_one_file_is_not_resolved(tmp_path):
         """)
     findings, _ = find_ts_tools(tmp_path)
     assert findings == []
+
+
+def test_tool_inside_a_plain_tests_directory_is_excluded(tmp_path):
+    # A plain `tests/` directory (pytest-style, not Jest's `__tests__/`) with a
+    # filename that itself contains neither "test" nor "spec" — verified
+    # against a real miss: mcp-use/mcp-use's `tests/servers/simple_server.ts`,
+    # a genuine integration-test fixture that slipped past both checks. Same
+    # directory-based exclusion the Python analyzer already applies.
+    write(tmp_path, "tests/servers/simple_server.ts", """
+        server.setRequestHandler(ListToolsRequestSchema, async () => ({
+          tools: [
+            { name: "add", description: "Add two numbers", inputSchema: { type: "object", properties: {} } },
+          ],
+        }));
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert findings == []
