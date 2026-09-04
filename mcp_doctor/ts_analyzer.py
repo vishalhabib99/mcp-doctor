@@ -12,6 +12,7 @@ for the official TS SDK's two high-level registration styles, the community
     server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: [...ToolArrayConst] }))
     defineTool({ name, description, schema, handler })   // or definePageTool(...)
     defineTool(args => ({ name, description, schema, handler }))
+    const fooTool = { schema: { name, description, inputSchema }, handle }  // no wrapping call at all
 
 The last style has no per-tool handler closure to check for a try/catch (one
 generic dispatcher serves every tool by name, often proxying elsewhere
