@@ -612,3 +612,121 @@ def test_concatenation_with_non_literal_operand_not_guessed(tmp_path):
     tool = findings[0]
     assert tool.description_text == ""
     assert any(i.check == "description" for i in tool.issues)
+
+
+def test_bare_tool_in_typed_slice_literal_is_detected(tmp_path):
+    # `[]*mcp.Tool{ {Name: ..., Description: ...}, ... }` — Go elides the
+    # repeated `&mcp.Tool{...}` on each element. Verified against
+    # clidey/whodb, where every tool group is defined this way and
+    # registered elsewhere by a switch on tool.Name, never a literal
+    # AddTool call — these were entirely invisible before.
+    write(tmp_path, "server.go", """
+        package main
+
+        func toolDefinitions() []*mcp.Tool {
+            return []*mcp.Tool{
+                {Name: "list_things", Description: "List all the things."},
+                {Name: "get_thing", Description: "Get one thing by id."},
+            }
+        }
+        """)
+    findings, _ = find_go_tools(tmp_path)
+    names = {t.name: t for t in findings}
+    assert set(names) == {"list_things", "get_thing"}
+    assert names["list_things"].description_text == "List all the things."
+    assert not any(i.check == "description" for i in names["list_things"].issues)
+    # No handler is available at this site, so params are left unchecked,
+    # not guessed — a 0 param_count here means "not checked", not "none".
+    assert names["list_things"].param_count == 0
+
+
+def test_tool_slice_description_resolves_through_const(tmp_path):
+    # Long descriptions are commonly pulled into their own package-level
+    # const (verified against whodb's descPlatformX constants) — a bare
+    # identifier reference in the Description field, not a literal.
+    write(tmp_path, "server.go", """
+        package main
+
+        const descListThings = `List all the things, with full detail.`
+
+        func toolDefinitions() []*mcp.Tool {
+            return []*mcp.Tool{
+                {Name: "list_things", Description: descListThings},
+            }
+        }
+        """)
+    findings, _ = find_go_tools(tmp_path)
+    tool = findings[0]
+    assert tool.description_text == "List all the things, with full detail."
+    assert not any(i.check == "description" for i in tool.issues)
+
+
+def test_closure_factory_call_in_slice_is_resolved(tmp_path):
+    # `read := func(name, description string) *mcp.Tool { return &mcp.Tool{
+    # Name: name, Description: description} }`, then `read("x", "y")` used
+    # positionally inside a `[]*mcp.Tool{...}` slice — verified against
+    # whodb's `read(...)` helper, which alone defines 35 of its tools this
+    # way. Only literal-string call args are resolved.
+    write(tmp_path, "server.go", """
+        package main
+
+        func toolDefinitions() []*mcp.Tool {
+            read := func(name, description string) *mcp.Tool {
+                return &mcp.Tool{Name: name, Description: description, Annotations: readOnly(description)}
+            }
+            return []*mcp.Tool{
+                read("list_things", "List all the things."),
+                read("get_thing", "Get one thing by id."),
+            }
+        }
+        """)
+    findings, _ = find_go_tools(tmp_path)
+    names = {t.name: t for t in findings}
+    assert set(names) == {"list_things", "get_thing"}
+    assert names["get_thing"].description_text == "Get one thing by id."
+    assert not any(i.check == "description" for i in names["get_thing"].issues)
+
+
+def test_closure_factory_call_with_non_literal_arg_not_guessed(tmp_path):
+    # Same closure shape as above, but called with a variable rather than a
+    # literal — genuinely unresolvable without tracking that variable's
+    # value, so correctly left unresolved rather than guessed at.
+    write(tmp_path, "server.go", """
+        package main
+
+        func toolDefinitions() []*mcp.Tool {
+            read := func(name, description string) *mcp.Tool {
+                return &mcp.Tool{Name: name, Description: description}
+            }
+            return []*mcp.Tool{
+                read(dynamicName, "List all the things."),
+            }
+        }
+        """)
+    findings, _ = find_go_tools(tmp_path)
+    assert findings == []
+
+
+def test_closure_with_ambiguous_name_in_file_not_resolved(tmp_path):
+    # Two differently-shaped `read := func(...)` closures in the same file —
+    # same "don't guess on an ambiguous name" rule used by the const/struct
+    # registries elsewhere in this module.
+    write(tmp_path, "server.go", """
+        package main
+
+        func toolDefinitionsA() []*mcp.Tool {
+            read := func(name, description string) *mcp.Tool {
+                return &mcp.Tool{Name: name, Description: description}
+            }
+            return []*mcp.Tool{read("a", "desc a")}
+        }
+
+        func toolDefinitionsB() []*mcp.Tool {
+            read := func(description, name string) *mcp.Tool {
+                return &mcp.Tool{Name: name, Description: description}
+            }
+            return []*mcp.Tool{read("desc b", "b")}
+        }
+        """)
+    findings, _ = find_go_tools(tmp_path)
+    assert findings == []

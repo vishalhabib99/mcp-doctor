@@ -71,6 +71,19 @@ elsewhere via `AddTool(tool.Tool, tool.Handler)` in a loop — never a literal
 `AddTool(mcp.NewTool(...), handler)` call site anywhere in the repo. The
 composite literal itself is treated as the definition site.
 
+Also recognizes a bare `mcp.Tool` (official SDK, not mark3labs) declared as
+an element of a typed slice literal — `[]*mcp.Tool{ {Name: "...",
+Description: "..."}, ... }`, Go's shorthand for eliding the repeated
+`&mcp.Tool{...}` on every element — verified against `clidey/whodb`, where
+every tool group is defined this way in a `*ToolDefinitions() []*mcp.Tool`
+function and registered elsewhere by a switch on `tool.Name`, never through a
+literal `AddTool` call. As with `server.ServerTool`, the slice element itself
+is the definition site. Connecting a definition back to its handler (to check
+parameter docs) would mean resolving that switch — genuinely more than a
+"don't guess" reach for this pass, so `param_count` is left at 0 here (no
+param-docs finding is raised) rather than guessed at; only name/description
+are checked.
+
 Error handling is intentionally not checked for Go tools at all (v1): unlike
 Python's try/except or TS's try/catch, Go has no exception mechanism — a
 handler communicates failure via its `error` return value, which the SDK
@@ -187,16 +200,22 @@ def _composite_type_name(node, src: bytes) -> str | None:
     return _text(type_node, src) if type_node is not None else None
 
 
-def _resolve_string_field(node, src: bytes) -> str | None:
-    """Resolve a string literal directly, or — for the common i18n convention
-    `t(key, defaultValue string) string` (verified against
+def _resolve_string_field(node, src: bytes, const_registry: dict[str, str] | None = None) -> str | None:
+    """Resolve a string literal directly; a bare identifier through
+    `const_registry` (a package-level `const NAME = "..."` reference — long
+    descriptions are commonly pulled out to their own const, verified against
+    `clidey/whodb`'s `descPlatformX` constants); or — for the common i18n
+    convention `t(key, defaultValue string) string` (verified against
     `github/github-mcp-server`'s own `TranslationHelperFunc` signature) — the
     literal default-value argument of a call whose last argument is a string
-    literal. A non-literal fallback or dynamic key is left unresolved rather
-    than guessed at."""
+    literal. Anything else (a non-literal fallback, a dynamic key, an
+    unregistered/ambiguous const name) is left unresolved rather than
+    guessed at."""
     direct = _string_value(node, src)
     if direct is not None:
         return direct
+    if node is not None and node.type == "identifier" and const_registry is not None:
+        return const_registry.get(_text(node, src))
     if node is not None and node.type == "call_expression":
         args_node = node.child_by_field_name("arguments")
         if args_node is not None:
@@ -376,7 +395,7 @@ def _analyze_new_tool_call(new_tool_call, src: bytes, const_registry: dict[str, 
         opt_args = [c for c in opt_args_node.children if c.type not in ("(", ")", ",")] if opt_args_node is not None else []
         if method == "WithDescription":
             if opt_args:
-                description = _resolve_string_field(opt_args[0], src) or ""
+                description = _resolve_string_field(opt_args[0], src, const_registry) or ""
         elif method in MARK3LABS_PARAM_OPTIONS:
             param_count += 1
             has_desc = any(
@@ -434,6 +453,156 @@ def _build_mark3labs_finding(new_tool_call, rel: str, line: int, src: bytes, con
             "warning",
         ))
     return finding
+
+
+def _finding_from_name_description(name_val: str, description: str, rel: str, line: int) -> ToolFinding:
+    """Shared tail end of building a ToolFinding once a tool's name/description
+    text is known but no handler is available to check parameters against —
+    used by both the bare-literal and closure-call slice-element paths below.
+    `param_count=0` deliberately means "not checked", not "no parameters"."""
+    finding = ToolFinding(
+        name=name_val,
+        file=rel,
+        line=line,
+        has_description=bool(description.strip()),
+        description_len=len(description.strip()),
+        param_count=0,
+        typed_param_count=0,
+        has_docstring_params=False,
+        has_try_except=True,  # not checked for Go — see module docstring
+        has_bare_except=False,
+        description_text=description,
+    )
+    if not finding.has_description:
+        finding.issues.append(ToolIssue(
+            name_val, rel, finding.line, "description",
+            "Tool has no description. An agent cannot decide when to call this.",
+            "error",
+        ))
+    elif finding.description_len < 10:
+        finding.issues.append(ToolIssue(
+            name_val, rel, finding.line, "description",
+            f"Description is only {finding.description_len} chars — likely just restates the name.",
+            "warning",
+        ))
+    return finding
+
+
+def _build_tool_slice_element_finding(
+    item, rel: str, line: int, src: bytes, const_registry: dict[str, str] | None = None
+) -> ToolFinding | None:
+    """Builds a ToolFinding from one bare `{Name: "...", Description: "..."}`
+    element of a `[]*mcp.Tool{...}`/`[]mcp.Tool{...}` slice literal — see the
+    module docstring's `clidey/whodb` note. No handler is available at this
+    site, so parameters are deliberately left unchecked (`param_count=0`)
+    rather than guessed at."""
+    fields = _composite_fields(item, src)
+    name_val = _string_value(fields.get("Name"), src)
+    if name_val is None:
+        return None
+    description = _resolve_string_field(fields.get("Description"), src, const_registry) or ""
+    return _finding_from_name_description(name_val, description, rel, line)
+
+
+def _collect_local_tool_factories(tree_root, src: bytes) -> dict[str, tuple[list[str], dict[str, str]]]:
+    """Same-file registry of local closures shaped like
+    `read := func(name, description string) *mcp.Tool { return &mcp.Tool{
+    Name: name, Description: description, ...} }` — a compact way to define
+    many similarly-shaped tools by position (verified against
+    `clidey/whodb`'s `read(...)` helper, used for 35 of its tools). Maps the
+    closure's name to (its parameter names in call order, {param name: the
+    `mcp.Tool` field it's passed straight through to}) — only a direct
+    passthrough (`Field: paramName`) is recorded, so a closure that builds a
+    field from anything else just won't have that field resolved later.
+    Same ambiguous-name safety rule as `_collect_struct_types`: a name
+    redeclared differently anywhere in the file is dropped entirely."""
+    factories: dict[str, tuple[list[str], dict[str, str]]] = {}
+    ambiguous: set[str] = set()
+    for node in _walk(tree_root):
+        if node.type != "short_var_declaration":
+            continue
+        left = node.child_by_field_name("left")
+        right = node.child_by_field_name("right")
+        if left is None or right is None:
+            continue
+        left_ids = [c for c in left.children if c.type == "identifier"]
+        right_vals = [c for c in right.children if c.type == "func_literal"]
+        if len(left_ids) != 1 or len(right_vals) != 1:
+            continue
+        name = _text(left_ids[0], src)
+        func_lit = right_vals[0]
+        params_node = func_lit.child_by_field_name("parameters")
+        body = func_lit.child_by_field_name("body")
+        if params_node is None or body is None:
+            continue
+        param_names: list[str] = []
+        for decl in params_node.children:
+            if decl.type != "parameter_declaration":
+                continue
+            param_names.extend(_text(c, src) for c in decl.children if c.type == "identifier")
+        if not param_names:
+            continue
+        return_stmt = next((c for c in body.children if c.type == "return_statement"), None)
+        if return_stmt is None:
+            continue
+        expr_list = next((c for c in return_stmt.children if c.type == "expression_list"), None)
+        if expr_list is None or len(expr_list.children) != 1:
+            continue
+        ret_val = _unwrap_pointer(expr_list.children[0])
+        if _composite_type_name(ret_val, src) != "mcp.Tool":
+            continue
+        param_set = set(param_names)
+        field_by_param: dict[str, str] = {}
+        for field_name, value_node in _composite_fields(ret_val, src).items():
+            if value_node.type == "identifier":
+                val_name = _text(value_node, src)
+                if val_name in param_set:
+                    field_by_param[val_name] = field_name
+        if not field_by_param:
+            continue
+        entry = (param_names, field_by_param)
+        if name in ambiguous:
+            continue
+        if name in factories and factories[name] != entry:
+            ambiguous.add(name)
+            del factories[name]
+            continue
+        factories[name] = entry
+    return factories
+
+
+def _build_tool_slice_call_finding(
+    call_node, factories: dict[str, tuple[list[str], dict[str, str]]], rel: str, line: int, src: bytes
+) -> ToolFinding | None:
+    """Resolves a `read("name", "description")`-style call to a local
+    tool-factory closure (`_collect_local_tool_factories`) into a
+    ToolFinding. Only a call with literal-string args, one per closure
+    parameter, is resolved — any other shape is left unresolved rather than
+    guessed at."""
+    func = call_node.child_by_field_name("function")
+    if func is None or func.type != "identifier":
+        return None
+    factory = factories.get(_text(func, src))
+    if factory is None:
+        return None
+    param_names, field_by_param = factory
+    args_node = call_node.child_by_field_name("arguments")
+    if args_node is None:
+        return None
+    arg_nodes = [c for c in args_node.children if c.type not in ("(", ")", ",")]
+    if len(arg_nodes) != len(param_names):
+        return None
+    values: dict[str, str] = {}
+    for pname, anode in zip(param_names, arg_nodes):
+        val = _string_value(anode, src)
+        if val is None:
+            return None
+        values[pname] = val
+    name_val = values.get(next((p for p, f in field_by_param.items() if f == "Name"), ""))
+    if name_val is None:
+        return None
+    description = values.get(next((p for p, f in field_by_param.items() if f == "Description"), ""), "")
+    return _finding_from_name_description(name_val, description, rel, line)
 
 
 def _struct_field_docs(struct_type, src: bytes) -> tuple[int, int]:
@@ -621,8 +790,37 @@ def find_go_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
 
     for f, file_root, src in parsed:
         rel = str(f.relative_to(root))
+        local_factories = _collect_local_tool_factories(file_root, src)
         for node in _walk(file_root):
             if node.type == "composite_literal":
+                type_text = _composite_type_name(node, src)
+                if type_text in ("[]*mcp.Tool", "[]mcp.Tool"):
+                    # A typed slice of bare `mcp.Tool` literals — see module
+                    # docstring's `clidey/whodb` note. Each element is its own
+                    # definition site.
+                    body = node.child_by_field_name("body")
+                    if body is not None and body.type == "literal_value":
+                        for element in body.children:
+                            if element.type != "literal_element":
+                                continue
+                            item = next(
+                                (c for c in element.children
+                                 if c.type in ("literal_value", "composite_literal", "call_expression")),
+                                None,
+                            )
+                            if item is None:
+                                continue
+                            if item.type == "call_expression":
+                                finding = _build_tool_slice_call_finding(
+                                    item, local_factories, rel, item.start_point[0] + 1, src
+                                )
+                            else:
+                                finding = _build_tool_slice_element_finding(
+                                    item, rel, item.start_point[0] + 1, src, const_registry
+                                )
+                            if finding is not None:
+                                findings.append(finding)
+                    continue
                 # mark3labs/mcp-go's own `server.ServerTool{Tool: mcp.NewTool(...),
                 # Handler: ...}` struct — a first-class SDK type (server/server.go),
                 # used to build a tool as data and register it elsewhere, often
@@ -630,7 +828,7 @@ def find_go_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
                 # hashicorp/terraform-mcp-server, where every tool is built this
                 # way, never via a literal `AddTool(mcp.NewTool(...), ...)` call
                 # site). The composite literal itself is the definition site.
-                if _composite_type_name(node, src) != "server.ServerTool":
+                if type_text != "server.ServerTool":
                     continue
                 fields = _composite_fields(node, src)
                 tool_field = fields.get("Tool")
@@ -690,7 +888,7 @@ def find_go_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
             name_val = _string_value(fields.get("Name"), src)
             if name_val is None:
                 continue  # dynamic/referenced tool name — can't attribute a finding to it
-            description = _resolve_string_field(fields.get("Description"), src) or ""
+            description = _resolve_string_field(fields.get("Description"), src, const_registry) or ""
 
             handler_node = _resolve_handler(handler_arg, func_registry, src)
 
