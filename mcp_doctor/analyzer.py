@@ -1,7 +1,11 @@
 """Static analysis of MCP (Model Context Protocol) server implementations.
 
 Walks a Python codebase, finds tool definitions authored with the FastMCP
-decorator style (``@mcp.tool()``), the low-level SDK style
+decorator style (``@mcp.tool()``), FastMCP's direct-call style
+(``provider.tool(some_func, name="...", description="...")`` — one of
+FastMCP's own documented calling patterns for ``.tool()``, distinct from
+using it as a decorator; verified real on ``qdrant/mcp-server-qdrant``, the
+official Qdrant MCP server), the low-level SDK style
 (``Tool(name=..., description=..., inputSchema=...)``), or a class-based
 registry (``class XyzTool(Tool):`` with an ``apply()`` method as the handler
 — verified against ``oraios/serena``, 28k+ stars: the tool name comes from
@@ -548,6 +552,130 @@ def _find_fastmcp_tools(
     return findings
 
 
+def _bare_direct_call_finding(name: str, description: str, file: str, line: int) -> ToolFinding:
+    """A ToolFinding for a `.tool(func, name=..., ...)` direct call whose
+    `func` couldn't be traced back to a real function definition (see
+    `_resolve_direct_call_function`) — only name/description are checked,
+    same partial-coverage stance used elsewhere in this codebase when no
+    handler is available to inspect. `has_try_except=True` here means "not
+    inspected", not "verified present" — the point is to avoid a false
+    negative on an axis we genuinely can't check, not to claim it's fine."""
+    finding = ToolFinding(
+        name=name,
+        file=file,
+        line=line,
+        has_description=bool(description.strip()),
+        description_len=len(description.strip()),
+        param_count=0,
+        typed_param_count=0,
+        has_docstring_params=False,
+        has_try_except=True,
+        has_bare_except=False,
+        description_text=description,
+    )
+    if not finding.has_description:
+        finding.issues.append(ToolIssue(
+            name, file, line, "description",
+            "Tool has no description. An agent cannot decide when to call this.",
+            "error",
+        ))
+    elif finding.description_len < 10:
+        finding.issues.append(ToolIssue(
+            name, file, line, "description",
+            f"Description is only {finding.description_len} chars — likely just restates the name.",
+            "warning",
+        ))
+    return finding
+
+
+def _resolve_direct_call_function(
+    name: str, scope: ast.AST
+) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+    """Resolves `name` to a function definition within `scope`, only when it
+    unambiguously refers to one: either `name` is itself a function def
+    somewhere in scope, or there is exactly one simple `name = other_name`
+    assignment in scope and `other_name` is a function def. Any additional
+    assignment to `name` (e.g. `name = wrap_something(name)`, a common way
+    to conditionally post-process a tool function before registering it —
+    verified against `qdrant/mcp-server-qdrant`) makes which function
+    actually gets registered depend on runtime config; correctly left
+    unresolved rather than guessing which branch runs."""
+    local_funcs = {
+        n.name: n for n in ast.walk(scope)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n is not scope
+    }
+    if name in local_funcs:
+        return local_funcs[name]
+    assigns = [
+        n for n in ast.walk(scope)
+        if isinstance(n, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == name for t in n.targets)
+    ]
+    if len(assigns) != 1:
+        return None
+    value = assigns[0].value
+    if isinstance(value, ast.Name):
+        return local_funcs.get(value.id)
+    return None
+
+
+def _enclosing_scope(tree: ast.Module, node: ast.AST) -> ast.AST:
+    """Best-effort nearest enclosing function containing `node` (or the
+    module itself), found via line-range containment — `ast` doesn't wire up
+    parent pointers on its own."""
+    best = tree
+    for n in ast.walk(tree):
+        if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        end = getattr(n, "end_lineno", None) or n.lineno
+        if n.lineno <= node.lineno <= end and (best is tree or n.lineno > best.lineno):
+            best = n
+    return best
+
+
+def _find_direct_call_tools(
+    tree: ast.Module,
+    file: str,
+    alias_registry: dict[str, bool] | None = None,
+    error_handling_registry: dict[str, bool] | None = None,
+) -> list[ToolFinding]:
+    """FastMCP's `.tool()` also supports a direct call form — the function
+    passed as a positional argument rather than used as a decorator:
+    `provider.tool(some_func, name="...", description="...")`, confirmed
+    directly against FastMCP's own docstring for this method ("direct
+    function call" is one of its documented calling patterns) — and real on
+    `qdrant/mcp-server-qdrant`, the official Qdrant MCP server, where both of
+    its tools are registered this way and neither was detected before this.
+    Only resolves a tool whose `name=` is a literal string; see
+    `_resolve_direct_call_function` for when the registered function itself
+    can (and can't) be resolved for full param/error-handling analysis."""
+    findings = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        attr = func.attr if isinstance(func, ast.Attribute) else None
+        if attr not in FASTMCP_DECORATOR_NAMES:
+            continue
+        if not node.args or not isinstance(node.args[0], ast.Name):
+            continue
+        name_override = _kwarg_str(node, "name")
+        if name_override is None:
+            continue
+        description_override = _kwarg_str(node, "description") or ""
+        scope = _enclosing_scope(tree, node)
+        fn_node = _resolve_direct_call_function(node.args[0].id, scope)
+        if fn_node is not None:
+            excluded_args = _kwarg_str_list(node, "exclude_args")
+            findings.append(_analyze_function_as_tool(
+                fn_node, file, description_override or None, alias_registry, name_override,
+                excluded_args, error_handling_registry,
+            ))
+        else:
+            findings.append(_bare_direct_call_finding(name_override, description_override, file, node.lineno))
+    return findings
+
+
 def _find_lowlevel_tools(tree: ast.Module, file: str) -> list[ToolFinding]:
     """Find Tool(name=..., description=..., inputSchema=...) constructor calls."""
     findings = []
@@ -748,6 +876,7 @@ def analyze_repo(root: Path) -> Report:
     tools: list[ToolFinding] = []
     for rel, tree in trees:
         tools.extend(_find_fastmcp_tools(tree, rel, alias_registry, error_handling_registry))
+        tools.extend(_find_direct_call_tools(tree, rel, alias_registry, error_handling_registry))
         tools.extend(_find_lowlevel_tools(tree, rel))
         tools.extend(_find_class_based_tools(tree, rel, alias_registry, error_handling_registry))
 

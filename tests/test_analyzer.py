@@ -718,6 +718,147 @@ def test_valid_tool_name_not_flagged(tmp_path):
     assert not any(i.check == "tool_name" for i in report.repo_issues)
 
 
+def test_direct_call_tool_resolved_via_same_name_function(tmp_path):
+    # `provider.tool(get_forecast, name="...")` — the plain, unaliased case:
+    # the registered function is literally the def it names, no reassignment
+    # to trace at all. One of FastMCP's own documented `.tool()` calling
+    # patterns ("direct function call"), distinct from decorator use.
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        def get_forecast(city: str) -> str:
+            \"\"\"Get a weather forecast.
+
+            Args:
+                city: The city name.
+            \"\"\"
+            try:
+                return city
+            except ValueError as e:
+                return str(e)
+
+        mcp.tool(get_forecast, name="get_forecast", description="Get a weather forecast for a city.")
+        """)
+    report = analyze_repo(tmp_path)
+    tool = report.tools[0]
+    assert tool.name == "get_forecast"
+    assert tool.description_text == "Get a weather forecast for a city."
+    assert tool.param_count == 1
+    assert not any(i.check == "param_docs" for i in tool.issues)
+
+
+def test_direct_call_tool_resolved_via_single_reassignment(tmp_path):
+    # `find_foo = find` (one unconditional rename), then registered as
+    # `find_foo` — still safely resolvable back to `find`'s own definition.
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        def setup():
+            def find(query: str) -> str:
+                \"\"\"Find things.
+
+                Args:
+                    query: What to search for.
+                \"\"\"
+                try:
+                    return query
+                except ValueError as e:
+                    return str(e)
+
+            find_foo = find
+            mcp.tool(find_foo, name="qdrant-find", description="Find memories.")
+        """)
+    report = analyze_repo(tmp_path)
+    tool = report.tools[0]
+    assert tool.name == "qdrant-find"
+    assert tool.param_count == 1
+    assert not any(i.check == "param_docs" for i in tool.issues)
+
+
+def test_direct_call_tool_with_ambiguous_reassignment_not_guessed(tmp_path):
+    # `find_foo` is reassigned again through a wrapping call before
+    # registration (a common way to conditionally post-process a tool
+    # function — verified against qdrant/mcp-server-qdrant) — which branch
+    # actually runs depends on runtime config, so this is correctly left
+    # unresolved: name/description are still checked, but params aren't
+    # guessed at from the wrong (or right) branch.
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        def setup():
+            def find(query: str) -> str:
+                \"\"\"Find things.
+
+                Args:
+                    query: What to search for.
+                \"\"\"
+                try:
+                    return query
+                except ValueError as e:
+                    return str(e)
+
+            find_foo = find
+            if some_condition:
+                find_foo = wrap_filters(find_foo)
+            mcp.tool(find_foo, name="qdrant-find", description="Find memories.")
+        """)
+    report = analyze_repo(tmp_path)
+    tool = report.tools[0]
+    assert tool.name == "qdrant-find"
+    assert tool.description_text == "Find memories."
+    assert tool.param_count == 0
+    assert not any(i.check == "param_docs" for i in tool.issues)
+
+
+def test_direct_call_tool_with_non_literal_description_not_guessed(tmp_path):
+    # `description=self.tool_settings.tool_find_description` — a settings
+    # attribute reference, not a literal string — combined with an
+    # unresolvable registered function (no docstring to fall back on
+    # either). Correctly left with no description at all rather than
+    # chasing the attribute back through a Settings class's Field default.
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        def setup():
+            def find(query: str) -> str:
+                return query
+
+            find_foo = find
+            if some_condition:
+                find_foo = wrap_filters(find_foo)
+            mcp.tool(find_foo, name="qdrant-find", description=self.tool_settings.tool_find_description)
+        """)
+    report = analyze_repo(tmp_path)
+    tool = report.tools[0]
+    assert tool.name == "qdrant-find"
+    assert not tool.has_description
+    assert any(i.check == "description" for i in tool.issues)
+
+
+def test_direct_call_not_confused_with_decorator_usage(tmp_path):
+    # A decorator call site (`@mcp.tool(name=...)`) shouldn't also be
+    # double-counted as a direct-call registration — its shape (no
+    # positional function argument in the call itself) doesn't match the
+    # direct-call pattern's detection criterion.
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        @mcp.tool(name="get_forecast", description="Get a weather forecast.")
+        def get_forecast(city: str) -> str:
+            try:
+                return city
+            except ValueError as e:
+                return str(e)
+        """)
+    report = analyze_repo(tmp_path)
+    assert len(report.tools) == 1
+
+
 def test_missing_readme_and_license_flagged(tmp_path):
     write(tmp_path, "server.py", "x = 1\n")
     report = analyze_repo(tmp_path)
