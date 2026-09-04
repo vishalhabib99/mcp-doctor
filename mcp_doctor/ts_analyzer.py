@@ -268,6 +268,33 @@ def _find_try(node) -> bool:
     return any(n.type == "try_statement" for n in _walk(node))
 
 
+def _collect_function_declarations(tree_root, src: bytes) -> dict[str, "Node"]:
+    """Map a named `function foo(...) {...}` (or `async function foo(...) {...}`)
+    declaration's name to its own node, for resolving a `handle: foo`-style
+    identifier reference to the actual function body. Same file-local,
+    ambiguous-name-safe convention as `_collect_const_objects` — a name
+    declared more than once is left out of the registry rather than guessed.
+    Deliberately not merged into that registry: a `function_declaration` has
+    no `variable_declarator` wrapper to walk."""
+    registry: dict[str, "Node"] = {}
+    ambiguous: set[str] = set()
+    for n in _walk(tree_root):
+        if n.type != "function_declaration":
+            continue
+        name_node = n.child_by_field_name("name")
+        if name_node is None:
+            continue
+        name = _text(name_node, src)
+        if name in ambiguous:
+            continue
+        if name in registry and registry[name] is not n:
+            ambiguous.add(name)
+            del registry[name]
+            continue
+        registry[name] = n
+    return registry
+
+
 def _collect_const_objects(tree_root, src: bytes) -> dict[str, tuple["Node", bytes]]:
     """Map `const NAME = <expr>` at any scope to (<expr>'s node, this file's src),
     for resolving identifiers used as a config or schema argument. The src travels
@@ -574,8 +601,51 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
         rel = str(f.relative_to(root))
         local_consts = _collect_const_objects(file_root, src)
         consts = {**global_consts, **local_consts}
+        local_funcs = _collect_function_declarations(file_root, src)
 
         for node in _walk(file_root):
+            if node.type == "variable_declarator":
+                # A bare (no wrapping call) typed const tool object, e.g.
+                # `const navigateTool: Tool<typeof NavigateInputSchema> = {
+                #   capability: "core", schema: { name, description, inputSchema },
+                #   handle: handleNavigate,
+                # }` — verified against browserbase/mcp-server-browserbase, whose
+                # own MCP-SDK registration site (`server.tool(tool.schema.name,
+                # ...)`) is a runtime `.forEach()` over a collected array with only
+                # property-accessed args, genuinely unresolvable there. The
+                # `schema`+`handle` sibling-field combination is distinctive
+                # enough to trust without needing a project-specific type name
+                # (the `Tool<...>` annotation varies per project) — requiring a
+                # resolvable literal `schema.name` keeps a same-named-but-
+                # unrelated object from being mistaken for one.
+                value_node = node.child_by_field_name("value")
+                if value_node is None or value_node.type != "object":
+                    continue
+                outer_pairs = _object_pairs(value_node, src)
+                schema_field = outer_pairs.get("schema")
+                handle_field = outer_pairs.get("handle")
+                if schema_field is None or handle_field is None:
+                    continue
+                schema_obj, schema_src = _resolve(schema_field, src, consts)
+                if schema_obj.type != "object":
+                    continue
+                schema_pairs = _object_pairs(schema_obj, schema_src)
+                if "name" not in schema_pairs:
+                    continue  # not this shape — a same-named unrelated object
+                name_val = _resolve_str(schema_pairs.get("name"), schema_src, consts)
+                if name_val is None:
+                    continue  # dynamic tool name — can't attribute a finding to it
+                handler = handle_field
+                if handler.type == "identifier":
+                    handler = local_funcs.get(_text(handler, src))
+                elif handler.type not in ("arrow_function", "function_expression"):
+                    handler = None
+                finding = _analyze_ts_tool(
+                    name_val, schema_obj, schema_src, None, schema_src, handler, consts,
+                    rel, node.start_point[0] + 1,
+                )
+                findings.append(finding)
+                continue
             if node.type != "call_expression":
                 continue
             method = _callee_name(node)

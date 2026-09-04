@@ -666,3 +666,83 @@ def test_account_tool_style_is_recognized(tmp_path):
     assert "error_handling" not in checks
     # page has no .describe(...) — should still be flagged like any other tool
     assert "param_docs" in checks
+
+
+def test_bare_typed_const_tool_object_is_recognized(tmp_path):
+    # Verified against a real miss: browserbase/mcp-server-browserbase defines
+    # every tool as a bare `const xTool: Tool<...> = { schema: ..., handle: ... }`
+    # object — no wrapping call anywhere — and registers it via a runtime
+    # `.forEach()` over a collected array with only property-accessed args
+    # (`server.tool(tool.schema.name, ...)`), genuinely unresolvable at that
+    # call site. `schema` is itself a separately-declared const object
+    # reference, and `handle` references a named `function` declaration
+    # (not an inline arrow function) — both had to be resolved.
+    write(tmp_path, "navigate.ts", """
+        import { z } from "zod";
+
+        const NavigateInputSchema = z.object({
+          url: z.string().min(1),
+        });
+
+        const navigateSchema = {
+          name: "navigate",
+          description: "Navigate to a URL",
+          inputSchema: NavigateInputSchema,
+        };
+
+        async function handleNavigate(context, params) {
+          const action = async () => {
+            try {
+              return { content: [{ type: "text", text: "ok" }] };
+            } catch (error) {
+              throw new Error(`Failed to navigate: ${error}`);
+            }
+          };
+          return { action, waitForNetwork: false };
+        }
+
+        const navigateTool = {
+          capability: "core",
+          schema: navigateSchema,
+          handle: handleNavigate,
+        };
+
+        export default navigateTool;
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert len(findings) == 1
+    tool = findings[0]
+    assert tool.name == "navigate"
+    checks = {i.check for i in tool.issues}
+    assert "description" not in checks
+    assert "param_docs" in checks  # url has no .describe(...)
+    # try/catch lives inside the nested `action` closure the handler
+    # returns, not in handleNavigate's own top-level statements — the
+    # subtree-wide try_statement search should still find it.
+    assert "error_handling" not in checks
+
+
+def test_bare_typed_const_tool_object_dynamic_name_is_skipped(tmp_path):
+    write(tmp_path, "dynamic.ts", """
+        const dynamicTool = {
+          capability: "core",
+          schema: buildSchema(),
+          handle: someHandler,
+        };
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert findings == []
+
+
+def test_bare_const_array_value_is_not_mistaken_for_a_tool(tmp_path):
+    # `const TOOLS = [navigateTool, actTool]` is a variable_declarator too,
+    # but its value is an array, not an object with schema/handle fields —
+    # must not be treated as (or double-count) a tool definition.
+    write(tmp_path, "index.ts", """
+        import navigateTool from "./navigate.js";
+        import actTool from "./act.js";
+
+        export const TOOLS = [navigateTool, actTool];
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert findings == []
