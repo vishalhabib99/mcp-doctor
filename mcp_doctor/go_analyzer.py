@@ -504,6 +504,21 @@ def _build_tool_slice_element_finding(
     return _finding_from_name_description(name_val, description, rel, line)
 
 
+def _block_statements(block_node) -> list:
+    """Top-level statements of a `block` node — e.g. a function or closure
+    body — regardless of whether the installed tree-sitter-go wraps them in
+    an intermediate `statement_list` node (grammar >=0.24) or lists them as
+    the block's own direct children (<0.24; confirmed by diffing the
+    grammar's `block`/`_statement_list` rule across its own release tags).
+    Doesn't descend into nested blocks (an `if`/`for`/etc.), matching the
+    original single-grammar behavior this generalizes."""
+    if block_node is None:
+        return []
+    stmt_list = next((c for c in block_node.children if c.type == "statement_list"), None)
+    container = stmt_list if stmt_list is not None else block_node
+    return [c for c in container.children if c.type not in ("{", "}")]
+
+
 def _collect_local_tool_factories(tree_root, src: bytes) -> dict[str, tuple[list[str], dict[str, str]]]:
     """Same-file registry of local closures shaped like
     `read := func(name, description string) *mcp.Tool { return &mcp.Tool{
@@ -542,7 +557,7 @@ def _collect_local_tool_factories(tree_root, src: bytes) -> dict[str, tuple[list
             param_names.extend(_text(c, src) for c in decl.children if c.type == "identifier")
         if not param_names:
             continue
-        return_stmt = next((c for c in body.children if c.type == "return_statement"), None)
+        return_stmt = next((c for c in _block_statements(body) if c.type == "return_statement"), None)
         if return_stmt is None:
             continue
         expr_list = next((c for c in return_stmt.children if c.type == "expression_list"), None)
