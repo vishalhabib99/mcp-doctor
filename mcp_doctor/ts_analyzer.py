@@ -6,6 +6,7 @@ for the official TS SDK's two high-level registration styles, the community
 `Server` SDK's static-list style:
 
     server.registerTool(name, { description, inputSchema: ZodObjectOrConst }, handler)
+    context.accountTool(name, { description, inputSchema: ZodObjectOrConst }, handler)  // same config shape as registerTool, wrapping it internally
     server.tool(name, description, zodShapeOrConst, handler)
     server.addTool({ name, description, parameters: ZodObjectOrConst, execute })
     server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: [...ToolArrayConst] }))
@@ -42,7 +43,7 @@ try:
 except ImportError:  # pragma: no cover - exercised via TS_AVAILABLE branch
     TS_AVAILABLE = False
 
-REGISTER_METHODS = {"registerTool", "tool"}
+REGISTER_METHODS = {"registerTool", "tool", "accountTool"}
 # fastmcp's single-object style: server.addTool({ name, description, parameters, execute })
 SINGLE_OBJECT_METHODS = {"addTool"}
 # low-level Server SDK style: server.setRequestHandler(ListToolsRequestSchema, handler)
@@ -675,7 +676,7 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
             if name_val is None:
                 continue  # dynamic tool name — can't attribute a finding to it
             handler = arg_nodes[-1] if arg_nodes[-1].type in ("arrow_function", "function_expression") else None
-            if method == "registerTool":
+            if method in ("registerTool", "accountTool"):
                 config_raw, schema_raw = arg_nodes[1], None
             else:  # "tool": name, description, schema, handler
                 config_raw, schema_raw = arg_nodes[1], arg_nodes[2] if len(arg_nodes) >= 4 else None

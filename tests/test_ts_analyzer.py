@@ -629,3 +629,40 @@ def test_tool_inside_a_plain_tests_directory_is_excluded(tmp_path):
         """)
     findings, _ = find_ts_tools(tmp_path)
     assert findings == []
+
+
+def test_account_tool_style_is_recognized(tmp_path):
+    # Verified against a real miss: cloudflare/mcp-server-cloudflare registers
+    # roughly 60 of its ~140 tools via a `context.accountTool(name, config,
+    # handler)` method that wraps `registerTool` internally with the identical
+    # `{ description, inputSchema }` config shape (registration-context.ts) —
+    # a distinct method name mcp-doctor's REGISTER_METHODS didn't recognize.
+    write(tmp_path, "ai-gateway.tools.ts", """
+        import { z } from "zod";
+
+        export function registerAIGatewayTools(context) {
+          context.accountTool(
+            "list_gateways",
+            {
+              description: "List Gateways",
+              inputSchema: z.object({ page: z.number() }),
+            },
+            async (params, accountId) => {
+              try {
+                return { content: [{ type: "text", text: "ok" }] };
+              } catch (error) {
+                return { content: [{ type: "text", text: String(error) }], isError: true };
+              }
+            }
+          );
+        }
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert len(findings) == 1
+    tool = findings[0]
+    assert tool.name == "list_gateways"
+    checks = {i.check for i in tool.issues}
+    assert "description" not in checks
+    assert "error_handling" not in checks
+    # page has no .describe(...) — should still be flagged like any other tool
+    assert "param_docs" in checks
