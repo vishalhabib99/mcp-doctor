@@ -11,7 +11,12 @@ registry (``class XyzTool(Tool):`` with an ``apply()`` method as the handler
 — verified against ``oraios/serena``, 28k+ stars: the tool name comes from
 the class name itself, stripped of a trailing "Tool" and snake_cased, and
 the description is the class's own docstring rather than any decorator
-argument), and scores them
+argument), and scores them. For the low-level SDK style, an ``inputSchema``
+property may itself be built by a shared zero-arg helper function
+(``"paper_id": _paper_id_property()``) or spread in from one
+(``**_page_properties()``) rather than written inline — verified against
+``blazickjp/arxiv-mcp-server`` — and is resolved the same way rather than
+being reported as undocumented.
 against a set of conformance and quality checks that matter for an agent
 actually calling the tool at runtime: does it have a description an LLM
 can act on, are parameters documented and typed, does it handle errors
@@ -676,9 +681,51 @@ def _find_direct_call_tools(
     return findings
 
 
+def _collect_property_builder_funcs(tree: ast.Module) -> dict[str, ast.Dict]:
+    """Same-file registry of zero-arg helper functions shaped like
+    `def prop() -> ...: return {...}` — a way to share one JSON-schema
+    property (or a small group of them, spread with `**`) across several
+    tools' `inputSchema` rather than repeating the dict literal inline —
+    verified against `blazickjp/arxiv-mcp-server`'s `_paper_id_property`/
+    `_page_properties` helpers. Maps the function's name to its single
+    returned dict literal; a function with any parameter, or whose body
+    isn't exactly one `return {...}`, is left out — nothing to safely
+    resolve without evaluating it."""
+    registry: dict[str, ast.Dict] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        a = node.args
+        if a.args or a.vararg or a.kwonlyargs or a.kwarg or a.posonlyargs:
+            continue
+        returns = [n for n in node.body if isinstance(n, ast.Return)]
+        if len(returns) != 1 or not isinstance(returns[0].value, ast.Dict):
+            continue
+        registry[node.name] = returns[0].value
+    return registry
+
+
+def _resolve_property_dict(node: ast.expr | None, builders: dict[str, ast.Dict]) -> ast.Dict | None:
+    """Resolves an inline dict literal directly, or a call to a known
+    zero-arg property-builder function (`_collect_property_builder_funcs`)
+    to its returned dict literal. A call to anything else — an unknown or
+    parameterized function, a conditional, ... — is left unresolved rather
+    than guessed at."""
+    if isinstance(node, ast.Dict):
+        return node
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and not node.args and not node.keywords:
+        return builders.get(node.func.id)
+    return None
+
+
+def _property_has_desc(pv: ast.Dict) -> bool:
+    return any(isinstance(k, ast.Constant) and k.value == "description" for k in pv.keys)
+
+
 def _find_lowlevel_tools(tree: ast.Module, file: str) -> list[ToolFinding]:
     """Find Tool(name=..., description=..., inputSchema=...) constructor calls."""
     findings = []
+    property_builders = _collect_property_builder_funcs(tree)
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -698,25 +745,28 @@ def _find_lowlevel_tools(tree: ast.Module, file: str) -> list[ToolFinding]:
         schema_kw = next((kw for kw in node.keywords if kw.arg == "inputSchema"), None)
         param_count = 0
         typed_param_count = 0
-        has_docstring_params = True
         if schema_kw is not None and isinstance(schema_kw.value, ast.Dict):
             for k, v in zip(schema_kw.value.keys, schema_kw.value.values):
-                if isinstance(k, ast.Constant) and k.value == "properties" and isinstance(v, ast.Dict):
-                    param_count = len(v.keys)
-                    for pk, pv in zip(v.keys, v.values):
-                        if isinstance(pv, ast.Dict):
-                            has_desc = any(
-                                isinstance(pk2, ast.Constant) and pk2.value == "description"
-                                for pk2 in pv.keys
-                            )
-                            has_type = any(
-                                isinstance(pk2, ast.Constant) and pk2.value == "type"
-                                for pk2 in pv.keys
-                            )
-                            if has_desc:
+                if not (isinstance(k, ast.Constant) and k.value == "properties" and isinstance(v, ast.Dict)):
+                    continue
+                for pk, pv in zip(v.keys, v.values):
+                    if pk is None:
+                        # A `**spread_call()` entry — resolve and count each of
+                        # its own properties individually, rather than as one
+                        # opaque, always-undocumented property.
+                        spread = _resolve_property_dict(pv, property_builders)
+                        if spread is None:
+                            param_count += 1
+                            continue
+                        for _, spv in zip(spread.keys, spread.values):
+                            param_count += 1
+                            if isinstance(spv, ast.Dict) and _property_has_desc(spv):
                                 typed_param_count += 1
-                            if not has_type:
-                                has_docstring_params = False
+                        continue
+                    param_count += 1
+                    resolved = _resolve_property_dict(pv, property_builders)
+                    if resolved is not None and _property_has_desc(resolved):
+                        typed_param_count += 1
 
         finding = ToolFinding(
             name=name,

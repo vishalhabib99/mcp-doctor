@@ -309,6 +309,103 @@ def test_lowlevel_tool_with_dynamic_name_is_skipped_not_unnamed(tmp_path):
     assert report.tools == []
 
 
+def test_lowlevel_tool_property_from_zero_arg_builder_counts_as_documented(tmp_path):
+    # `"paper_id": _paper_id_property()` — a schema property built by a
+    # shared zero-arg helper rather than written inline — verified against
+    # blazickjp/arxiv-mcp-server's `_paper_id_property`. The helper's own
+    # dict literal has a description; that should count, not be reported as
+    # undocumented just because it's a call rather than a literal.
+    write(tmp_path, "server.py", """
+        from mcp.types import Tool
+
+        def _paper_id_property():
+            return {"type": "string", "description": "Validated arXiv paper ID"}
+
+        TOOLS = [
+            Tool(
+                name="get_paper",
+                description="Get a paper by its arXiv ID.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "paper_id": _paper_id_property(),
+                    },
+                },
+            )
+        ]
+        """)
+    report = analyze_repo(tmp_path)
+    tool = report.tools[0]
+    assert not any(i.check == "param_docs" for i in tool.issues)
+
+
+def test_lowlevel_tool_spread_properties_from_zero_arg_builder_expanded(tmp_path):
+    # `**_page_properties()` — several properties spread in from a shared
+    # helper, rather than counted as one opaque, always-undocumented
+    # property (the pre-fix behavior: **spread's key is None, so it never
+    # matched the inline-dict check at all).
+    write(tmp_path, "server.py", """
+        from mcp.types import Tool
+
+        def _page_properties():
+            return {
+                "start": {"type": "integer", "description": "Offset"},
+                "max_chars": {"type": "integer", "description": "Limit"},
+                "return_full_text": {"type": "boolean"},
+            }
+
+        TOOLS = [
+            Tool(
+                name="read_section",
+                description="Read part of a paper section.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "section_id": {"type": "string", "description": "Section id"},
+                        **_page_properties(),
+                    },
+                },
+            )
+        ]
+        """)
+    report = analyze_repo(tmp_path)
+    tool = report.tools[0]
+    assert tool.param_count == 4
+    assert tool.typed_param_count == 3
+    docs_issue = next(i for i in tool.issues if i.check == "param_docs")
+    assert "1/4" in docs_issue.message
+
+
+def test_lowlevel_tool_property_from_parameterized_call_not_guessed(tmp_path):
+    # A property built by a call that takes arguments isn't safely
+    # resolvable without evaluating it with the right arguments — correctly
+    # left as an opaque, undocumented property rather than guessed at.
+    write(tmp_path, "server.py", """
+        from mcp.types import Tool
+
+        def _string_property(desc):
+            return {"type": "string", "description": desc}
+
+        TOOLS = [
+            Tool(
+                name="get_paper",
+                description="Get a paper by its arXiv ID.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "paper_id": _string_property("Validated arXiv paper ID"),
+                    },
+                },
+            )
+        ]
+        """)
+    report = analyze_repo(tmp_path)
+    tool = report.tools[0]
+    assert tool.param_count == 1
+    assert tool.typed_param_count == 0
+    assert any(i.check == "param_docs" for i in tool.issues)
+
+
 def test_unparseable_file_is_flagged_not_silently_skipped(tmp_path):
     write(tmp_path, "server.py", """
         def broken(
