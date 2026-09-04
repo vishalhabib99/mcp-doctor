@@ -120,8 +120,11 @@ def _walk(node):
 
 
 def _string_value(node, src: bytes) -> str | None:
-    """Resolve `"..."` and `` `...` `` literals. No concatenation support yet
-    (unverified how common `+`-joined descriptions are in real Go servers)."""
+    """Resolve `"..."` and `` `...` `` literals, and `+`-joined chains of them
+    (a common way to wrap a long tool description across multiple lines —
+    verified against `skyhook-io/radar`'s real tool descriptions). A chain
+    with any non-string-literal operand is left unresolved rather than
+    guessed at."""
     if node is None:
         return None
     if node.type == "interpreted_string_literal":
@@ -130,6 +133,13 @@ def _string_value(node, src: bytes) -> str | None:
     if node.type == "raw_string_literal":
         frag = next((c for c in node.children if c.type == "raw_string_literal_content"), None)
         return _text(frag, src) if frag is not None else ""
+    if node.type == "binary_expression":
+        operator = node.child_by_field_name("operator")
+        if operator is not None and _text(operator, src) == "+":
+            left = _string_value(node.child_by_field_name("left"), src)
+            right = _string_value(node.child_by_field_name("right"), src)
+            if left is not None and right is not None:
+                return left + right
     return None
 
 

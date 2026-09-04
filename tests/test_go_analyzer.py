@@ -565,3 +565,50 @@ def test_translation_helper_dynamic_fallback_not_guessed(tmp_path):
     tool = findings[0]
     assert tool.description_text == ""
     assert any(i.check == "description" for i in tool.issues)
+
+
+def test_plus_concatenated_description_is_resolved(tmp_path):
+    # A long description wrapped across multiple `+`-joined string literals —
+    # verified against skyhook-io/radar's real tool descriptions, which use
+    # this exact style for every tool and were all false-flagged as having
+    # no description before this was resolved.
+    write(tmp_path, "server.go", """
+        package main
+
+        func main() {
+            addToolWithRegistry(reg, server, &mcp.Tool{
+                Name: "get_dashboard",
+                Description: "Use for inventory-style cluster health triage, like " +
+                    "`kubectl get all` plus detected problems in one call. " +
+                    "Returns resource counts and failing pods.",
+            }, handler)
+        }
+        """)
+    findings, _ = find_go_tools(tmp_path)
+    tool = findings[0]
+    assert tool.description_text == (
+        "Use for inventory-style cluster health triage, like "
+        "`kubectl get all` plus detected problems in one call. "
+        "Returns resource counts and failing pods."
+    )
+    assert not any(i.check == "description" for i in tool.issues)
+
+
+def test_concatenation_with_non_literal_operand_not_guessed(tmp_path):
+    # A description built from a local variable, then concatenated with a
+    # trailing literal — the variable's own value isn't tracked, so the
+    # whole chain is genuinely unresolvable rather than partially guessed.
+    write(tmp_path, "server.go", """
+        package main
+
+        func main() {
+            addToolWithRegistry(reg, server, &mcp.Tool{
+                Name: "diagnose",
+                Description: diagnoseDescription + " Extra trailing detail.",
+            }, handler)
+        }
+        """)
+    findings, _ = find_go_tools(tmp_path)
+    tool = findings[0]
+    assert tool.description_text == ""
+    assert any(i.check == "description" for i in tool.issues)
