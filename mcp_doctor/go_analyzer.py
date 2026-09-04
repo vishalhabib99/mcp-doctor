@@ -61,6 +61,16 @@ same as the existing dynamic-name skip elsewhere in this module. The
 `TranslationHelperFunc` signature) to its literal fallback argument, since
 that's the real text a model sees whenever the key isn't translated.
 
+Also recognizes mark3labs/mcp-go's own exported `server.ServerTool{Tool: ...,
+Handler: ...}` struct (server/server.go) used as a tool-factory return value
+rather than an `AddTool` call argument — verified against
+`hashicorp/terraform-mcp-server` (official HashiCorp), where every tool is
+built as `server.ServerTool{Tool: mcp.NewTool(...), Handler: ...}` inside a
+small per-tool factory function, collected into a slice, and registered
+elsewhere via `AddTool(tool.Tool, tool.Handler)` in a loop — never a literal
+`AddTool(mcp.NewTool(...), handler)` call site anywhere in the repo. The
+composite literal itself is treated as the definition site.
+
 Error handling is intentionally not checked for Go tools at all (v1): unlike
 Python's try/except or TS's try/catch, Go has no exception mechanism — a
 handler communicates failure via its `error` return value, which the SDK
@@ -369,6 +379,53 @@ def _analyze_new_tool_call(new_tool_call, src: bytes, const_registry: dict[str, 
     return name_val, description, param_count, documented
 
 
+def _build_mark3labs_finding(new_tool_call, rel: str, line: int, src: bytes, const_registry: dict[str, str]) -> ToolFinding | None:
+    """Builds a ToolFinding from a `mcp.NewTool(...)` fluent-builder call,
+    shared by both real registration shapes verified against production
+    repos: a direct `s.AddTool(mcp.NewTool(...), handler)` call, and a
+    `server.ServerTool{Tool: mcp.NewTool(...), Handler: ...}` composite
+    literal (mark3labs/mcp-go's own exported `ServerTool` struct, used to
+    build a tool as data and register it elsewhere, often through a loop —
+    see `_walk_server_tool_literals`). Returns None for a dynamic/unresolved
+    tool name, same as every other skip-rather-than-guess case in this file."""
+    name_val, description, param_count, documented = _analyze_new_tool_call(new_tool_call, src, const_registry)
+    if name_val is None:
+        return None
+    finding = ToolFinding(
+        name=name_val,
+        file=rel,
+        line=line,
+        has_description=bool(description.strip()),
+        description_len=len(description.strip()),
+        param_count=param_count,
+        typed_param_count=param_count,
+        has_docstring_params=documented >= param_count and param_count > 0,
+        has_try_except=True,  # not checked for Go — see module docstring
+        has_bare_except=False,
+        description_text=description,
+    )
+    if not finding.has_description:
+        finding.issues.append(ToolIssue(
+            name_val, rel, finding.line, "description",
+            "Tool has no description. An agent cannot decide when to call this.",
+            "error",
+        ))
+    elif finding.description_len < 10:
+        finding.issues.append(ToolIssue(
+            name_val, rel, finding.line, "description",
+            f"Description is only {finding.description_len} chars — likely just restates the name.",
+            "warning",
+        ))
+    if param_count and not finding.has_docstring_params:
+        finding.issues.append(ToolIssue(
+            name_val, rel, finding.line, "param_docs",
+            f"{param_count - documented}/{param_count} builder options have no mcp.Description(...) — "
+            "the model only sees names, not intent.",
+            "warning",
+        ))
+    return finding
+
+
 def _struct_field_docs(struct_type, src: bytes) -> tuple[int, int]:
     """Returns (param_count, documented_count) from a struct's field list,
     counting only exported (capitalized) fields with a `json` tag entry, since
@@ -555,6 +612,26 @@ def find_go_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
     for f, file_root, src in parsed:
         rel = str(f.relative_to(root))
         for node in _walk(file_root):
+            if node.type == "composite_literal":
+                # mark3labs/mcp-go's own `server.ServerTool{Tool: mcp.NewTool(...),
+                # Handler: ...}` struct — a first-class SDK type (server/server.go),
+                # used to build a tool as data and register it elsewhere, often
+                # through a loop over a slice (verified against
+                # hashicorp/terraform-mcp-server, where every tool is built this
+                # way, never via a literal `AddTool(mcp.NewTool(...), ...)` call
+                # site). The composite literal itself is the definition site.
+                if _composite_type_name(node, src) != "server.ServerTool":
+                    continue
+                fields = _composite_fields(node, src)
+                tool_field = fields.get("Tool")
+                if tool_field is None or tool_field.type != "call_expression":
+                    continue
+                if _selector_field(tool_field.child_by_field_name("function")) != "NewTool":
+                    continue
+                finding = _build_mark3labs_finding(tool_field, rel, node.start_point[0] + 1, src, const_registry)
+                if finding is not None:
+                    findings.append(finding)
+                continue
             if node.type != "call_expression":
                 continue
             func = node.child_by_field_name("function")
@@ -571,42 +648,9 @@ def find_go_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
                 new_tool_call = arg_nodes[0]
                 if new_tool_call.type != "call_expression" or _selector_field(new_tool_call.child_by_field_name("function")) != "NewTool":
                     continue
-                name_val, description, param_count, documented = _analyze_new_tool_call(new_tool_call, src, const_registry)
-                if name_val is None:
-                    continue  # dynamic/unresolved tool name — can't attribute a finding to it
-                finding = ToolFinding(
-                    name=name_val,
-                    file=rel,
-                    line=node.start_point[0] + 1,
-                    has_description=bool(description.strip()),
-                    description_len=len(description.strip()),
-                    param_count=param_count,
-                    typed_param_count=param_count,
-                    has_docstring_params=documented >= param_count and param_count > 0,
-                    has_try_except=True,  # not checked for Go — see module docstring
-                    has_bare_except=False,
-                    description_text=description,
-                )
-                if not finding.has_description:
-                    finding.issues.append(ToolIssue(
-                        name_val, rel, finding.line, "description",
-                        "Tool has no description. An agent cannot decide when to call this.",
-                        "error",
-                    ))
-                elif finding.description_len < 10:
-                    finding.issues.append(ToolIssue(
-                        name_val, rel, finding.line, "description",
-                        f"Description is only {finding.description_len} chars — likely just restates the name.",
-                        "warning",
-                    ))
-                if param_count and not finding.has_docstring_params:
-                    finding.issues.append(ToolIssue(
-                        name_val, rel, finding.line, "param_docs",
-                        f"{param_count - documented}/{param_count} builder options have no mcp.Description(...) — "
-                        "the model only sees names, not intent.",
-                        "warning",
-                    ))
-                findings.append(finding)
+                finding = _build_mark3labs_finding(new_tool_call, rel, node.start_point[0] + 1, src, const_registry)
+                if finding is not None:
+                    findings.append(finding)
                 continue
 
             if is_add_tool:

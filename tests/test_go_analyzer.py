@@ -393,6 +393,57 @@ def test_mark3labs_dynamic_name_is_skipped_not_crashed(tmp_path):
     assert findings == []
 
 
+def test_server_tool_struct_literal_is_recognized(tmp_path):
+    # Verified against a real miss: hashicorp/terraform-mcp-server builds
+    # every tool as mark3labs/mcp-go's own `server.ServerTool{Tool: ...,
+    # Handler: ...}` struct, returned from a per-tool factory function and
+    # registered elsewhere via `AddTool(tool.Tool, tool.Handler)` in a loop —
+    # never a literal `AddTool(mcp.NewTool(...), handler)` call site.
+    write(tmp_path, "get_state_version.go", """
+        package tools
+
+        func GetStateVersion(logger *log.Logger) server.ServerTool {
+            return server.ServerTool{
+                Tool: mcp.NewTool(
+                    "get_state_version",
+                    mcp.WithDescription("Retrieves a Terraform state version"),
+                    mcp.WithString("state_version_id",
+                        mcp.Description("Optional StateVersion id to fetch exact version"),
+                    ),
+                    mcp.WithString("workspace_id"),
+                ),
+                Handler: func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+                    return getStateVersionWithIDHandler(ctx, request, logger)
+                },
+            }
+        }
+        """)
+    findings, _ = find_go_tools(tmp_path)
+    assert len(findings) == 1
+    tool = findings[0]
+    assert tool.name == "get_state_version"
+    assert tool.param_count == 2
+    checks = {i.check for i in tool.issues}
+    assert "description" not in checks
+    param_issue = next(i for i in tool.issues if i.check == "param_docs")
+    assert "1/2" in param_issue.message
+
+
+def test_server_tool_struct_with_dynamic_name_is_skipped(tmp_path):
+    write(tmp_path, "server.go", """
+        package tools
+
+        func BuildTool(spec ToolSpec) server.ServerTool {
+            return server.ServerTool{
+                Tool: mcp.NewTool(spec.Name, mcp.WithDescription(spec.Description)),
+                Handler: spec.Handler,
+            }
+        }
+        """)
+    findings, _ = find_go_tools(tmp_path)
+    assert findings == []
+
+
 def test_same_const_name_declared_twice_with_different_values_is_not_resolved(tmp_path):
     write(tmp_path, "a.go", """
         package main
