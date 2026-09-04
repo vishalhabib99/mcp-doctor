@@ -730,3 +730,63 @@ def test_closure_with_ambiguous_name_in_file_not_resolved(tmp_path):
         """)
     findings, _ = find_go_tools(tmp_path)
     assert findings == []
+
+
+def test_mark3labs_new_tool_var_resolved_at_add_tool_site(tmp_path):
+    # `t := mcp.NewTool(...)` one statement earlier, referenced by name at
+    # `s.AddTool(t, handler)` — verified against
+    # isaacphi/mcp-language-server, where every tool is registered this way
+    # and none were detected before this resolution existed.
+    write(tmp_path, "server.go", """
+        package main
+
+        func main() {
+            searchTool := mcp.NewTool("search",
+                mcp.WithDescription("Search for things."),
+                mcp.WithString("query", mcp.Required(), mcp.Description("The search query")),
+            )
+            s.AddTool(searchTool, handler)
+        }
+        """)
+    findings, _ = find_go_tools(tmp_path)
+    tool = findings[0]
+    assert tool.name == "search"
+    assert tool.description_text == "Search for things."
+    assert not any(i.check == "description" for i in tool.issues)
+
+
+def test_mark3labs_new_tool_var_with_ambiguous_name_not_resolved(tmp_path):
+    # Same local variable name bound to two different NewTool calls in the
+    # same file — same "don't guess on an ambiguous name" rule used by the
+    # const/struct registries elsewhere in this module.
+    write(tmp_path, "server.go", """
+        package main
+
+        func registerA() {
+            t := mcp.NewTool("tool_a", mcp.WithDescription("A"))
+            s.AddTool(t, handlerA)
+        }
+
+        func registerB() {
+            t := mcp.NewTool("tool_b", mcp.WithDescription("B"))
+            s.AddTool(t, handlerB)
+        }
+        """)
+    findings, _ = find_go_tools(tmp_path)
+    assert findings == []
+
+
+def test_add_tool_with_unresolvable_identifier_is_skipped_not_crashed(tmp_path):
+    # `s.AddTool(someVar, handler)` where someVar isn't bound to a NewTool
+    # call anywhere in the file (e.g. it's a server.ServerTool or something
+    # else entirely) — correctly skipped, not guessed at or crashed on.
+    write(tmp_path, "server.go", """
+        package main
+
+        func main() {
+            someVar := buildToolSomehow()
+            s.AddTool(someVar, handler)
+        }
+        """)
+    findings, _ = find_go_tools(tmp_path)
+    assert findings == []

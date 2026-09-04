@@ -40,7 +40,12 @@ handler itself is never even inspected for this style. The tool's own name
 is commonly a package-level `const` reference rather than an inline string
 literal (`ToolConversationsHistory = "conversations_history"`), which is
 resolved the same name-based, ambiguity-safe way as the struct/function
-registries above.
+registries above. The `mcp.NewTool(...)` call itself may also be assigned to
+a local variable one statement earlier and referenced by name at the
+`AddTool` call site — `t := mcp.NewTool(...); s.AddTool(t, handler)` —
+verified against `isaacphi/mcp-language-server`, where every one of its
+tools is registered this way; resolved via a same-file registry, same
+ambiguity rule as everywhere else.
 
 Also recognizes a project-local factory function wrapping registration —
 verified against `github/github-mcp-server` (the official, 32k+-star GitHub
@@ -306,6 +311,41 @@ def _collect_struct_types(tree_root, src: bytes) -> dict[str, tuple["Node", byte
             del registry[name]
             continue
         registry[name] = (type_node, src)
+    return registry
+
+
+def _collect_local_new_tool_vars(tree_root, src: bytes) -> dict[str, "Node"]:
+    """Same-file registry of `name := mcp.NewTool(...)` local variables, for
+    resolving `s.AddTool(name, handler)` where the tool is built one
+    statement earlier rather than inline at the call site — verified against
+    `isaacphi/mcp-language-server`, where every one of its tools is
+    registered this way. Same ambiguous-name safety rule as
+    `_collect_struct_types`: a name bound to more than one NewTool call in
+    the file is left unresolved rather than guessed at."""
+    registry: dict[str, "Node"] = {}
+    ambiguous: set[str] = set()
+    for node in _walk(tree_root):
+        if node.type != "short_var_declaration":
+            continue
+        left = node.child_by_field_name("left")
+        right = node.child_by_field_name("right")
+        if left is None or right is None:
+            continue
+        left_ids = [c for c in left.children if c.type == "identifier"]
+        right_vals = [c for c in right.children if c.type == "call_expression"]
+        if len(left_ids) != 1 or len(right_vals) != 1:
+            continue
+        call = right_vals[0]
+        if _selector_field(call.child_by_field_name("function")) != "NewTool":
+            continue
+        name = _text(left_ids[0], src)
+        if name in ambiguous:
+            continue
+        if name in registry and registry[name] is not call:
+            ambiguous.add(name)
+            del registry[name]
+            continue
+        registry[name] = call
     return registry
 
 
@@ -806,6 +846,7 @@ def find_go_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
     for f, file_root, src in parsed:
         rel = str(f.relative_to(root))
         local_factories = _collect_local_tool_factories(file_root, src)
+        local_new_tool_vars = _collect_local_new_tool_vars(file_root, src)
         for node in _walk(file_root):
             if node.type == "composite_literal":
                 type_text = _composite_type_name(node, src)
@@ -867,9 +908,18 @@ def find_go_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
                 continue
 
             if is_add_tool and len(arg_nodes) == 2:
-                # mark3labs/mcp-go's fluent-builder style: `s.AddTool(mcp.NewTool(...), handler)`.
+                # mark3labs/mcp-go's fluent-builder style: `s.AddTool(mcp.NewTool(...), handler)`,
+                # or the tool built one statement earlier and referenced by
+                # name — `t := mcp.NewTool(...); s.AddTool(t, handler)`
+                # (verified against isaacphi/mcp-language-server).
                 new_tool_call = arg_nodes[0]
-                if new_tool_call.type != "call_expression" or _selector_field(new_tool_call.child_by_field_name("function")) != "NewTool":
+                if new_tool_call.type == "identifier":
+                    new_tool_call = local_new_tool_vars.get(_text(new_tool_call, src))
+                if (
+                    new_tool_call is None
+                    or new_tool_call.type != "call_expression"
+                    or _selector_field(new_tool_call.child_by_field_name("function")) != "NewTool"
+                ):
                     continue
                 finding = _build_mark3labs_finding(new_tool_call, rel, node.start_point[0] + 1, src, const_registry)
                 if finding is not None:
