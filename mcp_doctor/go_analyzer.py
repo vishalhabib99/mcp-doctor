@@ -222,11 +222,27 @@ def _resolve_string_field(node, src: bytes, const_registry: dict[str, str] | Non
     if node is not None and node.type == "identifier" and const_registry is not None:
         return const_registry.get(_text(node, src))
     if node is not None and node.type == "call_expression":
+        func = node.child_by_field_name("function")
         args_node = node.child_by_field_name("arguments")
-        if args_node is not None:
-            call_args = [c for c in args_node.children if c.type not in ("(", ")", ",")]
-            if call_args:
-                return _string_value(call_args[-1], src)
+        if args_node is None:
+            return None
+        call_args = [c for c in args_node.children if c.type not in ("(", ")", ",")]
+        if not call_args:
+            return None
+        if func is not None and _text(func, src) == "fmt.Sprintf":
+            # The format string is always the *first* argument, by the
+            # language's own contract for this stdlib function — unlike the
+            # `t(key, fallback)` i18n convention below, this doesn't depend
+            # on the remaining args (`defaults.ProductName()`, etc.) being
+            # resolvable at all. Verified against
+            # `containers/kubernetes-mcp-server`'s kubevirt tool
+            # descriptions, every one built this way.
+            return _string_value(call_args[0], src)
+        # The common `t(key, fallback string) string` i18n convention
+        # (verified against `github/github-mcp-server`'s own
+        # `TranslationHelperFunc`): the literal default-value argument is
+        # always last.
+        return _string_value(call_args[-1], src)
     return None
 
 
@@ -774,6 +790,115 @@ def _resolve_handler(node, func_registry: dict, src: bytes, depth: int = 0):
     return None
 
 
+def _build_literal_tool_finding(
+    tool_arg, handler_arg, rel: str, line: int, src: bytes,
+    func_registry: dict, struct_registry: dict, const_registry: dict[str, str],
+) -> ToolFinding | None:
+    """Builds a ToolFinding from a bare `Tool{Name: ..., Description: ...,
+    InputSchema: ...}` composite literal plus its handler — the shared tail
+    end of every registration style that hands the tool's fields directly as
+    data (a literal `AddTool(server, &mcp.Tool{...}, handler)` call, a
+    project-local factory wrapping the same, or a `ServerTool{Tool: Tool{...},
+    Handler: ...}` struct — see the `api.ServerTool` branch in
+    `find_go_tools` for the last of these, verified against
+    `containers/kubernetes-mcp-server`)."""
+    if tool_arg is None or tool_arg.type != "composite_literal":
+        return None
+    fields = _composite_fields(tool_arg, src)
+    name_val = _string_value(fields.get("Name"), src)
+    if name_val is None:
+        return None  # dynamic/referenced tool name — can't attribute a finding to it
+    description = _resolve_string_field(fields.get("Description"), src, const_registry) or ""
+
+    handler_node = _resolve_handler(handler_arg, func_registry, src)
+
+    param_count = 0
+    documented = 0
+    param_doc_label = "struct fields have no jsonschema tag"
+
+    schema_field = fields.get("InputSchema")
+    explicit = _resolve_input_schema(schema_field, src) if schema_field is not None else None
+    if explicit is not None:
+        param_count, documented = explicit
+        param_doc_label = "input-schema properties have no Description"
+    elif handler_node is not None:
+        type_node = _handler_last_param_type(handler_node)
+        if type_node is not None and type_node.type == "type_identifier":
+            entry = struct_registry.get(_text(type_node, src))
+            if entry is not None:
+                struct_type, struct_src = entry
+                param_count, documented = _struct_field_docs(struct_type, struct_src)
+
+    finding = ToolFinding(
+        name=name_val,
+        file=rel,
+        line=line,
+        has_description=bool(description.strip()),
+        description_len=len(description.strip()),
+        param_count=param_count,
+        typed_param_count=param_count,
+        has_docstring_params=documented >= param_count and param_count > 0,
+        has_try_except=True,  # not checked for Go — see module docstring
+        has_bare_except=False,
+        description_text=description,
+    )
+
+    if not finding.has_description:
+        finding.issues.append(ToolIssue(
+            name_val, rel, finding.line, "description",
+            "Tool has no description. An agent cannot decide when to call this.",
+            "error",
+        ))
+    elif finding.description_len < 10:
+        finding.issues.append(ToolIssue(
+            name_val, rel, finding.line, "description",
+            f"Description is only {finding.description_len} chars — likely just restates the name.",
+            "warning",
+        ))
+
+    if param_count and not finding.has_docstring_params:
+        finding.issues.append(ToolIssue(
+            name_val, rel, finding.line, "param_docs",
+            f"{param_count - documented}/{param_count} {param_doc_label} — "
+            "the model only sees names, not intent.",
+            "warning",
+        ))
+
+    return finding
+
+
+def _build_server_tool_wrapper_finding(
+    node, rel: str, line: int, src: bytes,
+    func_registry: dict, struct_registry: dict, const_registry: dict[str, str],
+) -> ToolFinding | None:
+    """Builds a finding from a `ServerTool`-shaped `Tool: ..., Handler: ...`
+    node — either a top-level `<pkg>.ServerTool{...}` composite literal, or
+    one bare `{Tool: ..., Handler: ...}` element of a `[]<pkg>.ServerTool{...}`
+    slice (elided element type, same convention `_composite_fields` already
+    handles for a bare `literal_value`). The `Tool` field comes in two shapes
+    seen in the wild: mark3labs/mcp-go's fluent-builder call, `mcp.NewTool(...)`
+    (verified against hashicorp/terraform-mcp-server), or a bare
+    `Tool{Name: ..., Description: ..., InputSchema: ...}` composite literal —
+    the official Go SDK's own shape when a project wraps it in a local
+    `api.Tool` type rather than calling `mcp.NewTool` (verified against
+    containers/kubernetes-mcp-server, whose tools are never anything but
+    this literal-data form, built either directly or per-slice-element)."""
+    fields = _composite_fields(node, src)
+    tool_field = fields.get("Tool")
+    if tool_field is None:
+        return None
+    if tool_field.type == "call_expression":
+        if _selector_field(tool_field.child_by_field_name("function")) != "NewTool":
+            return None
+        return _build_mark3labs_finding(tool_field, rel, line, src, const_registry)
+    handler_field = fields.get("Handler")
+    if handler_field is None:
+        return None
+    return _build_literal_tool_finding(
+        tool_field, handler_field, rel, line, src, func_registry, struct_registry, const_registry,
+    )
+
+
 def find_go_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
     """Returns (findings, unparseable_relative_paths). Empty if tree_sitter or
     tree_sitter_go isn't installed."""
@@ -877,22 +1002,41 @@ def find_go_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
                             if finding is not None:
                                 findings.append(finding)
                     continue
-                # mark3labs/mcp-go's own `server.ServerTool{Tool: mcp.NewTool(...),
-                # Handler: ...}` struct — a first-class SDK type (server/server.go),
-                # used to build a tool as data and register it elsewhere, often
-                # through a loop over a slice (verified against
-                # hashicorp/terraform-mcp-server, where every tool is built this
-                # way, never via a literal `AddTool(mcp.NewTool(...), ...)` call
-                # site). The composite literal itself is the definition site.
-                if type_text != "server.ServerTool":
+                # A `[]<pkg>.ServerTool{...}` slice, each element a bare
+                # `{Tool: ..., Handler: ...}` literal (elided element type —
+                # verified against containers/kubernetes-mcp-server, whose
+                # multi-tool files all use this form; the single-element
+                # `<pkg>.ServerTool{...}` composite literal below covers the
+                # rest, e.g. its `pkg/mcp/mcp.go`-style single-tool cases).
+                if type_text and type_text.startswith("[]") and type_text[2:].endswith(".ServerTool"):
+                    body = node.child_by_field_name("body")
+                    if body is not None and body.type == "literal_value":
+                        for element in body.children:
+                            if element.type != "literal_element":
+                                continue
+                            item = next(
+                                (c for c in element.children if c.type in ("literal_value", "composite_literal")),
+                                None,
+                            )
+                            if item is None:
+                                continue
+                            finding = _build_server_tool_wrapper_finding(
+                                item, rel, item.start_point[0] + 1, src,
+                                func_registry, struct_registry, const_registry,
+                            )
+                            if finding is not None:
+                                findings.append(finding)
                     continue
-                fields = _composite_fields(node, src)
-                tool_field = fields.get("Tool")
-                if tool_field is None or tool_field.type != "call_expression":
+                # A `<pkg>.ServerTool{Tool: ..., Handler: ...}` struct — a
+                # wrapper used to build a tool as data and register it
+                # elsewhere, never via a literal `AddTool(...)` call site.
+                # See `_build_server_tool_wrapper_finding` for the two `Tool`
+                # field shapes this covers.
+                if not type_text or not type_text.endswith(".ServerTool"):
                     continue
-                if _selector_field(tool_field.child_by_field_name("function")) != "NewTool":
-                    continue
-                finding = _build_mark3labs_finding(tool_field, rel, node.start_point[0] + 1, src, const_registry)
+                finding = _build_server_tool_wrapper_finding(
+                    node, rel, node.start_point[0] + 1, src, func_registry, struct_registry, const_registry,
+                )
                 if finding is not None:
                     findings.append(finding)
                 continue

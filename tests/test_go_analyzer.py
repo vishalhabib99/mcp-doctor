@@ -444,6 +444,113 @@ def test_server_tool_struct_with_dynamic_name_is_skipped(tmp_path):
     assert findings == []
 
 
+def test_literal_server_tool_struct_is_recognized(tmp_path):
+    # Verified against a real 0-tools miss: containers/kubernetes-mcp-server
+    # (official Red Hat repo) never calls `mcp.NewTool(...)` at all — every
+    # tool is a project-local `api.ServerTool{Tool: api.Tool{Name: ...,
+    # Description: ..., InputSchema: &jsonschema.Schema{...}}, Handler: ...}`
+    # struct, fully literal data with no builder call anywhere.
+    write(tmp_path, "namespaces.go", """
+        package core
+
+        func initNamespaces() []api.ServerTool {
+            ret := make([]api.ServerTool, 0)
+            ret = append(ret, api.ServerTool{
+                Tool: api.Tool{
+                    Name:        "namespaces_list",
+                    Description: "List all the Kubernetes namespaces in the current cluster",
+                    InputSchema: &jsonschema.Schema{
+                        Type: "object",
+                        Properties: map[string]*jsonschema.Schema{
+                            "fieldSelector": {
+                                Type:        "string",
+                                Description: "Optional field selector",
+                            },
+                        },
+                    },
+                },
+                Handler: namespacesList,
+            })
+            return ret
+        }
+        """)
+    findings, _ = find_go_tools(tmp_path)
+    assert len(findings) == 1
+    tool = findings[0]
+    assert tool.name == "namespaces_list"
+    assert tool.param_count == 1
+    assert tool.has_docstring_params is True
+
+
+def test_literal_server_tool_slice_elements_are_all_recognized(tmp_path):
+    # The other real shape in the same repo: a `[]api.ServerTool{...}` slice
+    # returned directly, each element a bare `{Tool: ..., Handler: ...}`
+    # literal with the element type elided (same convention as the existing
+    # `[]*mcp.Tool{...}` bare-element case, just one level of nesting deeper).
+    write(tmp_path, "pods.go", """
+        package core
+
+        func initPods() []api.ServerTool {
+            return []api.ServerTool{
+                {Tool: api.Tool{
+                    Name:        "pods_list",
+                    Description: "List all the Kubernetes pods",
+                    InputSchema: &jsonschema.Schema{Type: "object"},
+                }, Handler: podsListInAllNamespaces},
+                {Tool: api.Tool{
+                    Name:        "pods_delete",
+                    Description: "Delete a Kubernetes pod",
+                    InputSchema: &jsonschema.Schema{Type: "object"},
+                }, Handler: podsDelete},
+            }
+        }
+        """)
+    findings, _ = find_go_tools(tmp_path)
+    assert {f.name for f in findings} == {"pods_list", "pods_delete"}
+
+
+def test_literal_server_tool_with_dynamic_name_is_skipped(tmp_path):
+    write(tmp_path, "server.go", """
+        package core
+
+        func build(spec ToolSpec) api.ServerTool {
+            return api.ServerTool{
+                Tool: api.Tool{Name: spec.Name, Description: spec.Description},
+                Handler: spec.Handler,
+            }
+        }
+        """)
+    findings, _ = find_go_tools(tmp_path)
+    assert findings == []
+
+
+def test_sprintf_first_arg_resolved_as_description_regardless_of_other_args(tmp_path):
+    # Verified against a real false positive on kubernetes-mcp-server's
+    # kubevirt tools: `fmt.Sprintf(fmtString, defaults.ProductName())` was
+    # being checked at its *last* argument (the i18n `t(key, fallback)`
+    # convention below), which here is a non-literal function call — a
+    # completely different Go stdlib contract, where the format string is
+    # always first regardless of whether the remaining args are resolvable.
+    write(tmp_path, "tool.go", """
+        package vm
+
+        func build() api.ServerTool {
+            return api.ServerTool{
+                Tool: api.Tool{
+                    Name: "vm_lifecycle",
+                    Description: fmt.Sprintf("Manage %s VirtualMachine lifecycle", defaults.ProductName()),
+                },
+                Handler: handleLifecycle,
+            }
+        }
+        """)
+    findings, _ = find_go_tools(tmp_path)
+    assert len(findings) == 1
+    assert findings[0].has_description is True
+    checks = {i.check for i in findings[0].issues}
+    assert "description" not in checks
+
+
 def test_same_const_name_declared_twice_with_different_values_is_not_resolved(tmp_path):
     write(tmp_path, "a.go", """
         package main
