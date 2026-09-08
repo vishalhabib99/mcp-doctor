@@ -367,6 +367,39 @@ def test_list_tools_handler_with_filter_and_template_description(tmp_path):
     assert not any(i.check == "description" for i in tool.issues)
 
 
+def test_trimmed_template_description_is_resolved(tmp_path):
+    # Verified against a real 7/8-tools-missing-description false positive:
+    # brave/brave-search-mcp-server declares every tool's description as
+    # `` `...multi-line text...`.trim() `` — a real, common idiom for
+    # trimming leading/trailing whitespace off an indented template literal
+    # — then references it by identifier at the registerTool call site. The
+    # `.trim()` call wasn't recognized as anything but a dynamic value.
+    write(tmp_path, "tool.ts", """
+        export const name = 'brave_place_search';
+
+        export const description = `
+            Searches Brave's Place Search API.
+        `.trim();
+
+        export const register = (mcpServer) => {
+          mcpServer.registerTool(
+            name,
+            {
+              description: description,
+              inputSchema: { type: "object", properties: {}, required: [] },
+            },
+            execute
+          );
+        };
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert len(findings) == 1
+    tool = findings[0]
+    assert tool.has_description is True
+    assert "Searches Brave's Place Search API" in tool.description_text
+    assert not any(i.check == "description" for i in tool.issues)
+
+
 def test_list_tools_handler_zod_to_json_schema_unwrapped(tmp_path):
     # `inputSchema: zodToJsonSchema(SomeArgsSchema)` — the zod-to-json-schema
     # package, used to keep one Zod source of truth while serving raw JSON

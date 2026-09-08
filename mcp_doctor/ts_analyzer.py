@@ -385,7 +385,18 @@ def _resolve(node, src: bytes, consts: dict[str, tuple["Node", bytes]], depth: i
             prop = func.child_by_field_name("property")
             obj_node = func.child_by_field_name("object")
             if prop is not None and prop.type == "property_identifier" and obj_node is not None:
-                if _text(prop, src) == "filter":
+                prop_name = _text(prop, src)
+                if prop_name == "filter":
+                    return _resolve(obj_node, src, consts, depth + 1)
+                if prop_name in ("trim", "trimStart", "trimEnd"):
+                    # `` `...long description...`.trim() `` — a real, common
+                    # idiom for a multi-line template-literal description
+                    # (verified against brave/brave-search-mcp-server, where
+                    # every one of its 8 tool descriptions is declared this
+                    # way). Whitespace trimming never changes the actual
+                    # content being checked for presence/length, so resolve
+                    # straight through to the untrimmed receiver rather than
+                    # treating the whole call as an unresolvable dynamic value.
                     return _resolve(obj_node, src, consts, depth + 1)
     return node, src
 
