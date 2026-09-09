@@ -386,3 +386,88 @@ def test_quality_and_security_axes_are_independent(tmp_path):
     report = analyze_repo(tmp_path)
     assert report.percent < 100
     assert report.security_percent == 100
+
+
+def test_ts_method_named_exec_declared_with_return_type_is_not_flagged(tmp_path):
+    # Real false positive found dogfooding n8n-mcp: a DatabaseAdapter
+    # interface and its implementations declare `exec(sql: string): void`
+    # (delegating to a SQL driver's own safe .exec()) — a method named exec,
+    # not a call to a dangerous exec() primitive.
+    write(tmp_path, "server.ts", """
+        import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+        const server = new McpServer({ name: "x", version: "1.0.0" });
+
+        interface DatabaseAdapter {
+          exec(sql: string): void;
+        }
+
+        class SqliteAdapter implements DatabaseAdapter {
+          exec(sql: string): void {
+            this.db.exec(sql);
+          }
+        }
+
+        server.registerTool("run_migration", {
+            description: "Run a fixed migration script.",
+            inputSchema: {},
+        }, async () => {
+            new SqliteAdapter().exec("CREATE TABLE x (id INTEGER)");
+            return { content: [{ type: "text", text: "ok" }] };
+        });
+        """)
+    make_clean_repo(tmp_path)
+
+    report = analyze_repo(tmp_path)
+    assert "dangerous_exec" not in {i.check for i in report.repo_issues}
+
+
+def test_warning_message_string_mentioning_eval_is_not_flagged(tmp_path):
+    # Real false positive found dogfooding n8n-mcp: their own validator
+    # warns callers with the literal string 'Avoid eval() - it's a security
+    # risk' and a comment illustrating "a prompt mentioning \"eval(\"" —
+    # the message text about eval(), not a call to it.
+    write(tmp_path, "server.ts", """
+        import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+        const server = new McpServer({ name: "x", version: "1.0.0" });
+
+        function checkForRisk(code: string): string | null {
+            // literals (e.g. a prompt mentioning "eval(") don't warn — noise.
+            if (code.includes('eval(') || code.includes('exec(')) {
+                return 'Avoid eval() - it is a security risk';
+            }
+            return null;
+        }
+
+        server.registerTool("lint_snippet", {
+            description: "Warn if a code snippet mentions eval/exec.",
+            inputSchema: { code: z.string().describe("Snippet to check") },
+        }, async ({ code }) => {
+            return { content: [{ type: "text", text: checkForRisk(code) ?? "clean" }] };
+        });
+        """)
+    make_clean_repo(tmp_path)
+
+    report = analyze_repo(tmp_path)
+    assert "dangerous_exec" not in {i.check for i in report.repo_issues}
+
+
+def test_eval_hidden_inside_string_disguised_as_comment_text_is_still_safe_but_real_call_still_flagged(tmp_path):
+    # The two fixes above must not blind the check to a real bare eval()
+    # call sitting right next to a comment/string that merely mentions it.
+    write(tmp_path, "server.ts", """
+        import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+        const server = new McpServer({ name: "x", version: "1.0.0" });
+
+        server.registerTool("run_expr", {
+            description: "Evaluate a math expression.",
+            inputSchema: { expr: z.string().describe("Expression") },
+        }, async ({ expr }) => {
+            // Note: this is genuinely dangerous, unlike the message below.
+            const result = eval(expr);
+            return { content: [{ type: "text", text: String(result) }] };
+        });
+        """)
+    make_clean_repo(tmp_path)
+
+    report = analyze_repo(tmp_path)
+    assert "dangerous_exec" in {i.check for i in report.repo_issues}

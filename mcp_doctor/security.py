@@ -101,6 +101,43 @@ _DANGEROUS_EXEC_PATTERNS = [
     re.compile(r"\bexec\.Command\s*\("),  # Go os/exec
 ]
 
+# A line like `exec(sql: string): void {` or `exec(sql: string): void;` is
+# declaring a method/function literally *named* exec/eval (e.g. implementing
+# a DatabaseAdapter.exec(sql) interface around a SQL driver's own .exec()),
+# not calling the dangerous primitive — the TS return-type annotation before
+# the trailing `{`/`;` is what distinguishes a declaration from a call.
+# Verified against a real false positive: n8n-mcp's DatabaseAdapter interface
+# and its two adapter implementations all declare `exec(sql: string): void`.
+_TS_EXEC_OR_EVAL_DECL_RE = re.compile(
+    r"^\s*(?:export\s+)?"
+    r"(?:public\s+|private\s+|protected\s+|static\s+|async\s+|abstract\s+|override\s+|readonly\s+)*"
+    r"(?:function\s+|get\s+|set\s+)?"
+    r"(?:exec|eval)\s*\([^)]*\)\s*:\s*\S.*[{;]\s*$"
+)
+
+_STRING_LITERAL_RE = re.compile(
+    r"'(?:\\.|[^'\\])*'"
+    r"|\"(?:\\.|[^\"\\])*\""
+    r"|`(?:\\.|[^`\\])*`"
+)
+
+
+def _mask_strings_and_line_comments(line: str) -> str:
+    # A user-facing warning message like 'Avoid eval() - it's a risk', or a
+    # comment illustrating one ("...a prompt mentioning \"eval(\"..."), can
+    # contain the literal text a raw-text security scan looks for without
+    # containing the actual dangerous call. Strip string-literal contents
+    # first (so a "//" *inside* a string, e.g. a URL, can't be mistaken for
+    # the start of a comment), then drop a trailing // line comment on
+    # whatever's left. Verified against a real false positive: n8n-mcp's own
+    # eval/exec-detecting validator code, flagged for the exact strings and
+    # comments it uses to describe what it's checking for.
+    stripped = _STRING_LITERAL_RE.sub("''", line)
+    comment_start = stripped.find("//")
+    if comment_start != -1:
+        stripped = stripped[:comment_start]
+    return stripped
+
 
 def scan_dangerous_exec(files: list[Path]) -> list[RepoIssue]:
     issues = []
@@ -112,7 +149,10 @@ def scan_dangerous_exec(files: list[Path]) -> list[RepoIssue]:
         except OSError:
             continue
         for i, line in enumerate(text.splitlines(), start=1):
-            if any(p.search(line) for p in _DANGEROUS_EXEC_PATTERNS):
+            if _TS_EXEC_OR_EVAL_DECL_RE.match(line):
+                continue
+            masked = _mask_strings_and_line_comments(line)
+            if any(p.search(masked) for p in _DANGEROUS_EXEC_PATTERNS):
                 issues.append(RepoIssue(
                     "dangerous_exec",
                     f"{f.name}:{i} calls a dynamic-execution/shell primitive (eval/exec/subprocess/"
