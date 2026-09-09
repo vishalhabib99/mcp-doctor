@@ -77,14 +77,20 @@ def scan_prompt_injection(tools: list[ToolFinding]) -> None:
 # --- Dangerous dynamic execution ---------------------------------------
 
 _DANGEROUS_EXEC_PATTERNS = [
-    # (?<!\$) excludes Playwright/Puppeteer/Cheerio's $eval()/$$eval() —
-    # a standard DOM-query-and-run-callback API where the callback is a
-    # literal inline function compiled with the code, not a string built
-    # from tool input. Verified against a real false positive in the same
-    # repo as the .exec() fix below: docs-mcp-server's
-    # HtmlPlaywrightMiddleware.ts calls frame.$eval("body", (el) => ...)
-    # to extract DOM content, not to execute anything derived from a call.
-    re.compile(r"(?<!\$)\beval\s*\("),
+    # (?<![.$]) excludes two kinds of *method* call, same reasoning as the
+    # .exec() exclusion below: Playwright/Puppeteer/Cheerio's $eval()/
+    # $$eval() (a DOM-query-and-run-callback API, callback is literal
+    # inline code, not built from tool input — docs-mcp-server's
+    # HtmlPlaywrightMiddleware.ts calls frame.$eval("body", (el) => ...)),
+    # and Redis's EVAL command via a client's .eval(script, ...) method (a
+    # fixed Lua script run server-side, unrelated to JS/Python's dangerous
+    # eval() builtin — n8n-mcp's token_quota_service.py calls
+    # redis.eval(ACQUIRE_STREAM_LUA, ...) for an atomic slot-lock).
+    # window.eval()/globalThis.eval() are still genuinely dangerous despite
+    # being dot-preceded (a common bare-eval-detection bypass) — caught by
+    # the dedicated pattern below instead of this general one.
+    re.compile(r"(?<![.$])\beval\s*\("),
+    re.compile(r"(?:window|globalThis)\s*\.\s*eval\s*\("),
     # (?<!\.) excludes a *method* call — `regex.exec(...)` is JS/TS's
     # standard RegExp.exec(), not dynamic code execution, and `.exec()` is
     # also a common, benign query-builder idiom (Mongoose, execa-style

@@ -471,3 +471,51 @@ def test_eval_hidden_inside_string_disguised_as_comment_text_is_still_safe_but_r
 
     report = analyze_repo(tmp_path)
     assert "dangerous_exec" in {i.check for i in report.repo_issues}
+
+
+def test_redis_eval_lua_script_method_call_is_not_flagged_as_dangerous_exec(tmp_path):
+    # Real false positive found dogfooding MODSetter/SurfSense:
+    # token_quota_service.py's `await r.eval(ACQUIRE_STREAM_LUA, 1, key, ...)`
+    # is a Redis client's EVAL command running a fixed Lua script server-side,
+    # not JS/Python's dangerous eval() builtin.
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        ACQUIRE_LUA = "return redis.call('SET', KEYS[1], ARGV[1])"
+
+        @mcp.tool()
+        def acquire_slot(key: str) -> bool:
+            \"\"\"Args:
+                key: slot key.
+            \"\"\"
+            r = get_redis()
+            result = r.eval(ACQUIRE_LUA, 1, key, "1")
+            return bool(result)
+        """)
+    make_clean_repo(tmp_path)
+
+    report = analyze_repo(tmp_path)
+    assert "dangerous_exec" not in {i.check for i in report.repo_issues}
+
+
+def test_window_eval_bypass_is_still_flagged_as_dangerous_exec(tmp_path):
+    # The Redis .eval() fix above must not also blind the check to
+    # window.eval()/globalThis.eval() — a real, common bare-eval-detection
+    # bypass that's dot-preceded but still the genuine dangerous builtin.
+    write(tmp_path, "server.ts", """
+        import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+        const server = new McpServer({ name: "x", version: "1.0.0" });
+
+        server.registerTool("run_expr", {
+            description: "Evaluate a math expression.",
+            inputSchema: { expr: z.string().describe("Expression") },
+        }, async ({ expr }) => {
+            const result = window.eval(expr);
+            return { content: [{ type: "text", text: String(result) }] };
+        });
+        """)
+    make_clean_repo(tmp_path)
+
+    report = analyze_repo(tmp_path)
+    assert "dangerous_exec" in {i.check for i in report.repo_issues}
