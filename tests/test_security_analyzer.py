@@ -153,6 +153,75 @@ def test_eval_call_is_flagged_as_dangerous_exec(tmp_path):
     assert report.security_percent < 100
 
 
+def test_playwright_dollar_eval_is_not_flagged_as_dangerous_exec(tmp_path):
+    # Real false positive found dogfooding arabold/docs-mcp-server:
+    # HtmlPlaywrightMiddleware.ts's frame.$eval("body", (el) => el.innerHTML)
+    # is Playwright's standard DOM-extraction API, not code execution.
+    write(tmp_path, "server.ts", """
+        import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+        const server = new McpServer({ name: "x", version: "1.0.0" });
+
+        server.registerTool("extract_body", {
+            description: "Extract the body's inner HTML from a page.",
+            inputSchema: { url: z.string().describe("URL to load") },
+        }, async ({ url }) => {
+            const page = await browser.newPage();
+            await page.goto(url);
+            const html = await page.$eval("body", (el) => el.innerHTML);
+            return { content: [{ type: "text", text: html }] };
+        });
+        """)
+    make_clean_repo(tmp_path)
+
+    report = analyze_repo(tmp_path)
+    assert "dangerous_exec" not in {i.check for i in report.repo_issues}
+
+
+def test_regex_exec_method_call_is_not_flagged_as_dangerous_exec(tmp_path):
+    # Real false positive found dogfooding arabold/docs-mcp-server:
+    # HtmlDefuddleMiddleware.ts's LANGUAGE_CLASS_RE.exec(className) is a
+    # plain JS/TS RegExp.exec() call, not dynamic code execution.
+    write(tmp_path, "server.ts", """
+        import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+        const server = new McpServer({ name: "x", version: "1.0.0" });
+
+        const LANGUAGE_RE = /language-([a-z]+)/;
+
+        server.registerTool("detect_language", {
+            description: "Detect the language from a class name.",
+            inputSchema: { className: z.string().describe("CSS class name") },
+        }, async ({ className }) => {
+            const match = LANGUAGE_RE.exec(className);
+            return { content: [{ type: "text", text: match ? match[1] : "" }] };
+        });
+        """)
+    make_clean_repo(tmp_path)
+
+    report = analyze_repo(tmp_path)
+    assert "dangerous_exec" not in {i.check for i in report.repo_issues}
+
+
+def test_bare_python_exec_builtin_is_still_flagged(tmp_path):
+    # The fix for the RegExp.exec() false positive above must not also
+    # blind the check to Python's genuinely dangerous bare exec() builtin.
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        @mcp.tool()
+        def run_code(code: str) -> str:
+            \"\"\"Args:
+                code: code to run.
+            \"\"\"
+            exec(code)
+            return "done"
+        """)
+    make_clean_repo(tmp_path)
+
+    report = analyze_repo(tmp_path)
+    assert "dangerous_exec" in {i.check for i in report.repo_issues}
+
+
 def test_eval_in_test_file_is_not_flagged(tmp_path):
     write(tmp_path, "server.py", """
         from mcp.server.fastmcp import FastMCP

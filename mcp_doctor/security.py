@@ -77,8 +77,24 @@ def scan_prompt_injection(tools: list[ToolFinding]) -> None:
 # --- Dangerous dynamic execution ---------------------------------------
 
 _DANGEROUS_EXEC_PATTERNS = [
-    re.compile(r"\beval\s*\("),
-    re.compile(r"\bexec\s*\("),
+    # (?<!\$) excludes Playwright/Puppeteer/Cheerio's $eval()/$$eval() —
+    # a standard DOM-query-and-run-callback API where the callback is a
+    # literal inline function compiled with the code, not a string built
+    # from tool input. Verified against a real false positive in the same
+    # repo as the .exec() fix below: docs-mcp-server's
+    # HtmlPlaywrightMiddleware.ts calls frame.$eval("body", (el) => ...)
+    # to extract DOM content, not to execute anything derived from a call.
+    re.compile(r"(?<!\$)\beval\s*\("),
+    # (?<!\.) excludes a *method* call — `regex.exec(...)` is JS/TS's
+    # standard RegExp.exec(), not dynamic code execution, and `.exec()` is
+    # also a common, benign query-builder idiom (Mongoose, execa-style
+    # wrappers). Python's actual dangerous `exec(code)` builtin, and every
+    # other genuinely dangerous exec-shaped call this project already knows
+    # about (child_process.exec, exec.Command), is always a bare/qualified
+    # call, never `.exec(` on an arbitrary object — verified against a real
+    # false positive: docs-mcp-server's HtmlDefuddleMiddleware.ts flagged a
+    # plain LANGUAGE_CLASS_RE.exec(className) regex match.
+    re.compile(r"(?<!\.)\bexec\s*\("),
     re.compile(r"\bos\.system\s*\("),
     re.compile(r"\bsubprocess\.(Popen|call|run|check_output)\s*\("),
     re.compile(r"\bchild_process\.exec(Sync)?\s*\("),
