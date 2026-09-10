@@ -130,6 +130,12 @@ tbody tr:last-child td { border-bottom: none; }
 
 .repo-link { font-weight: 600; }
 
+.badge-img {
+  height: 20px;
+  cursor: pointer;
+  vertical-align: middle;
+}
+
 .badge-snippet {
   background: var(--code-bg);
   border: 1px solid var(--border);

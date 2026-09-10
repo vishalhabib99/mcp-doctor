@@ -22,9 +22,12 @@ import sys
 import tempfile
 from pathlib import Path
 
+from badge import badge_filename, render_badge_svg
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 REPOS_FILE = Path(__file__).resolve().parent / "repos.json"
 DATA_FILE = Path(__file__).resolve().parent / "data.json"
+BADGES_DIR = Path(__file__).resolve().parent / "badges"
 
 
 def _run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
@@ -73,6 +76,10 @@ def scan_one(entry: dict, tmp_root: Path) -> dict | None:
 
     stars = fetch_star_count(owner, repo)
 
+    BADGES_DIR.mkdir(exist_ok=True)
+    badge_svg = render_badge_svg("mcp-doctor", f"{report['grade']} {report['percent']}%", report["grade"])
+    (BADGES_DIR / badge_filename(owner, repo)).write_text(badge_svg)
+
     return {
         "repo": f"{owner}/{repo}",
         "url": f"https://github.com/{owner}/{repo}",
@@ -83,6 +90,7 @@ def scan_one(entry: dict, tmp_root: Path) -> dict | None:
         "security_percent": report["security_percent"],
         "security_grade": report["security_grade"],
         "tool_count": len(report["tools"]),
+        "badge": f"badges/{badge_filename(owner, repo)}",
         "last_scanned": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
 

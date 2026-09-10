@@ -54,10 +54,11 @@
               <th data-sort="quality_percent" class="numeric">Quality</th>
               <th data-sort="security_percent" class="numeric">Security</th>
               <th data-sort="last_scanned">Last scanned</th>
+              <th>Badge</th>
             </tr>
           </thead>
           <tbody id="leaderboard-body">
-            <tr><td colspan="7" class="loading">Loading scan results…</td></tr>
+            <tr><td colspan="8" class="loading">Loading scan results…</td></tr>
           </tbody>
         </table>
       </div>
@@ -72,9 +73,11 @@
         It'll show up here after the next scan run.
       </p>
       <p>
-        Already scored and happy with your grade? Copy this into your README:
+        Already scored and happy with your grade? Each row's badge is a real, dated SVG showing
+        your actual score — not a generic "scanned" badge. Click a badge in the table above to
+        copy its README markdown, or use this pattern once your repo is scored:
       </p>
-      <pre id="badge-snippet" class="badge-snippet">[![Scanned by mcp-doctor](https://img.shields.io/badge/mcp--doctor-scanned-blue)](https://vishalhabib99.github.io/mcp-doctor/)</pre>
+      <pre id="badge-snippet" class="badge-snippet">[![mcp-doctor](https://vishalhabib99.github.io/mcp-doctor/badges/OWNER-REPO.svg)](https://vishalhabib99.github.io/mcp-doctor/)</pre>
     </section>
   </main>
 

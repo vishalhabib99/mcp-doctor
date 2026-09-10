@@ -22,6 +22,18 @@
       '<span class="text-dim">' + percent + "%</span>";
   }
 
+  function badgeMarkdown(r) {
+    var badgeUrl = "https://vishalhabib99.github.io/mcp-doctor/" + r.badge;
+    return "[![mcp-doctor](" + badgeUrl + ")](https://vishalhabib99.github.io/mcp-doctor/)";
+  }
+
+  function badgeCell(r) {
+    if (!r.badge) return "";
+    var badgeUrl = "./" + r.badge;
+    return '<img class="badge-img" src="' + badgeUrl + '" alt="mcp-doctor grade for ' + r.repo +
+      '" title="Click to copy README markdown" data-repo="' + r.repo + '">';
+  }
+
   function render() {
     var sorted = rows.slice().sort(function (a, b) {
       var key = currentSort.key;
@@ -34,7 +46,7 @@
     });
 
     if (sorted.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="7" class="loading">No scan data yet — check back after the next run.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="8" class="loading">No scan data yet — check back after the next run.</td></tr>';
       return;
     }
 
@@ -47,8 +59,25 @@
         '<td class="numeric">' + gradeCell(r.quality_percent, r.quality_grade) + "</td>" +
         '<td class="numeric">' + gradeCell(r.security_percent, r.security_grade) + "</td>" +
         "<td>" + formatDate(r.last_scanned) + "</td>" +
+        "<td>" + badgeCell(r) + "</td>" +
         "</tr>";
     }).join("");
+
+    tbody.querySelectorAll(".badge-img").forEach(function (img) {
+      img.addEventListener("click", function () {
+        var r = rows.filter(function (x) { return x.repo === img.dataset.repo; })[0];
+        if (!r) return;
+        var markdown = badgeMarkdown(r);
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(markdown).then(function () {
+            img.title = "Copied!";
+            setTimeout(function () { img.title = "Click to copy README markdown"; }, 1500);
+          }).catch(function () {
+            img.title = "Couldn't auto-copy — markdown: " + markdown;
+          });
+        }
+      });
+    });
 
     table.querySelectorAll("th").forEach(function (th) {
       th.classList.remove("sorted", "asc");
