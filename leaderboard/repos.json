@@ -16,5 +16,6 @@
   {"owner": "czlonkowski", "repo": "n8n-mcp", "language": "TS"},
   {"owner": "xpzouying", "repo": "xiaohongshu-mcp", "language": "Go"},
   {"owner": "korotovsky", "repo": "slack-mcp-server", "language": "Go"},
-  {"owner": "antvis", "repo": "mcp-server-chart", "language": "TS"}
+  {"owner": "antvis", "repo": "mcp-server-chart", "language": "TS"},
+  {"owner": "oraios", "repo": "serena", "language": "Python"}
 ]
