@@ -459,14 +459,33 @@ def test_class_based_tool_without_apply_method_is_not_a_tool(tmp_path):
     assert report.tools == []
 
 
-def test_class_based_tool_with_no_class_docstring_flags_missing_description(tmp_path):
-    # Verified against serena's own SearchForPatternTool: a class with no
-    # docstring at all genuinely has no description at runtime — apply()'s
-    # own docstring must not be substituted in as a fallback.
+def test_class_based_tool_with_no_class_docstring_falls_back_to_apply_docstring(tmp_path):
+    # Verified against serena's own src/serena/mcp.py: `func_doc =
+    # tool.get_apply_docstring() or ""` is passed straight into
+    # `description=` at tool-registration time — the *class* docstring is
+    # never read there. Real tools like SearchForPatternTool and
+    # SafeDeleteSymbol only ever docstring the apply() method, never the
+    # class itself, and are genuinely described to the agent at runtime.
     write(tmp_path, "server.py", """
         class SearchForPatternTool(Tool):
             def apply(self, substring_pattern: str) -> str:
-                \"\"\"Searches for a pattern. :param substring_pattern: the pattern\"\"\"
+                \"\"\"
+                Searches for a pattern.
+
+                :param substring_pattern: the pattern
+                \"\"\"
+                return substring_pattern
+        """)
+    report = analyze_repo(tmp_path)
+    tool = report.tools[0]
+    assert tool.description_text == "Searches for a pattern."
+    assert not any(i.check == "description" for i in tool.issues)
+
+
+def test_class_based_tool_with_no_docstring_anywhere_flags_missing_description(tmp_path):
+    write(tmp_path, "server.py", """
+        class SearchForPatternTool(Tool):
+            def apply(self, substring_pattern: str) -> str:
                 return substring_pattern
         """)
     report = analyze_repo(tmp_path)

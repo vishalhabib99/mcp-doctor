@@ -850,7 +850,14 @@ def _find_class_based_tools(
         class_doc = ast.get_docstring(node)
         findings.append(_analyze_function_as_tool(
             apply_fn, file,
-            description_override=class_doc.strip() if class_doc else "",
+            # None (not "") when there's no class docstring, so
+            # _analyze_function_as_tool falls back to apply()'s own docstring
+            # instead of reporting "no description" — serena's own tools_base.py
+            # documents apply()'s docstring, not the class's, as what's actually
+            # shown to the model (get_apply_docstring_from_cls), and several real
+            # tool classes (e.g. SearchForPatternTool, SafeDeleteSymbol) only ever
+            # docstring the apply method, never the class itself.
+            description_override=class_doc.strip() if class_doc else None,
             alias_registry=alias_registry,
             name_override=_tool_name_from_class_name(node.name),
             error_handling_registry=error_handling_registry,
