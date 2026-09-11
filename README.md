@@ -5,6 +5,10 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![GitHub Marketplace](https://img.shields.io/badge/Marketplace-mcp--doctor-blue?logo=github)](https://github.com/marketplace/actions/mcp-doctor)
 
+![mcp-doctor scanning homeassistant-ai/ha-mcp: Quality 96% Grade A, Security 98% Grade A, 88 tools found](docs/demo.png)
+
+*Real output from a live scan of [`homeassistant-ai/ha-mcp`](https://github.com/homeassistant-ai/ha-mcp) (4.5k★) — not a cherry-picked fixture. Full example further down uses the bundled sample server for a smaller walkthrough.*
+
 A static analysis CLI that audits **MCP (Model Context Protocol) server** implementations for the things that actually break an agent calling them: missing tool descriptions, undocumented parameters, no error handling, no README coverage — plus a separate **security** score covering prompt-injection-prone tool descriptions ("tool poisoning"), dangerous dynamic execution, SSRF-prone outbound requests, unsafe deserialization, and hardcoded secrets. Quality and security are scored independently: a repo can be a documented, well-tested A on quality and still have a real security gap, and the two shouldn't be blended into one number that hides which is true.
 
 The MCP ecosystem is growing faster than the conventions around building a *good* server have settled. Most servers are hand-written in an afternoon and never checked against anything. `mcp-doctor` is a linter for that gap — point it at a repo, get a score and a concrete list of what to fix.
