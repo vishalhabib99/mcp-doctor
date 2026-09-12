@@ -6,6 +6,7 @@ import json
 from dataclasses import asdict
 
 from .analyzer import Report
+from .schema_diff import SchemaChange
 
 RESET = "\033[0m"
 BOLD = "\033[1m"
@@ -19,7 +20,12 @@ def _color_for_grade(grade: str) -> str:
     return {"A": GREEN, "B": GREEN, "C": YELLOW, "D": YELLOW, "F": RED}.get(grade, "")
 
 
-def render_text(report: Report, use_color: bool = True) -> str:
+def render_text(
+    report: Report,
+    use_color: bool = True,
+    schema_changes: list[SchemaChange] | None = None,
+    diff_against_label: str = "",
+) -> str:
     def c(code: str, text: str) -> str:
         return f"{code}{text}{RESET}" if use_color else text
 
@@ -57,10 +63,20 @@ def render_text(report: Report, use_color: bool = True) -> str:
             color = RED if issue.severity == "error" else YELLOW
             lines.append(f"  {c(color, issue.severity.upper())}  {issue.message}")
 
+    if schema_changes is not None:
+        lines.append("")
+        lines.append(c(BOLD, f"Schema changes vs. {diff_against_label}"))
+        if schema_changes:
+            for change in schema_changes:
+                color = RED if change.severity == "error" else YELLOW
+                lines.append(f"  {c(color, change.severity.upper())}  [{change.tool}] {change.detail}")
+        else:
+            lines.append("  none — no breaking changes found.")
+
     return "\n".join(lines)
 
 
-def render_json(report: Report) -> str:
+def render_json(report: Report, schema_changes: list[SchemaChange] | None = None) -> str:
     payload = {
         "score": report.score,
         "max_score": report.max_score,
@@ -76,9 +92,13 @@ def render_json(report: Report) -> str:
                 "file": t.file,
                 "line": t.line,
                 "issues": [asdict(i) for i in t.issues],
+                "param_names": t.param_names,
+                "required_param_names": t.required_param_names,
             }
             for t in report.tools
         ],
         "repo_issues": [asdict(i) for i in report.repo_issues],
     }
+    if schema_changes is not None:
+        payload["schema_changes"] = [asdict(c) for c in schema_changes]
     return json.dumps(payload, indent=2)

@@ -69,6 +69,14 @@ class ToolFinding:
     has_bare_except: bool
     description_text: str = ""
     issues: list[ToolIssue] = field(default_factory=list)
+    # Python-only for now (populated in _analyze_function_as_tool, which
+    # every Python registration style funnels through) — used by
+    # schema_diff.py to catch a breaking change between two runs. Empty for
+    # TS/Go tools, same incremental language-by-language pattern as
+    # everything else here; comparing empty-to-empty across two runs is a
+    # natural no-op, not a false positive.
+    param_names: list[str] = field(default_factory=list)
+    required_param_names: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -525,6 +533,8 @@ def _analyze_function_as_tool(
         has_try_except=has_try,
         has_bare_except=has_bare,
         description_text=description,
+        param_names=[a.arg for a in args],
+        required_param_names=[a.arg for a in args if a not in defaults_by_arg],
     )
 
     if not finding.has_description:
