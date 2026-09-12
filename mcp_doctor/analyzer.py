@@ -309,6 +309,24 @@ def _kwarg_str_list(call: ast.Call, key: str) -> set[str]:
     return set()
 
 
+def _kwarg_call(call: ast.Call, key: str) -> ast.Call | None:
+    for kw in call.keywords:
+        if kw.arg == key and isinstance(kw.value, ast.Call):
+            return kw.value
+    return None
+
+
+def _kwarg_bool(call: ast.Call, *keys: str) -> bool | None:
+    """Reads a boolean keyword argument, trying each of `keys` in turn — for
+    reading either the snake_case or camelCase spelling of the same
+    ToolAnnotations field without the caller needing to know which one a
+    given SDK version uses."""
+    for kw in call.keywords:
+        if kw.arg in keys and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, bool):
+            return kw.value.value
+    return None
+
+
 def _contains_try_except(node: ast.AST) -> tuple[bool, bool]:
     has_try = False
     has_bare = False
@@ -415,6 +433,39 @@ def _build_error_handling_registry(
     return memo
 
 
+# A tool declaring `readOnlyHint: true` is a real, load-bearing signal — an
+# agent framework may gate approval prompts or safety checks on it (verified
+# real-world case: DeusData/codebase-memory-mcp#2118, where 13 of 15 tools
+# were mislabeled destructive/not-read-only, affecting exactly this kind of
+# client-side gating). This looks for the opposite, more dangerous
+# direction: a tool that claims to be read-only but whose own body contains
+# an obvious write/mutation signature. Deliberately narrow and conservative
+# — a raw SQL mutation verb, a file opened in a write mode, a filesystem
+# deletion call, or a client library's mutating HTTP verb (scoped to a
+# recognizable client name, since bare `.post(`/`.delete(` are common method
+# names for plenty of non-HTTP things) — not `.save()`/`.commit()` alone,
+# which are common enough on read-only code paths (an ORM's read-only
+# session, a computed result saved to a local variable) to be more noise
+# than signal. A hit here means "worth a human look", not a confirmed bug.
+_MUTATION_SIGNALS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r'\b(INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM|DROP\s+TABLE|ALTER\s+TABLE)\b', re.IGNORECASE), "a raw SQL mutation statement"),
+    (re.compile(r'open\([^)]*[\'"](w|a|wb|ab|w\+|a\+)[\'"]'), "a file opened in a write/append mode"),
+    (re.compile(r'\b(os\.remove|os\.unlink|os\.rmdir|shutil\.rmtree)\('), "a filesystem deletion call"),
+    (re.compile(r'\b(requests|httpx|client|session)\.(post|put|delete|patch)\('), "a mutating HTTP client call"),
+]
+
+
+def _scan_for_mutation_signal(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> str | None:
+    try:
+        body_text = ast.unparse(fn)
+    except Exception:
+        return None
+    for pattern, label in _MUTATION_SIGNALS:
+        if pattern.search(body_text):
+            return label
+    return None
+
+
 def _analyze_function_as_tool(
     fn: ast.FunctionDef | ast.AsyncFunctionDef,
     file: str,
@@ -423,6 +474,7 @@ def _analyze_function_as_tool(
     name_override: str | None = None,
     excluded_arg_names: set[str] | None = None,
     error_handling_registry: dict[str, bool] | None = None,
+    declared_read_only: bool | None = None,
 ) -> ToolFinding:
     tool_name = name_override or fn.name
     docstring = ast.get_docstring(fn)
@@ -522,6 +574,17 @@ def _analyze_function_as_tool(
             "error",
         ))
 
+    if declared_read_only:
+        mutation_signal = _scan_for_mutation_signal(fn)
+        if mutation_signal:
+            finding.issues.append(ToolIssue(
+                tool_name, file, fn.lineno, "annotation_mismatch",
+                f"Declared readOnlyHint: true, but this tool's own body contains {mutation_signal} — "
+                "an agent framework that gates approval prompts on this hint may skip confirming an "
+                "action that isn't actually read-only. Heuristic — worth a human look, not confirmed.",
+                "warning", "security",
+            ))
+
     return finding
 
 
@@ -549,9 +612,14 @@ def _find_fastmcp_tools(
             description_override = _kwarg_str(call, "description")
             name_override = _kwarg_str(call, "name")
             excluded_args = _kwarg_str_list(call, "exclude_args")
+            annotations_call = _kwarg_call(call, "annotations")
+            declared_read_only = (
+                _kwarg_bool(annotations_call, "read_only_hint", "readOnlyHint")
+                if annotations_call is not None else None
+            )
             findings.append(_analyze_function_as_tool(
                 node, file, description_override, alias_registry, name_override,
-                excluded_args, error_handling_registry,
+                excluded_args, error_handling_registry, declared_read_only,
             ))
             break
     return findings

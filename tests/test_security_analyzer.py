@@ -519,3 +519,115 @@ def test_window_eval_bypass_is_still_flagged_as_dangerous_exec(tmp_path):
 
     report = analyze_repo(tmp_path)
     assert "dangerous_exec" in {i.check for i in report.repo_issues}
+
+
+def test_read_only_tool_that_writes_a_file_flags_annotation_mismatch(tmp_path):
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        from mcp.types import ToolAnnotations
+        mcp = FastMCP("x")
+
+        @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+        def export_report(path: str) -> str:
+            \"\"\"Args:
+                path: where to write the report.
+            \"\"\"
+            with open(path, "w") as f:
+                f.write("report")
+            return "done"
+        """)
+    make_clean_repo(tmp_path)
+
+    report = analyze_repo(tmp_path)
+    tool = next(t for t in report.tools if t.name == "export_report")
+    assert any(i.check == "annotation_mismatch" for i in tool.issues)
+
+
+def test_read_only_tool_that_runs_raw_sql_mutation_flags_annotation_mismatch(tmp_path):
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        from mcp.types import ToolAnnotations
+        mcp = FastMCP("x")
+
+        @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+        def archive_record(record_id: str) -> str:
+            \"\"\"Args:
+                record_id: the record to archive.
+            \"\"\"
+            cursor.execute(f"UPDATE records SET archived = 1 WHERE id = '{record_id}'")
+            return "archived"
+        """)
+    make_clean_repo(tmp_path)
+
+    report = analyze_repo(tmp_path)
+    tool = next(t for t in report.tools if t.name == "archive_record")
+    assert any(i.check == "annotation_mismatch" for i in tool.issues)
+
+
+def test_read_only_tool_with_no_mutation_signal_is_not_flagged(tmp_path):
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        from mcp.types import ToolAnnotations
+        mcp = FastMCP("x")
+
+        @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+        def get_status(record_id: str) -> str:
+            \"\"\"Args:
+                record_id: the record to check.
+            \"\"\"
+            return cursor.execute(f"SELECT status FROM records WHERE id = '{record_id}'").fetchone()
+        """)
+    make_clean_repo(tmp_path)
+
+    report = analyze_repo(tmp_path)
+    tool = next(t for t in report.tools if t.name == "get_status")
+    assert not any(i.check == "annotation_mismatch" for i in tool.issues)
+
+
+def test_writing_tool_not_declared_read_only_is_not_flagged(tmp_path):
+    # No annotation at all — the check only fires when a tool explicitly
+    # claims to be read-only and then contradicts that claim. A tool with
+    # no declared hint either way is a documentation gap, not a mismatch.
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        @mcp.tool()
+        def delete_file(path: str) -> str:
+            \"\"\"Args:
+                path: file to delete.
+            \"\"\"
+            os.remove(path)
+            return "deleted"
+        """)
+    make_clean_repo(tmp_path)
+
+    report = analyze_repo(tmp_path)
+    tool = next(t for t in report.tools if t.name == "delete_file")
+    assert not any(i.check == "annotation_mismatch" for i in tool.issues)
+
+
+def test_annotation_mismatch_penalizes_security_score_not_quality(tmp_path):
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        from mcp.types import ToolAnnotations
+        mcp = FastMCP("x")
+
+        @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+        def export_report(path: str) -> str:
+            \"\"\"Exports the current report to disk.
+
+            Args:
+                path: where to write the report.
+            \"\"\"
+            with open(path, "w") as f:
+                f.write("report")
+            return "done"
+        """)
+    make_clean_repo(tmp_path)
+
+    report = analyze_repo(tmp_path)
+    tool = next(t for t in report.tools if t.name == "export_report")
+    mismatch = next(i for i in tool.issues if i.check == "annotation_mismatch")
+    assert mismatch.category == "security"
+    assert report.security_percent < 100
