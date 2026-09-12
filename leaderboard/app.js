@@ -17,9 +17,17 @@
     return iso.slice(0, 10);
   }
 
-  function gradeCell(percent, grade) {
+  function deltaHtml(change) {
+    if (change === null || change === undefined || change === 0) return "";
+    var cls = change > 0 ? "delta-up" : "delta-down";
+    var arrow = change > 0 ? "▲" : "▼";
+    return ' <span class="delta ' + cls + '" title="Changed since the previous scan">' +
+      arrow + Math.abs(change) + "%</span>";
+  }
+
+  function gradeCell(percent, grade, change) {
     return '<span class="grade grade-' + grade + '">' + grade + "</span> " +
-      '<span class="text-dim">' + percent + "%</span>";
+      '<span class="text-dim">' + percent + "%</span>" + deltaHtml(change);
   }
 
   function badgeMarkdown(r) {
@@ -56,9 +64,9 @@
         "<td>" + r.language + "</td>" +
         '<td class="numeric">' + formatStars(r.stars) + "</td>" +
         '<td class="numeric">' + r.tool_count + "</td>" +
-        '<td class="numeric">' + gradeCell(r.quality_percent, r.quality_grade) + "</td>" +
-        '<td class="numeric">' + gradeCell(r.security_percent, r.security_grade) + "</td>" +
-        "<td>" + formatDate(r.last_scanned) + "</td>" +
+        '<td class="numeric">' + gradeCell(r.quality_percent, r.quality_grade, r.quality_percent_change) + "</td>" +
+        '<td class="numeric">' + gradeCell(r.security_percent, r.security_grade, r.security_percent_change) + "</td>" +
+        '<td title="' + (r.previous_scanned ? "Previous scan: " + formatDate(r.previous_scanned) : "First scan — nothing to compare yet") + '">' + formatDate(r.last_scanned) + "</td>" +
         "<td>" + badgeCell(r) + "</td>" +
         "</tr>";
     }).join("");

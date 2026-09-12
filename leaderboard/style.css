@@ -128,6 +128,14 @@ tbody tr:last-child td { border-bottom: none; }
 .grade-C, .grade-D { color: var(--grade-c); }
 .grade-F { color: var(--grade-f); }
 
+.delta {
+  font-size: 0.85em;
+  font-weight: 600;
+  margin-left: 0.35em;
+}
+.delta-up { color: var(--grade-a); }
+.delta-down { color: var(--grade-f); }
+
 .repo-link { font-weight: 600; }
 
 .badge-img {
