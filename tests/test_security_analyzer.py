@@ -6,7 +6,7 @@ from mcp_doctor.analyzer import analyze_repo
 CLEAN_FILES = {
     "README.md": "# x\n\nHas get_forecast tool.",
     "LICENSE": "MIT",
-    "requirements.txt": "mcp\n",
+    "requirements.txt": "mcp==1.0.0\n",
 }
 
 
@@ -631,3 +631,105 @@ def test_annotation_mismatch_penalizes_security_score_not_quality(tmp_path):
     mismatch = next(i for i in tool.issues if i.check == "annotation_mismatch")
     assert mismatch.category == "security"
     assert report.security_percent < 100
+
+
+def test_bare_requirements_line_is_flagged_unpinned(tmp_path):
+    from mcp_doctor.security import scan_unpinned_dependencies
+
+    (tmp_path / "requirements.txt").write_text("requests\n")
+    issues = scan_unpinned_dependencies(tmp_path)
+    assert len(issues) == 1
+    assert issues[0].check == "unpinned_dependency"
+    assert "requests" in issues[0].message
+    assert issues[0].category == "security"
+
+
+def test_pinned_requirements_line_is_not_flagged(tmp_path):
+    from mcp_doctor.security import scan_unpinned_dependencies
+
+    (tmp_path / "requirements.txt").write_text("requests==2.31.0\n")
+    assert scan_unpinned_dependencies(tmp_path) == []
+
+
+def test_range_pinned_requirements_line_is_not_flagged(tmp_path):
+    # A >=/~= floor is standard practice, not the "resolves to anything at
+    # all" case this check exists for — flagging it would be far more noise
+    # than signal.
+    from mcp_doctor.security import scan_unpinned_dependencies
+
+    (tmp_path / "requirements.txt").write_text("requests>=2.0\nflask~=2.0\n")
+    assert scan_unpinned_dependencies(tmp_path) == []
+
+
+def test_requirements_comments_and_blank_lines_and_includes_are_skipped(tmp_path):
+    from mcp_doctor.security import scan_unpinned_dependencies
+
+    (tmp_path / "requirements.txt").write_text(
+        "# a comment\n\n-e .\n-r other-requirements.txt\nrequests==2.31.0\n"
+    )
+    assert scan_unpinned_dependencies(tmp_path) == []
+
+
+def test_npm_wildcard_version_is_flagged_unpinned(tmp_path):
+    import json as json_mod
+
+    from mcp_doctor.security import scan_unpinned_dependencies
+
+    (tmp_path / "package.json").write_text(json_mod.dumps({
+        "dependencies": {"left-pad": "*", "express": "4.18.0"},
+        "devDependencies": {"jest": "latest"},
+    }))
+    issues = scan_unpinned_dependencies(tmp_path)
+    flagged = {i.message.split("'")[1] for i in issues}
+    assert flagged == {"left-pad", "jest"}
+
+
+def test_npm_caret_and_tilde_ranges_are_not_flagged(tmp_path):
+    # Idiomatic npm output (the default shape of `npm install --save`) —
+    # flagging every caret/tilde range would swamp real findings in noise.
+    import json as json_mod
+
+    from mcp_doctor.security import scan_unpinned_dependencies
+
+    (tmp_path / "package.json").write_text(json_mod.dumps({
+        "dependencies": {"express": "^4.18.0", "lodash": "~4.17.0"},
+    }))
+    assert scan_unpinned_dependencies(tmp_path) == []
+
+
+def test_no_manifest_at_all_does_not_also_raise_unpinned_dependency(tmp_path):
+    # The existing "packaging" check already covers "no manifest found" —
+    # this check should be silent (not double-flag) when there's nothing to
+    # parse in the first place.
+    from mcp_doctor.security import scan_unpinned_dependencies
+
+    assert scan_unpinned_dependencies(tmp_path) == []
+
+
+def test_unpinned_dependency_affects_security_score_via_analyze_repo(tmp_path):
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        @mcp.tool()
+        def get_forecast(city: str) -> str:
+            \"\"\"Get a weather forecast.
+
+            Args:
+                city: The city name.
+            \"\"\"
+            try:
+                return city
+            except ValueError as e:
+                return str(e)
+        """)
+    (tmp_path / "README.md").write_text("# x\n\nHas get_forecast tool.")
+    (tmp_path / "LICENSE").write_text("MIT")
+    (tmp_path / "requirements.txt").write_text("mcp\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_x.py").write_text("def test_x(): pass")
+
+    report = analyze_repo(tmp_path)
+    assert report.percent == 100  # quality untouched
+    assert report.security_percent < 100
+    assert any(i.check == "unpinned_dependency" for i in report.repo_issues)

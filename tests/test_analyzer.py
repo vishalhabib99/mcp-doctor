@@ -34,7 +34,7 @@ def test_fastmcp_tool_with_full_docs_passes_clean(tmp_path):
         """)
     (tmp_path / "README.md").write_text("# x\n\nHas get_forecast tool.")
     (tmp_path / "LICENSE").write_text("MIT")
-    (tmp_path / "requirements.txt").write_text("mcp\n")
+    (tmp_path / "requirements.txt").write_text("mcp==1.0.0\n")
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "test_x.py").write_text("def test_x(): pass")
 

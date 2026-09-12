@@ -979,7 +979,13 @@ def analyze_repo(root: Path) -> Report:
     # Lazy import: ts_analyzer/go_analyzer/security import ToolFinding/ToolIssue
     # from this module, so importing them at module load time would be circular.
     from .go_analyzer import find_go_tools
-    from .security import scan_dangerous_exec, scan_prompt_injection, scan_ssrf, scan_unsafe_deserialization
+    from .security import (
+        scan_dangerous_exec,
+        scan_prompt_injection,
+        scan_ssrf,
+        scan_unpinned_dependencies,
+        scan_unsafe_deserialization,
+    )
     from .ts_analyzer import find_ts_tools
 
     py_files = [p for p in root.rglob("*.py") if "/.git/" not in str(p) and "/venv/" not in str(p) and "/node_modules/" not in str(p)]
@@ -1093,6 +1099,8 @@ def analyze_repo(root: Path) -> Report:
     has_go_packaging = (root / "go.mod").exists()
     if not has_py_packaging and not has_js_packaging and not has_go_packaging:
         repo_issues.append(RepoIssue("packaging", "No pyproject.toml/requirements.txt/setup.py/package.json/go.mod — dependencies aren't pinned.", "warning"))
+    else:
+        repo_issues.extend(scan_unpinned_dependencies(root))
 
     ts_js_files = [
         p for p in root.rglob("*")
@@ -1158,7 +1166,10 @@ def analyze_repo(root: Path) -> Report:
     # SSRF heuristic on every call site) shouldn't manufacture an artificially
     # catastrophic score just by being repeated, when a human reviewer would
     # weight "this pattern exists" once, not once per line it appears on.
-    SECURITY_CHECK_WEIGHT = {"secrets": 5, "dangerous_exec": 5, "unsafe_deserialization": 5, "ssrf": 2}
+    SECURITY_CHECK_WEIGHT = {
+        "secrets": 5, "dangerous_exec": 5, "unsafe_deserialization": 5, "ssrf": 2,
+        "unpinned_dependency": 2,
+    }
     SECURITY_CHECK_CAP = 3
     security_check_counts: dict[str, int] = {}
     for i in repo_issues:

@@ -17,6 +17,7 @@ dependencies, and honest about which checks are precise vs. heuristic.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -244,4 +245,69 @@ def scan_unsafe_deserialization(py_files: list[Path]) -> list[RepoIssue]:
                     "loader can construct arbitrary Python objects from the YAML content.",
                     "error", "security",
                 ))
+    return issues
+
+
+# --- Supply-chain: unpinned dependencies -------------------------------
+#
+# A dependency with no version floor at all resolves to whatever the
+# registry serves at install time — a compromised or typosquatted release
+# of that package gets pulled in automatically, no code change in this
+# repo required. Deliberately narrow: a `>=`/`~=`/caret/tilde range still
+# has *some* floor and is standard practice across both ecosystems (most
+# `npm install --save` output looks like this by default) — flagging every
+# one would be far more noise than signal, the same false-positive-rate
+# judgment already applied to the annotation-mismatch check's `.save()`/
+# `.commit()` exclusion. Only a name with no version constraint whatsoever,
+# or an explicit `*`/`latest`/`x` wildcard, is flagged. Python
+# (`requirements.txt`) and npm (`package.json`) only for now — Go's
+# `go.mod` always pins an exact version by construction, a structurally
+# different (and already safe) convention, and `pyproject.toml`'s several
+# possible dependency-table shapes (PEP 621, Poetry, ...) are left for a
+# later pass rather than guessed at.
+_REQUIREMENTS_UNPINNED = re.compile(r"^([A-Za-z0-9_.\-]+)\s*(?:\[[^\]]*\])?\s*$")
+_NPM_WILDCARD_VERSION = re.compile(r"^\s*[*xX]\s*$|^\s*latest\s*$", re.IGNORECASE)
+
+
+def scan_unpinned_dependencies(root: Path) -> list[RepoIssue]:
+    issues: list[RepoIssue] = []
+
+    req_file = root / "requirements.txt"
+    if req_file.exists():
+        try:
+            lines = req_file.read_text(errors="ignore").splitlines()
+        except OSError:
+            lines = []
+        for i, raw_line in enumerate(lines, start=1):
+            line = raw_line.split("#", 1)[0].strip()
+            if not line or line.startswith(("-e ", "-r ", "--")):
+                continue
+            match = _REQUIREMENTS_UNPINNED.match(line)
+            if match:
+                issues.append(RepoIssue(
+                    "unpinned_dependency",
+                    f"requirements.txt:{i} '{match.group(1)}' has no version constraint at all — "
+                    "resolves to whatever the registry serves at install time, not a specific, "
+                    "reviewed release.",
+                    "warning", "security",
+                ))
+
+    pkg_file = root / "package.json"
+    if pkg_file.exists():
+        try:
+            pkg = json.loads(pkg_file.read_text(errors="ignore"))
+        except (OSError, json.JSONDecodeError):
+            pkg = {}
+        for section in ("dependencies", "devDependencies"):
+            for name, version in (pkg.get(section) or {}).items():
+                if not isinstance(version, str):
+                    continue
+                if _NPM_WILDCARD_VERSION.match(version):
+                    issues.append(RepoIssue(
+                        "unpinned_dependency",
+                        f"package.json: '{name}' is pinned to \"{version}\" — no version floor at "
+                        "all, resolves to whatever the registry serves at install time.",
+                        "warning", "security",
+                    ))
+
     return issues
