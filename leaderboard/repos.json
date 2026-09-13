@@ -18,5 +18,6 @@
   {"owner": "korotovsky", "repo": "slack-mcp-server", "language": "Go"},
   {"owner": "antvis", "repo": "mcp-server-chart", "language": "TS"},
   {"owner": "oraios", "repo": "serena", "language": "Python"},
-  {"owner": "sooperset", "repo": "mcp-atlassian", "language": "Python"}
+  {"owner": "sooperset", "repo": "mcp-atlassian", "language": "Python"},
+  {"owner": "jingcheng-chen", "repo": "rhinomcp", "language": "Python"}
 ]

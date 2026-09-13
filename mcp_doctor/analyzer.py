@@ -340,6 +340,62 @@ def _build_mount_namespace_map(trees: list[tuple[str, ast.Module]]) -> dict[str,
     return result
 
 
+def _find_standalone_entrypoint_files(
+    trees: list[tuple[str, ast.Module]], mounted_files: set[str]
+) -> set[str]:
+    """Files with their own `if __name__ == "__main__": x.run()` block on a
+    locally-defined instance — a real, independently-runnable server, found
+    dogfooding a monorepo (`jingcheng-chen/rhinomcp`) that ships one real
+    server plus dozens of scratch/experimental servers under `experiments/`,
+    several of which happen to redeclare the same tool name (`create_object`,
+    `analyze_objects`, ...) as the real one for local testing. The spec's
+    'SHOULD be unique within a server' doesn't apply across two servers that
+    can never both be running at once, so tools in these files are excluded
+    from the tool-name-uniqueness comparison against every *other* such file
+    (each remains its own group; genuine duplicates within one standalone
+    file, or within the shared default group, are still caught).
+
+    Conservative like the mount-namespace map above: a file already known to
+    be a mount *target* is never treated as standalone, even if it also has
+    its own `__main__` guard for standalone testing — evidence it's meant to
+    be composed into another server wins over evidence it can run alone."""
+    result: set[str] = set()
+    for rel, tree in trees:
+        if rel in mounted_files:
+            continue
+        local_call_vars = {
+            tgt.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
+            for tgt in node.targets
+            if isinstance(tgt, ast.Name)
+        }
+        for node in ast.walk(tree):
+            if not (
+                isinstance(node, ast.If)
+                and isinstance(node.test, ast.Compare)
+                and isinstance(node.test.left, ast.Name)
+                and node.test.left.id == "__name__"
+                and any(
+                    isinstance(c, ast.Constant) and c.value == "__main__"
+                    for c in node.test.comparators
+                )
+            ):
+                continue
+            found_run = any(
+                isinstance(stmt, ast.Call)
+                and isinstance(stmt.func, ast.Attribute)
+                and stmt.func.attr == "run"
+                and isinstance(stmt.func.value, ast.Name)
+                and stmt.func.value.id in local_call_vars
+                for stmt in ast.walk(node)
+            )
+            if found_run:
+                result.add(rel)
+                break
+    return result
+
+
 def _find_decorator_call(dec: ast.expr, names: set[str]) -> ast.Call | None:
     node = dec
     if isinstance(node, ast.Call):
@@ -1106,10 +1162,15 @@ def analyze_repo(root: Path) -> Report:
             + ("…" if len(invalid_names) > 5 else ""),
             "warning",
         ))
-    seen: dict[str, int] = {}
+    standalone_files = _find_standalone_entrypoint_files(trees, set(mount_namespace_map))
+    seen_by_group: dict[str, dict[str, int]] = {}
     for t in tools:
-        seen[t.name] = seen.get(t.name, 0) + 1
-    duplicate_names = sorted(n for n, count in seen.items() if count > 1)
+        group = t.file if t.file in standalone_files else "__default__"
+        bucket = seen_by_group.setdefault(group, {})
+        bucket[t.name] = bucket.get(t.name, 0) + 1
+    duplicate_names = sorted({
+        n for bucket in seen_by_group.values() for n, count in bucket.items() if count > 1
+    })
     if duplicate_names:
         repo_issues.append(RepoIssue(
             "tool_name",

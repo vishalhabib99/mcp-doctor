@@ -855,6 +855,71 @@ def test_mounted_namespace_tools_not_flagged_as_duplicate(tmp_path):
     assert "confluence_search" in names
 
 
+def test_standalone_entrypoint_files_not_compared_for_duplicates(tmp_path):
+    write(tmp_path, "main_server.py", """
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("real")
+
+        @mcp.tool()
+        def create_object() -> str:
+            \"\"\"Create a real object.\"\"\"
+            try:
+                return "a"
+            except ValueError as e:
+                return str(e)
+
+        if __name__ == "__main__":
+            mcp.run()
+        """)
+    write(tmp_path, "scratch_mcp.py", """
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("scratch")
+
+        @mcp.tool()
+        def create_object() -> str:
+            \"\"\"Scratch reimplementation for local testing.\"\"\"
+            try:
+                return "b"
+            except ValueError as e:
+                return str(e)
+
+        if __name__ == "__main__":
+            mcp.run()
+        """)
+    report = analyze_repo(tmp_path)
+    dup_issues = [i for i in report.repo_issues if i.check == "tool_name" and "unique" in i.message]
+    assert not dup_issues
+
+
+def test_real_duplicate_within_standalone_entrypoint_still_flagged(tmp_path):
+    write(tmp_path, "scratch_mcp.py", """
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("scratch")
+
+        @mcp.tool(name="dupe")
+        def a() -> str:
+            \"\"\"First.\"\"\"
+            try:
+                return "a"
+            except ValueError as e:
+                return str(e)
+
+        @mcp.tool(name="dupe")
+        def b() -> str:
+            \"\"\"Second.\"\"\"
+            try:
+                return "b"
+            except ValueError as e:
+                return str(e)
+
+        if __name__ == "__main__":
+            mcp.run()
+        """)
+    report = analyze_repo(tmp_path)
+    issue = next(i for i in report.repo_issues if i.check == "tool_name" and "unique" in i.message)
+    assert "dupe" in issue.message
+
+
 def test_valid_tool_name_not_flagged(tmp_path):
     write(tmp_path, "server.py", """
         from mcp.server.fastmcp import FastMCP
