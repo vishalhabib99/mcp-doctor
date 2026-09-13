@@ -813,6 +813,48 @@ def test_duplicate_tool_names_flagged(tmp_path):
     assert "dupe" in issue.message
 
 
+def test_mounted_namespace_tools_not_flagged_as_duplicate(tmp_path):
+    write(tmp_path, "jira.py", """
+        from mcp.server.fastmcp import FastMCP
+        jira_mcp = FastMCP("jira")
+
+        @jira_mcp.tool()
+        def search() -> str:
+            \"\"\"Search Jira issues.\"\"\"
+            try:
+                return "a"
+            except ValueError as e:
+                return str(e)
+        """)
+    write(tmp_path, "confluence.py", """
+        from mcp.server.fastmcp import FastMCP
+        confluence_mcp = FastMCP("confluence")
+
+        @confluence_mcp.tool()
+        def search() -> str:
+            \"\"\"Search Confluence pages.\"\"\"
+            try:
+                return "a"
+            except ValueError as e:
+                return str(e)
+        """)
+    write(tmp_path, "main.py", """
+        from mcp.server.fastmcp import FastMCP
+        from .jira import jira_mcp
+        from .confluence import confluence_mcp
+
+        main_mcp = FastMCP("main")
+        main_mcp.mount(jira_mcp, namespace="jira")
+        main_mcp.mount(confluence_mcp, namespace="confluence")
+        """)
+    report = analyze_repo(tmp_path)
+    dup_issues = [i for i in report.repo_issues if i.check == "tool_name" and "unique" in i.message]
+    assert not dup_issues
+    names = {t.name for t in report.tools}
+    assert "jira_search" in names
+    assert "confluence_search" in names
+
+
 def test_valid_tool_name_not_flagged(tmp_path):
     write(tmp_path, "server.py", """
         from mcp.server.fastmcp import FastMCP

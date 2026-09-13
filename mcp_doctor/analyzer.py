@@ -284,6 +284,62 @@ def _collect_field_aliases(tree: ast.Module, registry: dict[str, bool]) -> None:
                     registry[n] = True
 
 
+def _build_mount_namespace_map(trees: list[tuple[str, ast.Module]]) -> dict[str, str]:
+    """Repo-wide map of file -> namespace prefix, for FastMCP's `main.mount(sub,
+    namespace="ns")` pattern (a documented way to compose several sub-servers
+    into one — e.g. mcp-atlassian mounts separate jira/confluence FastMCP
+    instances this way). Mounting with a namespace renames every tool on the
+    mounted server to `ns_toolname` at the protocol level, so two same-named
+    tools defined in two mounted sub-servers (e.g. both define `search`) are
+    NOT actually duplicates — they're `jira_search`/`confluence_search` to a
+    real client. Without this, the tool_name uniqueness check produces a false
+    positive on a repo doing nothing wrong.
+
+    Resolution is name-based only, same simplification as the alias/error-
+    handling registries above: the mount call's target must be a simple name
+    (`X.mount(sub_mcp, namespace=...)`, not an inline expression), and that
+    name must be assigned via exactly one `name = SomeCall(...)` across the
+    whole repo — ambiguous or unresolvable cases are dropped rather than
+    guessed, consistent with this file's existing "don't guess" standard."""
+    mount_targets: list[tuple[str, str]] = []
+    for _, tree in trees:
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "mount"):
+                continue
+            if not node.args or not isinstance(node.args[0], ast.Name):
+                continue
+            namespace = _kwarg_str(node, "namespace") or _kwarg_str(node, "prefix")
+            if namespace:
+                mount_targets.append((node.args[0].id, namespace))
+
+    if not mount_targets:
+        return {}
+
+    var_files: dict[str, set[str]] = {}
+    for rel, tree in trees:
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+                for tgt in node.targets:
+                    if isinstance(tgt, ast.Name):
+                        var_files.setdefault(tgt.id, set()).add(rel)
+
+    result: dict[str, str] = {}
+    ambiguous_files: set[str] = set()
+    for var_name, namespace in mount_targets:
+        files = var_files.get(var_name)
+        if not files or len(files) != 1:
+            continue
+        (owning_file,) = files
+        if owning_file in result and result[owning_file] != namespace:
+            ambiguous_files.add(owning_file)
+            continue
+        result[owning_file] = namespace
+    for f in ambiguous_files:
+        result.pop(f, None)
+    return result
+
+
 def _find_decorator_call(dec: ast.expr, names: set[str]) -> ast.Call | None:
     node = dec
     if isinstance(node, ast.Call):
@@ -1020,6 +1076,14 @@ def analyze_repo(root: Path) -> Report:
         tools.extend(_find_direct_call_tools(tree, rel, alias_registry, error_handling_registry))
         tools.extend(_find_lowlevel_tools(tree, rel))
         tools.extend(_find_class_based_tools(tree, rel, alias_registry, error_handling_registry))
+
+    mount_namespace_map = _build_mount_namespace_map(trees)
+    for t in tools:
+        namespace = mount_namespace_map.get(t.file)
+        if namespace:
+            t.name = f"{namespace}_{t.name}"
+            for issue in t.issues:
+                issue.tool = t.name
 
     ts_tools, ts_unparseable = find_ts_tools(root)
     tools.extend(ts_tools)
