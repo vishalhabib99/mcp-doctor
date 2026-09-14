@@ -141,6 +141,86 @@ def test_new_tool_is_not_flagged(tmp_path):
     assert changes == []
 
 
+def test_cross_style_baseline_is_not_a_false_positive(tmp_path):
+    # Reported by Edward Izgorodin (modelcontextprotocol/modelcontextprotocol
+    # discussion #3322): a baseline captured from a FastMCP-decorated
+    # function, diffed against a current run captured from the raw
+    # Tool(inputSchema=...) constructor style, must not report the shared
+    # required 'key' param as removed just because the two styles are
+    # resolved through different code paths.
+    write(tmp_path, "server.py", """
+        from mcp.types import Tool
+        lookup_tool = Tool(
+            name="lookup",
+            description="Look up a synthetic value.",
+            inputSchema={
+                "type": "object",
+                "properties": {"key": {"type": "string", "description": "Key to look up."}},
+                "required": ["key"],
+            },
+        )
+        """)
+    report = analyze_repo(tmp_path)
+    baseline = _baseline([
+        {"name": "lookup", "param_names": ["key"], "required_param_names": ["key"]},
+    ])
+
+    assert compute_schema_diff(baseline, report.tools) == []
+
+
+def test_raw_schema_tool_catches_a_real_removed_parameter(tmp_path):
+    write(tmp_path, "server.py", """
+        from mcp.types import Tool
+        lookup_tool = Tool(
+            name="lookup",
+            description="Look up a synthetic value.",
+            inputSchema={
+                "type": "object",
+                "properties": {"key": {"type": "string", "description": "Key to look up."}},
+                "required": ["key"],
+            },
+        )
+        """)
+    report = analyze_repo(tmp_path)
+    baseline = _baseline([
+        {"name": "lookup", "param_names": ["key", "region"], "required_param_names": ["key", "region"]},
+    ])
+
+    changes = compute_schema_diff(baseline, report.tools)
+    assert len(changes) == 1
+    assert changes[0].change == "param_removed"
+    assert "region" in changes[0].detail
+
+
+def test_raw_schema_tool_with_unresolvable_property_stays_a_no_op(tmp_path):
+    # A dynamic property key (not a string literal) can't be attributed a
+    # name, so param_names would be incomplete — required_param_names must
+    # be dropped too rather than risk misreading a still-present property as
+    # newly required.
+    write(tmp_path, "server.py", """
+        from mcp.types import Tool
+        _extra_key = "extra"
+        lookup_tool = Tool(
+            name="lookup",
+            description="Look up a synthetic value.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string", "description": "Key to look up."},
+                    _extra_key: {"type": "string"},
+                },
+                "required": ["key"],
+            },
+        )
+        """)
+    report = analyze_repo(tmp_path)
+    baseline = _baseline([
+        {"name": "lookup", "param_names": ["key"], "required_param_names": ["key"]},
+    ])
+
+    assert compute_schema_diff(baseline, report.tools) == []
+
+
 def test_identical_schema_produces_no_changes(tmp_path):
     write(tmp_path, "server.py", """
         from mcp.server.fastmcp import FastMCP

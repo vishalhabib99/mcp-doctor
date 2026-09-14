@@ -69,12 +69,15 @@ class ToolFinding:
     has_bare_except: bool
     description_text: str = ""
     issues: list[ToolIssue] = field(default_factory=list)
-    # Python-only for now (populated in _analyze_function_as_tool, which
-    # every Python registration style funnels through) — used by
+    # Python-only for now — populated in _analyze_function_as_tool (every
+    # decorator/class-based registration style funnels through it) and in
+    # _find_lowlevel_tools for the raw Tool(inputSchema=...) constructor
+    # style, whenever every property name is statically resolvable. Used by
     # schema_diff.py to catch a breaking change between two runs. Empty for
-    # TS/Go tools, same incremental language-by-language pattern as
-    # everything else here; comparing empty-to-empty across two runs is a
-    # natural no-op, not a false positive.
+    # TS/Go tools, and for a raw-schema tool with an unresolvable property,
+    # same incremental language-by-language pattern as everything else here;
+    # comparing empty-to-empty across two runs is a natural no-op, not a
+    # false positive.
     param_names: list[str] = field(default_factory=list)
     required_param_names: list[str] = field(default_factory=list)
 
@@ -935,8 +938,13 @@ def _find_lowlevel_tools(tree: ast.Module, file: str) -> list[ToolFinding]:
         schema_kw = next((kw for kw in node.keywords if kw.arg == "inputSchema"), None)
         param_count = 0
         typed_param_count = 0
+        param_names: list[str] = []
+        required_param_names: list[str] = []
         if schema_kw is not None and isinstance(schema_kw.value, ast.Dict):
             for k, v in zip(schema_kw.value.keys, schema_kw.value.values):
+                if isinstance(k, ast.Constant) and k.value == "required" and isinstance(v, ast.List):
+                    required_param_names = [e.value for e in v.elts if isinstance(e, ast.Constant) and isinstance(e.value, str)]
+                    continue
                 if not (isinstance(k, ast.Constant) and k.value == "properties" and isinstance(v, ast.Dict)):
                     continue
                 for pk, pv in zip(v.keys, v.values):
@@ -948,15 +956,28 @@ def _find_lowlevel_tools(tree: ast.Module, file: str) -> list[ToolFinding]:
                         if spread is None:
                             param_count += 1
                             continue
-                        for _, spv in zip(spread.keys, spread.values):
+                        for spk, spv in zip(spread.keys, spread.values):
                             param_count += 1
+                            if isinstance(spk, ast.Constant) and isinstance(spk.value, str):
+                                param_names.append(spk.value)
                             if isinstance(spv, ast.Dict) and _property_has_desc(spv):
                                 typed_param_count += 1
                         continue
                     param_count += 1
+                    if isinstance(pk, ast.Constant) and isinstance(pk.value, str):
+                        param_names.append(pk.value)
                     resolved = _resolve_property_dict(pv, property_builders)
                     if resolved is not None and _property_has_desc(resolved):
                         typed_param_count += 1
+
+        # required_param_names is only trustworthy when every property name was
+        # itself resolved (a dynamic/unresolved property, or an unresolved
+        # `**spread_call()`, means param_names is incomplete) — otherwise a
+        # required name from an unresolved property wouldn't have a matching
+        # entry in param_names, which schema_diff.py would misread as "newly
+        # required" rather than "not statically visible".
+        if len(param_names) != param_count:
+            required_param_names = []
 
         finding = ToolFinding(
             name=name,
@@ -970,6 +991,8 @@ def _find_lowlevel_tools(tree: ast.Module, file: str) -> list[ToolFinding]:
             has_try_except=True,  # not attributable to a single function body here
             has_bare_except=False,
             description_text=description,
+            param_names=param_names,
+            required_param_names=required_param_names,
         )
         if not finding.has_description:
             finding.issues.append(ToolIssue(

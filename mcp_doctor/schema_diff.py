@@ -16,6 +16,17 @@ checked either — presence and required-ness alone already catch the two
 most common breaking-change classes (a removed parameter, a
 newly-required one) without needing to resolve and compare arbitrary
 cross-language type annotations.
+
+Coverage is symmetric within Python too now: both the decorator/class-based
+styles and the raw `Tool(inputSchema=...)` constructor style populate
+`param_names`/`required_param_names` (analyzer.py resolves the latter
+statically from the schema dict, falling back to empty when a property name
+isn't resolvable). A one-sided real bug lived here before that fix: baseline
+captured with one style and current captured with the other style could
+report every unchanged shared parameter as `param_removed`, because "empty"
+was silently conflated with "genuinely no parameters" instead of "coverage
+unknown" (reported by Edward Izgorodin, github.com/modelcontextprotocol/
+modelcontextprotocol#3322).
 """
 
 from __future__ import annotations
