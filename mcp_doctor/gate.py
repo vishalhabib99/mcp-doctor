@@ -117,3 +117,17 @@ def check_tool_registration(name: str, description: str | None, annotations=None
             ))
 
     return result
+
+
+def check_tools_distinguishable(tools) -> dict[str, list[RegistrationIssue]]:
+    """Cross-tool check on a whole live tools/list (SDK Tool objects or raw dicts): tools whose
+    descriptions are indistinguishable. Returns {tool name: issues}; call once at discovery,
+    next to check_tool_registration."""
+    from .lookalike import find_indistinguishable_tools, message
+
+    pairs = find_indistinguishable_tools([(_get(t, "name"), _get(t, "description")) for t in tools])
+    found: dict[str, list[RegistrationIssue]] = {}
+    for a, b in pairs:
+        for this, other in ((a, b), (b, a)):
+            found.setdefault(this, []).append(RegistrationIssue("indistinguishable_description", message(other), "warning"))
+    return found

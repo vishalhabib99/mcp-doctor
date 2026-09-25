@@ -1439,6 +1439,15 @@ def analyze_repo(root: Path) -> Report:
         group = t.file if t.file in standalone_files else "__default__"
         bucket = seen_by_group.setdefault(group, {})
         bucket[t.name] = bucket.get(t.name, 0) + 1
+    # Tools an agent can't tell apart by description (see lookalike.py for why this is narrow).
+    from .lookalike import find_indistinguishable_tools, message as lookalike_message
+    by_name = {t.name: t for t in tools}
+    for a, b in find_indistinguishable_tools([(t.name, t.description_text) for t in tools]):
+        for this, other in ((a, b), (b, a)):
+            t = by_name[this]
+            t.issues.append(ToolIssue(t.name, t.file, t.line, "indistinguishable_description",
+                                      lookalike_message(other), "warning"))
+
     duplicate_names = sorted({
         n for bucket in seen_by_group.values() for n, count in bucket.items() if count > 1
     })

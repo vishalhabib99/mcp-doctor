@@ -5,4 +5,4 @@ __all__ = [
     "Report", "ToolFinding", "RepoIssue", "analyze_repo",
     "RegistrationIssue", "RegistrationResult", "check_tool_registration",
 ]
-__version__ = "0.11.9"
+__version__ = "0.12.0"
