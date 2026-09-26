@@ -1358,6 +1358,12 @@ def _scan_secrets(py_files: list[Path]) -> list[RepoIssue]:
     return issues
 
 
+# Directories that hold installed or generated code, not the repo's own source.
+# Scanning them reports third-party code (pip, typing_extensions, ...) as the
+# server's own findings, and can hide a missing-tests warning.
+_NON_REPO_DIRS = {".git", "venv", ".venv", "node_modules", "site-packages", ".tox", ".nox", "__pycache__"}
+
+
 def analyze_repo(root: Path) -> Report:
     # Lazy import: ts_analyzer/go_analyzer/security import ToolFinding/ToolIssue
     # from this module, so importing them at module load time would be circular.
@@ -1371,7 +1377,12 @@ def analyze_repo(root: Path) -> Report:
     )
     from .ts_analyzer import find_ts_tools
 
-    py_files = _dedupe_by_content([p for p in root.rglob("*.py") if "/.git/" not in str(p) and "/venv/" not in str(p) and "/node_modules/" not in str(p)])
+    def in_repo(p: Path) -> bool:
+        # Only look at the path *inside* the scanned repo, so a repo that itself
+        # lives under a folder named venv/ isn't skipped wholesale.
+        return not (set(p.relative_to(root).parts[:-1]) & _NON_REPO_DIRS)
+
+    py_files = _dedupe_by_content([p for p in root.rglob("*.py") if in_repo(p)])
 
     trees: list[tuple[str, ast.Module]] = []
     unparseable: list[str] = []
@@ -1491,13 +1502,9 @@ def analyze_repo(root: Path) -> Report:
         repo_issues.append(RepoIssue("license", "No LICENSE file — undermines adoption.", "warning"))
 
     has_tests = (
-        any(root.rglob("test_*.py"))
-        or any(root.rglob("*_test.py"))
-        or any(root.rglob("*.test.ts"))
-        or any(root.rglob("*.spec.ts"))
-        or any(root.rglob("*_test.go"))
+        any(in_repo(p) for pat in ("test_*.py", "*_test.py", "*.test.ts", "*.spec.ts", "*_test.go") for p in root.rglob(pat))
         or (root / "tests").is_dir()
-        or any(p.name == "__tests__" for p in root.rglob("__tests__"))
+        or any(in_repo(p) for p in root.rglob("__tests__"))
     )
     if not has_tests:
         repo_issues.append(RepoIssue("tests", "No test files found.", "warning"))
@@ -1514,12 +1521,12 @@ def analyze_repo(root: Path) -> Report:
         p for p in root.rglob("*")
         if p.suffix in (".ts", ".tsx", ".js", ".jsx")
         and not p.name.endswith(".d.ts")  # ambient type declarations — no executable code, ever
-        and "/node_modules/" not in str(p) and "/.git/" not in str(p)
+        and in_repo(p)
         and not _is_auxiliary_file(p)
     ])
     go_files = _dedupe_by_content([
         p for p in root.rglob("*.go")
-        if "/vendor/" not in str(p) and "/.git/" not in str(p)
+        if "vendor" not in p.relative_to(root).parts[:-1] and in_repo(p)
         and not _is_auxiliary_file(p)
     ])
     all_files = py_files + ts_js_files + go_files

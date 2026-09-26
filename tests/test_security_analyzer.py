@@ -1061,3 +1061,47 @@ def test_files_with_different_content_are_both_scanned(tmp_path):
     report = analyze_repo(tmp_path)
     dangerous_exec_hits = [i for i in report.repo_issues if i.check == "dangerous_exec"]
     assert len(dangerous_exec_hits) == 2
+
+
+SAFE_SERVER = """
+    from mcp.server.fastmcp import FastMCP
+    mcp = FastMCP("x")
+
+    @mcp.tool()
+    def get_forecast(city: str) -> str:
+        \"\"\"Args:
+            city: city name.
+        \"\"\"
+        try:
+            return city
+        except ValueError as e:
+            return ""
+    """
+
+
+def test_local_virtualenv_is_not_scanned(tmp_path):
+    # A local .venv holds third-party code (pip, typing_extensions, ...) that
+    # calls subprocess/exec. It isn't the server's code and must not be graded.
+    write(tmp_path, "server.py", SAFE_SERVER)
+    for name, content in CLEAN_FILES.items():
+        (tmp_path / name).write_text(content)
+    site = tmp_path / ".venv" / "lib" / "python3.12" / "site-packages" / "pkg"
+    site.mkdir(parents=True)
+    (site / "cli.py").write_text("import subprocess\nsubprocess.run(input())\n")
+    (site / "test_pkg.py").write_text("def test_x(): pass\n")
+
+    report = analyze_repo(tmp_path)
+    checks = {i.check for i in report.repo_issues}
+    assert "dangerous_exec" not in checks
+    # A test file inside .venv must not count as the repo having tests.
+    assert "tests" in checks
+
+
+def test_repo_under_a_folder_named_venv_is_still_scanned(tmp_path):
+    root = tmp_path / "venv" / "my-server"
+    root.mkdir(parents=True)
+    write(root, "server.py", SAFE_SERVER.replace("return city", "return eval(city)"))
+    make_clean_repo(root)
+
+    report = analyze_repo(root)
+    assert "dangerous_exec" in {i.check for i in report.repo_issues}
