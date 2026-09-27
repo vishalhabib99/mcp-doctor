@@ -1,0 +1,54 @@
+name: Scan request
+
+on:
+  issues:
+    types: [opened, edited]
+
+permissions:
+  contents: read
+  issues: write
+  actions: write # to trigger a leaderboard rebuild when a repo opts in
+
+concurrency:
+  group: scan-request-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    if: contains(github.event.issue.labels.*.name, 'scan-request') && github.event.issue.state == 'open'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e .
+      # The issue body is untrusted. It is only ever passed through env and
+      # parsed in Python; it is never interpolated into a shell command.
+      - name: Scan the requested repo
+        id: scan
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          COMMENT_FILE: ${{ runner.temp }}/scan-comment.md
+        run: python leaderboard/scan_request.py
+      - name: Reply on the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/scan-comment.md"
+      - name: Add to leaderboard
+        if: steps.scan.outputs.leaderboard == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: |
+          gh label create leaderboard --repo "$GITHUB_REPOSITORY" --color 5319e7 --description "Opted in to the public leaderboard" 2>/dev/null || true
+          gh issue edit "$ISSUE" --repo "$GITHUB_REPOSITORY" --add-label leaderboard
+          gh workflow run leaderboard.yml --repo "$GITHUB_REPOSITORY"
+      - name: Close the request
+        if: steps.scan.outputs.ok == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: gh issue close "$ISSUE" --repo "$GITHUB_REPOSITORY" --reason completed

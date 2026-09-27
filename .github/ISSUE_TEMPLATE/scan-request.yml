@@ -1,0 +1,30 @@
+name: Scan my MCP server
+description: Get a free mcp-doctor report on any public MCP server repo, posted as a reply here. No install needed.
+title: "Scan request: "
+labels: ["scan-request"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        mcp-doctor reads your server's code (Python, TypeScript or Go) and grades whether an agent can tell what each tool does, plus risky patterns an agent could reach. **Nothing in your repo is run.** A reply with your report usually arrives within a few minutes.
+
+        This issue is public, so security findings are reported as counts only. The reply includes the command to see the details on your own machine.
+  - type: input
+    id: repo
+    attributes:
+      label: Repository URL
+      placeholder: https://github.com/owner/repo
+    validations:
+      required: true
+  - type: input
+    id: subdir
+    attributes:
+      label: Subdirectory (optional)
+      description: Only if the server lives in a subfolder of a larger repo.
+      placeholder: packages/mcp-server
+  - type: checkboxes
+    id: leaderboard
+    attributes:
+      label: Leaderboard
+      options:
+        - label: Add this repo to the public leaderboard (grades only, never findings)

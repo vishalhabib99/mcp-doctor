@@ -25,6 +25,7 @@ import urllib.request
 from pathlib import Path
 
 from badge import badge_filename, render_badge_svg
+from scan_request import RequestError, parse_request
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 REPOS_FILE = Path(__file__).resolve().parent / "repos.json"
@@ -131,8 +132,42 @@ def scan_one(entry: dict, tmp_root: Path, previous_by_repo: dict[str, dict]) -> 
     }
 
 
+_LANGUAGE_LABELS = {"Python": "Python", "TypeScript": "TS", "JavaScript": "TS", "Go": "Go"}
+
+
+def opted_in_entries(seen: set[str]) -> list[dict]:
+    """Repos whose owners asked to be listed through a scan-request issue.
+
+    Only the bot adds the `leaderboard` label (after a successful scan of a
+    request that ticked the opt-in box), and removing the label takes a repo
+    off again. Reading the issues at build time means CI never has to commit
+    back to repos.json."""
+    result = _run(["gh", "issue", "list", "--label", "leaderboard", "--state", "all",
+                   "--limit", "200", "--json", "body"])
+    if result.returncode != 0:
+        print(f"warning: could not list opted-in scan requests: {result.stderr.strip()}", file=sys.stderr)
+        return []
+    entries = []
+    for issue in json.loads(result.stdout or "[]"):
+        try:
+            req = parse_request(issue["body"])
+        except RequestError:
+            continue
+        key = f"{req['owner']}/{req['repo']}".lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        lang = _run(["gh", "api", f"repos/{req['owner']}/{req['repo']}", "--jq", ".language"]).stdout.strip()
+        entry = {"owner": req["owner"], "repo": req["repo"], "language": _LANGUAGE_LABELS.get(lang, lang or "?")}
+        if req["subdir"]:
+            entry["subdir"] = req["subdir"]
+        entries.append(entry)
+    return entries
+
+
 def main() -> int:
     entries = json.loads(REPOS_FILE.read_text())
+    entries += opted_in_entries({f"{e['owner']}/{e['repo']}".lower() for e in entries})
     previous_by_repo = fetch_previous_scan()
     results = []
 

@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  issues: read # opted-in scan requests join the leaderboard
   pages: write
   id-token: write
 
