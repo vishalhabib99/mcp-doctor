@@ -920,6 +920,62 @@ def test_real_duplicate_within_standalone_entrypoint_still_flagged(tmp_path):
     assert "dupe" in issue.message
 
 
+def _dup_issues(report):
+    return [i for i in report.repo_issues if i.check == "tool_name" and "unique" in i.message]
+
+
+def test_supervisor_and_worker_via_main_not_compared_for_duplicates(tmp_path):
+    # mrexodia/ida-pro-mcp: a supervisor server and a worker server, each started from main(),
+    # both expose idb_open. They're separate processes, so the names don't collide.
+    for name, label in (("supervisor.py", "supervisor"), ("worker.py", "worker")):
+        write(tmp_path, name, f"""
+            from mcp.server.fastmcp import FastMCP
+            mcp = FastMCP("{label}")
+
+            @mcp.tool()
+            def idb_open(path: str) -> str:
+                \"\"\"Open a database.\"\"\"
+                return path
+
+            def main():
+                mcp.run()
+
+            if __name__ == "__main__":
+                main()
+            """)
+    assert not _dup_issues(analyze_repo(tmp_path))
+
+
+def test_instance_imported_elsewhere_is_one_server(tmp_path):
+    # A main()-started server whose instance another module imports to register more tools:
+    # all of them share one server, so a name declared in both files is a real duplicate.
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        @mcp.tool()
+        def search(q: str) -> str:
+            \"\"\"Search.\"\"\"
+            return q
+
+        def main():
+            mcp.run()
+
+        if __name__ == "__main__":
+            main()
+        """)
+    write(tmp_path, "tools.py", """
+        from server import mcp
+
+        @mcp.tool()
+        def search(q: str) -> str:
+            \"\"\"Search again.\"\"\"
+            return q
+        """)
+    issues = _dup_issues(analyze_repo(tmp_path))
+    assert issues and "search" in issues[0].message
+
+
 def test_valid_tool_name_not_flagged(tmp_path):
     write(tmp_path, "server.py", """
         from mcp.server.fastmcp import FastMCP

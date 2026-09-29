@@ -549,6 +549,9 @@ def _build_mount_namespace_map(trees: list[tuple[str, ast.Module]]) -> dict[str,
     return result
 
 
+_SERVER_START_METHODS = {"run", "serve", "stdio"}
+
+
 def _find_standalone_entrypoint_files(
     trees: list[tuple[str, ast.Module]], mounted_files: set[str]
 ) -> set[str]:
@@ -564,21 +567,52 @@ def _find_standalone_entrypoint_files(
     (each remains its own group; genuine duplicates within one standalone
     file, or within the shared default group, are still caught).
 
+    The `__main__` block may also start the server through a function defined in the same file
+    (`if __name__ == "__main__": main()`), found dogfooding `mrexodia/ida-pro-mcp`, whose
+    supervisor and worker servers are separate processes that both expose `idb_open`. A file
+    whose instance another file imports is never standalone: tools registered on it from other
+    modules share its server, so a name declared in both is a real duplicate.
+
     Conservative like the mount-namespace map above: a file already known to
     be a mount *target* is never treated as standalone, even if it also has
     its own `__main__` guard for standalone testing — evidence it's meant to
     be composed into another server wins over evidence it can run alone."""
+    # Instances other files import (`from pkg.server import mcp`) are shared: tools registered on
+    # them from elsewhere belong to the same server, so their file is never standalone.
+    imported_names: set[tuple[str, str]] = set()
+    for _, tree in trees:
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                stem = node.module.rsplit(".", 1)[-1]
+                imported_names.update((stem, a.name) for a in node.names)
+
     result: set[str] = set()
     for rel, tree in trees:
         if rel in mounted_files:
             continue
+        stem = Path(rel).stem
         local_call_vars = {
             tgt.id
             for node in ast.walk(tree)
             if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
             for tgt in node.targets
-            if isinstance(tgt, ast.Name)
+            if isinstance(tgt, ast.Name) and (stem, tgt.id) not in imported_names
         }
+        local_funcs = {
+            node.name: node for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+
+        def runs_local_server(scope: ast.AST) -> bool:
+            return any(
+                isinstance(stmt, ast.Call)
+                and isinstance(stmt.func, ast.Attribute)
+                and stmt.func.attr in _SERVER_START_METHODS
+                and isinstance(stmt.func.value, ast.Name)
+                and stmt.func.value.id in local_call_vars
+                for stmt in ast.walk(scope)
+            )
+
         for node in ast.walk(tree):
             if not (
                 isinstance(node, ast.If)
@@ -591,15 +625,13 @@ def _find_standalone_entrypoint_files(
                 )
             ):
                 continue
-            found_run = any(
-                isinstance(stmt, ast.Call)
-                and isinstance(stmt.func, ast.Attribute)
-                and stmt.func.attr == "run"
-                and isinstance(stmt.func.value, ast.Name)
-                and stmt.func.value.id in local_call_vars
-                for stmt in ast.walk(node)
-            )
-            if found_run:
+            # `if __name__ == "__main__": main()`, where main() starts the server, is at least as
+            # common as calling run() inline (mrexodia/ida-pro-mcp's supervisor, 12k stars).
+            called = {
+                c.func.id for c in ast.walk(node)
+                if isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and c.func.id in local_funcs
+            }
+            if runs_local_server(node) or any(runs_local_server(local_funcs[f]) for f in called):
                 result.add(rel)
                 break
     return result
