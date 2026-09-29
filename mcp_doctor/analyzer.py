@@ -265,9 +265,19 @@ def _field_call_has_description(node: ast.expr) -> bool:
     return bool(desc and desc.strip())
 
 
-def _annotated_elts_have_description(elts: list[ast.expr], alias_registry: dict[str, bool]) -> bool:
-    for e in elts:
+def _is_plain_string_metadata(e: ast.expr) -> bool:
+    return isinstance(e, ast.Constant) and isinstance(e.value, str) and bool(e.value.strip())
+
+
+def _annotated_elts_have_description(
+    elts: list[ast.expr], alias_registry: dict[str, bool], plain_string_ok: bool = True
+) -> bool:
+    for i, e in enumerate(elts):
         if _field_call_has_description(e):
+            return True
+        # `Annotated[T, "text"]`: the first element is the type, so only
+        # metadata after it counts. See _plain_string_docs_reach_model.
+        if plain_string_ok and i > 0 and _is_plain_string_metadata(e):
             return True
         if isinstance(e, ast.Name) and alias_registry.get(e.id):
             return True
@@ -310,7 +320,10 @@ def _is_context_param(arg: ast.arg) -> bool:
 
 
 def _param_documented_via_field(
-    arg: ast.arg, default: ast.expr | None, alias_registry: dict[str, bool] | None = None
+    arg: ast.arg,
+    default: ast.expr | None,
+    alias_registry: dict[str, bool] | None = None,
+    plain_string_ok: bool = True,
 ) -> bool:
     """Pydantic-style per-parameter docs: Annotated[T, Field(description=...)],
     `x: T = Field(description=...)`, or a type alias (possibly imported from another
@@ -327,9 +340,52 @@ def _param_documented_via_field(
         if base_name == "Annotated":
             sl = annotation.slice
             elts = sl.elts if isinstance(sl, ast.Tuple) else [sl]
-            if _annotated_elts_have_description(elts, alias_registry):
+            if _annotated_elts_have_description(elts, alias_registry, plain_string_ok):
                 return True
     return _field_call_has_description(default) if default is not None else False
+
+
+def _has_plain_string_annotated_doc(arg: ast.arg) -> bool:
+    annotation = arg.annotation
+    if isinstance(annotation, ast.Subscript) and _annotation_base_name(annotation.value) == "Annotated":
+        sl = annotation.slice
+        elts = sl.elts if isinstance(sl, ast.Tuple) else [sl]
+        return any(i > 0 and _is_plain_string_metadata(e) for i, e in enumerate(elts))
+    return False
+
+
+_OFFICIAL_SDK_SERVER_MODULES = ("mcp.server.fastmcp", "mcp.server.mcpserver")
+
+
+def _plain_string_docs_reach_model(trees: list[tuple[str, ast.Module]]) -> bool:
+    """Whether `Annotated[T, "text"]` becomes the parameter's description in
+    the schema the model sees. Verified 2026-09-29 by listing a tool's
+    inputSchema: standalone `fastmcp` 3.4.7 keeps the string as the
+    description; the official SDK drops it in both 1.30 (`mcp.server.fastmcp`)
+    and 2.1 (`mcp.server.mcpserver`), since pydantic ignores bare-string
+    metadata. Hand-rolled frameworks that read it themselves exist too
+    (mrexodia/ida-pro-mcp's zeromcp), so only a repo that uses the official
+    SDK and never imports standalone fastmcp counts as dropping it. Repo-wide
+    rather than per-file, because tool modules usually import the server
+    instance from another file instead of the SDK directly."""
+    official = standalone = False
+    for _, tree in trees:
+        for n in ast.walk(tree):
+            if isinstance(n, ast.ImportFrom) and n.module:
+                names = {a.name for a in n.names}
+                if n.module == "fastmcp" or n.module.startswith("fastmcp."):
+                    standalone = True
+                elif n.module.startswith(_OFFICIAL_SDK_SERVER_MODULES) or (
+                    n.module == "mcp.server" and names & {"FastMCP", "MCPServer", "fastmcp", "mcpserver"}
+                ):
+                    official = True
+            elif isinstance(n, ast.Import):
+                for a in n.names:
+                    if a.name == "fastmcp" or a.name.startswith("fastmcp."):
+                        standalone = True
+                    elif a.name.startswith(_OFFICIAL_SDK_SERVER_MODULES):
+                        official = True
+    return standalone or not official
 
 
 def _is_url_param_name(name: str) -> bool:
@@ -757,6 +813,7 @@ def _analyze_function_as_tool(
     error_handling_registry: dict[str, bool] | None = None,
     declared_read_only: bool | None = None,
     declared_destructive_present: bool = False,
+    plain_string_ok: bool = True,
 ) -> ToolFinding:
     tool_name = name_override or fn.name
     docstring = ast.get_docstring(fn)
@@ -782,7 +839,8 @@ def _analyze_function_as_tool(
 
     defaults_by_arg = dict(zip(all_args[len(all_args) - len(fn.args.defaults):], fn.args.defaults))
     field_documented_names = {
-        a.arg for a in args if _param_documented_via_field(a, defaults_by_arg.get(a), alias_registry)
+        a.arg for a in args
+        if _param_documented_via_field(a, defaults_by_arg.get(a), alias_registry, plain_string_ok)
     }
     documented_count = len(doc_params | field_documented_names)
 
@@ -833,12 +891,22 @@ def _analyze_function_as_tool(
         ))
 
     if args and not finding.has_docstring_params:
-        finding.issues.append(ToolIssue(
-            tool_name, file, fn.lineno, "param_docs",
-            "Parameters aren't documented — no Args:/:param: docstring section and no per-parameter "
-            "Field(description=...) — the model only sees names, not intent.",
-            "warning",
-        ))
+        dropped = [] if plain_string_ok else [
+            a.arg for a in args if a.arg not in field_documented_names and _has_plain_string_annotated_doc(a)
+        ]
+        if dropped:
+            message = (
+                f"Parameter description(s) for {', '.join(dropped)} are written as Annotated[T, \"...\"], "
+                "which the official MCP Python SDK drops from the schema (pydantic ignores bare-string "
+                "metadata) — the model only sees names, not intent. Use Annotated[T, Field(description=...)] "
+                "or an Args: docstring section instead."
+            )
+        else:
+            message = (
+                "Parameters aren't documented — no Args:/:param: docstring section and no per-parameter "
+                "Field(description=...) — the model only sees names, not intent."
+            )
+        finding.issues.append(ToolIssue(tool_name, file, fn.lineno, "param_docs", message, "warning"))
 
     url_params_missing_format = [
         a.arg for a in args
@@ -905,6 +973,7 @@ def _find_fastmcp_tools(
     file: str,
     alias_registry: dict[str, bool] | None = None,
     error_handling_registry: dict[str, bool] | None = None,
+    plain_string_ok: bool = True,
 ) -> list[ToolFinding]:
     findings = []
     for node in ast.walk(tree):
@@ -918,7 +987,8 @@ def _find_fastmcp_tools(
                 if attr not in FASTMCP_DECORATOR_NAMES:
                     continue
                 findings.append(_analyze_function_as_tool(
-                    node, file, alias_registry=alias_registry, error_handling_registry=error_handling_registry
+                    node, file, alias_registry=alias_registry, error_handling_registry=error_handling_registry,
+                    plain_string_ok=plain_string_ok,
                 ))
                 break
             description_override = _kwarg_str(call, "description")
@@ -936,7 +1006,7 @@ def _find_fastmcp_tools(
             findings.append(_analyze_function_as_tool(
                 node, file, description_override, alias_registry, name_override,
                 excluded_args, error_handling_registry, declared_read_only,
-                declared_destructive_present,
+                declared_destructive_present, plain_string_ok,
             ))
             break
     return findings
@@ -1029,6 +1099,7 @@ def _find_direct_call_tools(
     file: str,
     alias_registry: dict[str, bool] | None = None,
     error_handling_registry: dict[str, bool] | None = None,
+    plain_string_ok: bool = True,
 ) -> list[ToolFinding]:
     """FastMCP's `.tool()` also supports a direct call form — the function
     passed as a positional argument rather than used as a decorator:
@@ -1060,7 +1131,7 @@ def _find_direct_call_tools(
             excluded_args = _kwarg_str_list(node, "exclude_args")
             findings.append(_analyze_function_as_tool(
                 fn_node, file, description_override or None, alias_registry, name_override,
-                excluded_args, error_handling_registry,
+                excluded_args, error_handling_registry, plain_string_ok=plain_string_ok,
             ))
         else:
             findings.append(_bare_direct_call_finding(name_override, description_override, file, node.lineno))
@@ -1408,10 +1479,12 @@ def analyze_repo(root: Path) -> Report:
 
     error_handling_registry = _build_error_handling_registry(trees, _build_import_aliases(trees))
 
+    plain_string_ok = _plain_string_docs_reach_model(trees)
+
     tools: list[ToolFinding] = []
     for rel, tree in trees:
-        tools.extend(_find_fastmcp_tools(tree, rel, alias_registry, error_handling_registry))
-        tools.extend(_find_direct_call_tools(tree, rel, alias_registry, error_handling_registry))
+        tools.extend(_find_fastmcp_tools(tree, rel, alias_registry, error_handling_registry, plain_string_ok))
+        tools.extend(_find_direct_call_tools(tree, rel, alias_registry, error_handling_registry, plain_string_ok))
         tools.extend(_find_lowlevel_tools(tree, rel))
         tools.extend(_find_class_based_tools(tree, rel, alias_registry, error_handling_registry))
 

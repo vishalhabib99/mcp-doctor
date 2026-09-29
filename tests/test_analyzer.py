@@ -1443,3 +1443,89 @@ def test_short_cjk_description_is_still_flagged(tmp_path):
     issues = [i for i in tool.issues if i.check == "description"]
     assert len(issues) == 1
     assert issues[0].severity == "warning"
+
+
+def _param_docs_issues(report):
+    return [i for t in report.tools for i in t.issues if i.check == "param_docs"]
+
+
+def test_plain_string_annotated_counts_as_docs_with_standalone_fastmcp(tmp_path):
+    # fastmcp 3.4.7 turns Annotated[T, "text"] into the parameter's description
+    # (verified 2026-09-29 by listing the tool's inputSchema).
+    write(tmp_path, "server.py", """
+        from typing import Annotated
+        from fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        @mcp.tool
+        def add_bp(addr: Annotated[str, "Address to break at"]) -> str:
+            \"\"\"Add a breakpoint.\"\"\"
+            return addr
+        """)
+    assert _param_docs_issues(analyze_repo(tmp_path)) == []
+
+
+def test_plain_string_annotated_counts_as_docs_with_custom_framework(tmp_path):
+    # mrexodia/ida-pro-mcp's own zeromcp reads the string as the description.
+    write(tmp_path, "api.py", """
+        from typing import Annotated
+        from .rpc import tool
+
+        @tool
+        def dbg_add_bp(addrs: Annotated[list[str] | str, "Address(es) to add breakpoints at"]) -> list:
+            \"\"\"Add breakpoints at one or more addresses.\"\"\"
+            return []
+        """)
+    assert _param_docs_issues(analyze_repo(tmp_path)) == []
+
+
+def test_plain_string_annotated_flagged_specifically_with_official_sdk(tmp_path):
+    # The official SDK (1.30 and 2.1) drops bare-string Annotated metadata, so
+    # the model never sees it; the warning names the param and the fix.
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+        """)
+    write(tmp_path, "tools.py", """
+        from typing import Annotated
+        from server import mcp
+
+        @mcp.tool()
+        def add_bp(addr: Annotated[str, "Address to break at"]) -> str:
+            \"\"\"Add a breakpoint.\"\"\"
+            return addr
+        """)
+    issues = _param_docs_issues(analyze_repo(tmp_path))
+    assert len(issues) == 1
+    assert "addr" in issues[0].message and "official MCP Python SDK drops" in issues[0].message
+
+
+def test_official_sdk_v2_import_also_drops_plain_string(tmp_path):
+    write(tmp_path, "server.py", """
+        from typing import Annotated
+        from mcp.server.mcpserver import MCPServer
+        mcp = MCPServer("x")
+
+        @mcp.tool()
+        def add_bp(addr: Annotated[str, "Address to break at"]) -> str:
+            \"\"\"Add a breakpoint.\"\"\"
+            return addr
+        """)
+    assert len(_param_docs_issues(analyze_repo(tmp_path))) == 1
+
+
+def test_annotated_type_alone_is_not_docs(tmp_path):
+    # Only metadata after the type counts; Annotated["SomeType", ...] with a
+    # forward-ref string as the type itself must not.
+    write(tmp_path, "server.py", """
+        from typing import Annotated
+        from fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        @mcp.tool
+        def add_bp(addr: Annotated["Address", 1]) -> str:
+            \"\"\"Add a breakpoint.\"\"\"
+            return addr
+        """)
+    issues = _param_docs_issues(analyze_repo(tmp_path))
+    assert len(issues) == 1 and "aren't documented" in issues[0].message
