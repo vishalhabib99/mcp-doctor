@@ -1000,3 +1000,23 @@ def test_description_built_at_runtime_is_not_reported_missing(tmp_path):
     assert by_name["pubmed_fetch_fulltext"].issues == []
     # A description that really is empty is still flagged.
     assert {i.check for i in by_name["pubmed_no_desc"].issues} == {"description"}
+
+
+def test_file_name_containing_test_is_not_skipped_as_a_test(tmp_path):
+    # cyanheads/pentest-mcp-server names every tool file `pentest-*.tool.ts`;
+    # a substring check read "pentest" as a test file and found 0 tools.
+    tool_src = """
+        import { tool, z } from '@cyanheads/mcp-ts-core';
+        export const encode = tool('{name}', {
+          description: 'Encode a payload with the chosen encoding.',
+          input: z.object({ payload: z.string().describe('Text to encode') }),
+          async handler(input) { return {}; },
+        });
+        """
+    write(tmp_path, "src/tools/pentest-encode.tool.ts", tool_src.replace("{name}", "pentest_encode"))
+    write(tmp_path, "src/tools/latest.ts", tool_src.replace("{name}", "latest_release"))
+    # Real test files are still skipped.
+    for name in ("encode.test.ts", "encode.spec.ts", "encode-test.ts", "testUtils.ts", "setupTests.ts"):
+        write(tmp_path, f"src/tools/{name}", tool_src.replace("{name}", "from_" + name.split(".")[0]))
+    findings, _ = find_ts_tools(tmp_path)
+    assert sorted(f.name for f in findings) == ["latest_release", "pentest_encode"]

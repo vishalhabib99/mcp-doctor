@@ -33,6 +33,7 @@ callers should treat their absence as "skip TS/JS analysis", not an error.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from .analyzer import ToolFinding, ToolIssue, description_display_width
@@ -636,6 +637,18 @@ def _analyze_json_schema_tool(
     )
 
 
+# Test files by name: `foo.test.ts`, `foo.spec.ts`, `foo-test.ts`, `test_foo.ts`,
+# `testUtils.ts`, `setupTests.ts`. Matched as a whole name part, not a
+# substring: `"test" in stem` skipped every tool in
+# cyanheads/pentest-mcp-server (`pentest-encode.tool.ts`), and would skip
+# `latest`, `contest` or `attestation` the same way.
+_TEST_STEM = re.compile(r"(?:^|[._\-])(?:tests?|specs?)(?:$|[._\-])|^tests?(?=[A-Z])|[a-z](?:Tests?|Specs?)$")
+
+
+def _is_test_stem(stem: str) -> bool:
+    return bool(_TEST_STEM.search(stem))
+
+
 def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
     """Returns (findings, unparseable_relative_paths). Empty if tree_sitter isn't installed."""
     if not TS_AVAILABLE:
@@ -655,7 +668,6 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
         rel_parts = p.relative_to(root).parts
         if any(part in skip_dirs or part.startswith(".") for part in rel_parts):
             continue
-        stem = p.stem.lower()
         # Directory-based exclusion matches the Python analyzer's `_is_auxiliary_file`
         # (any "test"/"tests" path segment) — verified against a real miss:
         # mcp-use/mcp-use's `libraries/typescript/packages/agent/tests/servers/
@@ -663,7 +675,7 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
         # ... for agent integration tests") whose filename stem alone
         # (`simple_server`) and directory (`tests`, not Jest's `__tests__`)
         # both slipped past the old check.
-        if "test" in stem or "spec" in stem or any(part in ("test", "tests", "__tests__") for part in rel_parts):
+        if _is_test_stem(p.stem) or any(part in ("test", "tests", "__tests__") for part in rel_parts):
             continue
         files.append(p)
 
