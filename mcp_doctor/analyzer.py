@@ -32,6 +32,7 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Union
 
 SECRET_PATTERN = re.compile(
     r"""(api[_-]?key|secret|token|password|access[_-]?key)\s*=\s*["'](?=[^"']*\d)[A-Za-z0-9_\-/+]{12,}["']""",
@@ -1126,12 +1127,195 @@ def _enclosing_scope(tree: ast.Module, node: ast.AST) -> ast.AST:
     return best
 
 
+FuncDef = Union[ast.FunctionDef, ast.AsyncFunctionDef]
+
+
+def _imports_fastmcp(tree: ast.Module) -> bool:
+    """Whether a file imports FastMCP, standalone or the official SDK's copy."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            if node.module == "fastmcp" or node.module.startswith(("fastmcp.", "mcp.server.fastmcp")):
+                return True
+            if node.module == "mcp.server" and any(a.name == "FastMCP" for a in node.names):
+                return True
+        elif isinstance(node, ast.Import) and any(a.name.split(".")[0] == "fastmcp" for a in node.names):
+            return True
+    return False
+
+
+class _RepoFunctions:
+    """Repo-wide lookup for a function passed by reference to a registration
+    call (`mcp.tool(fn)`, `mcp.add_tool(fn)`), when `fn` is defined in
+    another module — e.g. `lens-finance/mcp`, whose `app.py` imports every
+    tool from `mcp_server.tools.*` and registers each with `app.add_tool`.
+    Only top-level functions of a module, and only a module path that maps
+    to exactly one file; anything else stays unresolved."""
+
+    def __init__(self, trees: list[tuple[str, ast.Module]]):
+        self.top_level: dict[str, dict[str, FuncDef]] = {}
+        self.by_dotted: dict[str, list[str]] = {}
+        for rel, tree in trees:
+            self.top_level[rel] = {
+                n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+            }
+            parts = list(Path(rel).with_suffix("").parts)
+            if parts and parts[-1] == "__init__":
+                parts = parts[:-1]
+            for i in range(len(parts)):
+                self.by_dotted.setdefault(".".join(parts[i:]), []).append(rel)
+
+    def module_file(self, importer: str, module: str | None, level: int) -> str | None:
+        if level:
+            base = list(Path(importer).parent.parts)
+            if level > 1:
+                base = base[: len(base) - (level - 1)]
+            dotted = ".".join(base + (module.split(".") if module else []))
+            matches = [r for r in self.by_dotted.get(dotted, []) if ".".join(Path(r).with_suffix("").parts) in (dotted, dotted + ".__init__")]
+        else:
+            matches = self.by_dotted.get(module or "", [])
+        return matches[0] if len(matches) == 1 else None
+
+    def function(self, importer: str, module: str | None, level: int, name: str) -> tuple[FuncDef, str] | None:
+        target = self.module_file(importer, module, level)
+        if target is None:
+            return None
+        fn = self.top_level.get(target, {}).get(name)
+        return (fn, target) if fn is not None else None
+
+
+def _import_bindings(tree: ast.Module) -> dict[str, tuple[str | None, int, str | None]]:
+    """Local name -> (module, level, imported name or None for a module)."""
+    bindings: dict[str, tuple[str | None, int, str | None]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for a in node.names:
+                bindings[a.asname or a.name] = (node.module, node.level, a.name)
+        elif isinstance(node, ast.Import):
+            for a in node.names:
+                if a.asname:
+                    bindings[a.asname] = (a.name, 0, None)
+    return bindings
+
+
+def _enclosing_class(tree: ast.Module, node: ast.AST) -> ast.ClassDef | None:
+    best = None
+    for n in ast.walk(tree):
+        if isinstance(n, ast.ClassDef):
+            end = getattr(n, "end_lineno", None) or n.lineno
+            if n.lineno <= node.lineno <= end and (best is None or n.lineno > best.lineno):
+                best = n
+    return best
+
+
+def _resolve_function_ref(
+    ref: ast.expr, site: ast.AST, tree: ast.Module, file: str, repo: _RepoFunctions | None,
+) -> tuple[FuncDef, str] | None:
+    """The function definition a registration call's argument refers to, and
+    the file it lives in: a name in the enclosing scope or at module level, a
+    name imported from another module in the repo, `self.method` on the
+    enclosing class, or `module.func` through an imported module."""
+    if isinstance(ref, ast.Name):
+        fn = _resolve_direct_call_function(ref.id, _enclosing_scope(tree, site))
+        if fn is None:
+            fn = _resolve_direct_call_function(ref.id, tree)
+        if fn is not None:
+            return fn, file
+        binding = _import_bindings(tree).get(ref.id)
+        if repo is not None and binding and binding[2] is not None:
+            module, level, name = binding
+            return repo.function(file, module, level, name)
+        return None
+    if isinstance(ref, ast.Attribute) and isinstance(ref.value, ast.Name):
+        if ref.value.id == "self":
+            cls = _enclosing_class(tree, site)
+            if cls is None:
+                return None
+            for n in cls.body:
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == ref.attr:
+                    return n, file
+            return None
+        binding = _import_bindings(tree).get(ref.value.id)
+        if repo is not None and binding:
+            module, level, name = binding
+            dotted = module if name is None else ".".join(p for p in (module, name) if p)
+            return repo.function(file, dotted, level if name is not None else 0, ref.attr)
+    return None
+
+
+def _fastmcp_tool_classes(tree: ast.Module) -> set[str]:
+    """Local names bound to a FastMCP tool class (`Tool`, `FunctionTool`),
+    so `Tool.from_function` isn't confused with LangChain's
+    `Tool.from_function`/`StructuredTool.from_function`."""
+    names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module and not node.level and (
+            node.module == "fastmcp" or node.module.startswith(("fastmcp.", "mcp.server.fastmcp"))
+        ):
+            names.update(a.asname or a.name for a in node.names if a.name.endswith("Tool"))
+    return names
+
+
+def _is_tool_from_function(node: ast.Call, tool_classes: set[str]) -> bool:
+    func = node.func
+    if not (isinstance(func, ast.Attribute) and func.attr == "from_function"):
+        return False
+    owner = func.value
+    if isinstance(owner, ast.Name):
+        return owner.id in tool_classes
+    root = owner
+    while isinstance(root, ast.Attribute):
+        root = root.value
+    return isinstance(owner, ast.Attribute) and owner.attr.endswith("Tool") and isinstance(root, ast.Name) and root.id == "fastmcp"
+
+
+def _receiver_name(node: ast.Call) -> str:
+    """`mcp` for `mcp.tool(fn)` / `self.mcp.add_tool(fn)` / `mcp.tool()(fn)`."""
+    func = node.func.func if isinstance(node.func, ast.Call) else node.func
+    value = func.value if isinstance(func, ast.Attribute) else None
+    if isinstance(value, ast.Name):
+        return value.id
+    if isinstance(value, ast.Attribute):
+        return value.attr
+    return ""
+
+
+def _registration_sites(node: ast.Call, tool_classes: set[str]) -> tuple[ast.expr, ast.Call] | None:
+    """(function reference, call carrying name=/description= kwargs) for the
+    by-reference registration forms FastMCP documents besides the
+    decorator: `mcp.tool(fn)`, `mcp.tool(...)(fn)` (the decorator applied
+    by hand, e.g. `mcp.tool()(self.get_regions)` in
+    openstack-kr/python-openstackmcp-server), `mcp.add_tool(fn)`, and
+    `mcp.add_tool(Tool.from_function(fn, ...))`."""
+    func = node.func
+    if _is_tool_from_function(node, tool_classes):
+        # `Tool.from_function(fn, name=...)` defines a tool wherever it's
+        # registered: inside add_tool, or collected into a list and added in
+        # a loop (fancyboi999/daily-hot-mcp, 31 tools). Counted here, once.
+        ref = node.args[0] if node.args else next((kw.value for kw in node.keywords if kw.arg == "fn"), None)
+        return (ref, node) if ref is not None else None
+    if not node.args:
+        return None
+    ref = node.args[0]
+    if isinstance(func, ast.Call) and isinstance(func.func, ast.Attribute) and func.func.attr in FASTMCP_DECORATOR_NAMES:
+        return ref, func
+    if isinstance(func, ast.Attribute) and func.attr == "add_tool":
+        if isinstance(ref, ast.Call) and _is_tool_from_function(ref, tool_classes):
+            return None
+        return ref, node
+    if isinstance(func, ast.Attribute) and func.attr in FASTMCP_DECORATOR_NAMES:
+        return ref, node
+    return None
+
+
 def _find_direct_call_tools(
     tree: ast.Module,
     file: str,
     alias_registry: dict[str, bool] | None = None,
     error_handling_registry: dict[str, bool] | None = None,
     plain_string_ok: bool = True,
+    repo: _RepoFunctions | None = None,
+    imports_fastmcp: bool = True,
+    repo_uses_fastmcp: bool = False,
 ) -> list[ToolFinding]:
     """FastMCP's `.tool()` also supports a direct call form — the function
     passed as a positional argument rather than used as a decorator:
@@ -1140,32 +1324,47 @@ def _find_direct_call_tools(
     function call" is one of its documented calling patterns) — and real on
     `qdrant/mcp-server-qdrant`, the official Qdrant MCP server, where both of
     its tools are registered this way and neither was detected before this.
-    Only resolves a tool whose `name=` is a literal string; see
-    `_resolve_direct_call_function` for when the registered function itself
-    can (and can't) be resolved for full param/error-handling analysis."""
+
+    The other by-reference forms (see `_registration_sites`) only count in a
+    file that imports FastMCP, since agent frameworks (pydantic-ai, others)
+    have their own `.tool(fn)`/`.add_tool(fn)`. Without a literal `name=`, a
+    tool is only reported when its function resolves (the name is then the
+    function's own, as FastMCP derives it); see `_resolve_function_ref`."""
     findings = []
+    tool_classes = _fastmcp_tool_classes(tree)
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        func = node.func
-        attr = func.attr if isinstance(func, ast.Attribute) else None
-        if attr not in FASTMCP_DECORATOR_NAMES:
+        site = _registration_sites(node, tool_classes)
+        if site is None:
             continue
-        if not node.args or not isinstance(node.args[0], ast.Name):
+        ref, kw_call = site
+        name_override = _kwarg_str(kw_call, "name")
+        legacy = (
+            kw_call is node and isinstance(node.func, ast.Attribute)
+            and node.func.attr in FASTMCP_DECORATOR_NAMES and isinstance(ref, ast.Name)
+            and name_override is not None
+        )
+        # A module that registers onto a server passed in as a parameter
+        # often doesn't import FastMCP itself (Raudbjorn/MDMAI:
+        # `mcp_server.tool()(start_session)`); accepted when the repo uses
+        # FastMCP and the receiver is named like a server.
+        receiver_ok = repo_uses_fastmcp and re.search(r"mcp|server", _receiver_name(node), re.I)
+        if not (legacy or _is_tool_from_function(kw_call, tool_classes)
+                or imports_fastmcp or receiver_ok):
             continue
-        name_override = _kwarg_str(node, "name")
-        if name_override is None:
+        if not isinstance(ref, (ast.Name, ast.Attribute)):
             continue
-        description_override = _kwarg_str(node, "description") or ""
-        scope = _enclosing_scope(tree, node)
-        fn_node = _resolve_direct_call_function(node.args[0].id, scope)
-        if fn_node is not None:
-            excluded_args = _kwarg_str_list(node, "exclude_args")
+        description_override = _kwarg_str(kw_call, "description") or ""
+        resolved = _resolve_function_ref(ref, node, tree, file, repo)
+        if resolved is not None:
+            fn_node, fn_file = resolved
+            excluded_args = _kwarg_str_list(kw_call, "exclude_args")
             findings.append(_analyze_function_as_tool(
-                fn_node, file, description_override or None, alias_registry, name_override,
+                fn_node, fn_file, description_override or None, alias_registry, name_override,
                 excluded_args, error_handling_registry, plain_string_ok=plain_string_ok,
             ))
-        else:
+        elif name_override is not None:
             findings.append(_bare_direct_call_finding(name_override, description_override, file, node.lineno))
     return findings
 
@@ -1485,7 +1684,10 @@ def analyze_repo(root: Path) -> Report:
         # lives under a folder named venv/ isn't skipped wholesale.
         return not (set(p.relative_to(root).parts[:-1]) & _NON_REPO_DIRS)
 
-    py_files = _dedupe_by_content([p for p in root.rglob("*.py") if in_repo(p)])
+    # is_file drops a broken symlink (jiangyi01/SpatialOmicsLab), which crashed the read.
+    # sorted: rglob order differs across Python versions (3.13 changed it) and
+    # filesystems, and the first of two identical files is the one kept.
+    py_files = _dedupe_by_content(sorted(p for p in root.rglob("*.py") if in_repo(p) and p.is_file()))
 
     trees: list[tuple[str, ast.Module]] = []
     unparseable: list[str] = []
@@ -1493,7 +1695,9 @@ def analyze_repo(root: Path) -> Report:
         if _is_auxiliary_file(f):
             continue
         try:
-            tree = ast.parse(f.read_text(errors="ignore"), filename=str(f))
+            # utf-8-sig: Python runs a file with a leading byte-order mark, but
+            # ast.parse on a str rejects U+FEFF.
+            tree = ast.parse(f.read_text(encoding="utf-8-sig", errors="ignore"), filename=str(f))
         except SyntaxError:
             unparseable.append(str(f.relative_to(root)))
             continue
@@ -1513,10 +1717,15 @@ def analyze_repo(root: Path) -> Report:
 
     plain_string_ok = _plain_string_docs_reach_model(trees)
 
+    repo_functions = _RepoFunctions(trees)
+    repo_uses_fastmcp = any(_imports_fastmcp(tree) for _, tree in trees)
     tools: list[ToolFinding] = []
     for rel, tree in trees:
         tools.extend(_find_fastmcp_tools(tree, rel, alias_registry, error_handling_registry, plain_string_ok))
-        tools.extend(_find_direct_call_tools(tree, rel, alias_registry, error_handling_registry, plain_string_ok))
+        tools.extend(_find_direct_call_tools(
+            tree, rel, alias_registry, error_handling_registry, plain_string_ok,
+            repo=repo_functions, imports_fastmcp=_imports_fastmcp(tree), repo_uses_fastmcp=repo_uses_fastmcp,
+        ))
         tools.extend(_find_lowlevel_tools(tree, rel))
         tools.extend(_find_class_based_tools(tree, rel, alias_registry, error_handling_registry))
 
@@ -1586,7 +1795,8 @@ def analyze_repo(root: Path) -> Report:
             "error",
         ))
 
-    readme = next((p for p in root.glob("README*")), None)
+    # is_file: a directory like README_files/ (MaximeRivest/mcp2py) matches too.
+    readme = next((p for p in root.glob("README*") if p.is_file()), None)
     readme_text = _readme_and_linked_docs_text(readme, root) if readme else ""
     if not readme:
         repo_issues.append(RepoIssue("readme", "No README found.", "error"))
@@ -1622,18 +1832,18 @@ def analyze_repo(root: Path) -> Report:
     else:
         repo_issues.extend(scan_unpinned_dependencies(root))
 
-    ts_js_files = _dedupe_by_content([
+    ts_js_files = _dedupe_by_content(sorted(
         p for p in root.rglob("*")
         if p.suffix in (".ts", ".tsx", ".js", ".jsx")
         and not p.name.endswith(".d.ts")  # ambient type declarations — no executable code, ever
         and in_repo(p)
         and not _is_auxiliary_file(p)
-    ])
-    go_files = _dedupe_by_content([
+    ))
+    go_files = _dedupe_by_content(sorted(
         p for p in root.rglob("*.go")
         if "vendor" not in p.relative_to(root).parts[:-1] and in_repo(p)
         and not _is_auxiliary_file(p)
-    ])
+    ))
     all_files = py_files + ts_js_files + go_files
     repo_issues.extend(_scan_secrets(all_files))
     repo_issues.extend(scan_dangerous_exec(all_files))

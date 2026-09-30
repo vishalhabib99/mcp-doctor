@@ -416,6 +416,19 @@ def test_unparseable_file_is_flagged_not_silently_skipped(tmp_path):
     assert parse_issue.severity == "error"
 
 
+def test_file_starting_with_utf8_bom_is_parsed(tmp_path):
+    # Python runs a file that starts with a UTF-8 byte-order mark (common from
+    # Windows editors), but ast.parse on a str rejects U+FEFF. Found on 71 files
+    # across the fastmcp sweep (e.g. J621111/live2d-automation).
+    (tmp_path / "server.py").write_bytes(
+        b"\xef\xbb\xbfimport fastmcp\nmcp = fastmcp.FastMCP('x')\n\n"
+        b"@mcp.tool()\ndef ping() -> str:\n    \"\"\"Ping.\"\"\"\n    return 'pong'\n"
+    )
+    report = analyze_repo(tmp_path)
+    assert [t.name for t in report.tools] == ["ping"]
+    assert not any(i.check == "parse_error" for i in report.repo_issues)
+
+
 def test_no_tools_found_gives_empty_report(tmp_path):
     write(tmp_path, "server.py", "x = 1\n")
     report = analyze_repo(tmp_path)
@@ -1118,6 +1131,158 @@ def test_direct_call_tool_with_non_literal_description_not_guessed(tmp_path):
     assert any(i.check == "description" for i in tool.issues)
 
 
+def test_direct_call_without_name_uses_function_name(tmp_path):
+    # reinthal/icloud-calendar-mcp: `mcp.tool(list_calendars)`, no name=.
+    write(tmp_path, "server.py", """
+        from fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        def list_calendars(account: str) -> str:
+            \"\"\"List calendars.
+
+            Args:
+                account: Account id.
+            \"\"\"
+            return account
+
+        mcp.tool(list_calendars)
+        """)
+    report = analyze_repo(tmp_path)
+    assert [t.name for t in report.tools] == ["list_calendars"]
+    assert report.tools[0].param_count == 1
+
+
+def test_decorator_applied_by_hand_to_self_method(tmp_path):
+    # openstack-kr/python-openstackmcp-server: `mcp.tool()(self.get_regions)`
+    # inside a register method; `self` is not a tool parameter.
+    write(tmp_path, "tools.py", """
+        from fastmcp import FastMCP
+
+        class IdentityTools:
+            def register_tools(self, mcp: FastMCP):
+                mcp.tool()(self.get_regions)
+                mcp.tool(name="region_get")(self.get_region)
+
+            def get_regions(self) -> list:
+                \"\"\"List every region.\"\"\"
+                return []
+
+            def get_region(self, region_id: str) -> dict:
+                \"\"\"Get one region by id.\"\"\"
+                return {}
+        """)
+    report = analyze_repo(tmp_path)
+    by_name = {t.name: t for t in report.tools}
+    assert set(by_name) == {"get_regions", "region_get"}
+    assert by_name["get_regions"].param_count == 0
+    assert by_name["region_get"].param_count == 1
+
+
+def test_add_tool_with_function_imported_from_another_module(tmp_path):
+    # lens-finance/mcp: app.py imports each tool function from its own module
+    # and registers it with `app.add_tool(fn)`. The finding points at the
+    # function's own file.
+    (tmp_path / "mcp_server" / "tools").mkdir(parents=True)
+    write(tmp_path, "mcp_server/__init__.py", "")
+    write(tmp_path, "mcp_server/tools/__init__.py", "")
+    write(tmp_path, "mcp_server/tools/net_worth.py", """
+        def get_net_worth(user_id: str) -> float:
+            \"\"\"Return the user's net worth.\"\"\"
+            return 0.0
+        """)
+    write(tmp_path, "mcp_server/tools/items.py", """
+        def get_all_items() -> list:
+            \"\"\"Return every linked item.\"\"\"
+            return []
+        """)
+    write(tmp_path, "app.py", """
+        from fastmcp import FastMCP
+        from mcp_server.tools.net_worth import get_net_worth
+        from .mcp_server.tools import items
+
+        app = FastMCP("lens")
+        app.add_tool(get_net_worth)
+        app.tool(items.get_all_items)
+        """)
+    report = analyze_repo(tmp_path)
+    by_name = {t.name: t for t in report.tools}
+    assert set(by_name) == {"get_net_worth", "get_all_items"}
+    assert by_name["get_net_worth"].file == "mcp_server/tools/net_worth.py"
+
+
+def test_add_tool_with_tool_from_function(tmp_path):
+    # SemyonSinchenko/pyspark-mcp-server: add_tool(Tool.from_function(fn, name=...)).
+    write(tmp_path, "server.py", """
+        from fastmcp import FastMCP
+        from fastmcp.tools import Tool
+        mcp = FastMCP("x")
+
+        def read_table(table: str) -> str:
+            \"\"\"Read a table.\"\"\"
+            return table
+
+        mcp.add_tool(Tool.from_function(read_table, name="spark_read_table"))
+        """)
+    report = analyze_repo(tmp_path)
+    assert [t.name for t in report.tools] == ["spark_read_table"]
+
+
+def test_tool_from_function_counts_where_defined(tmp_path):
+    # fancyboi999/daily-hot-mcp: each module builds its tool with
+    # Tool.from_function(fn=..., name=...); server.py adds them in a loop.
+    (tmp_path / "tools").mkdir()
+    write(tmp_path, "tools/kr36.py", """
+        from fastmcp.tools import Tool
+
+        def get_36kr(limit: int = 10) -> list:
+            \"\"\"Trending on 36kr.\"\"\"
+            return []
+
+        kr36_tool = Tool.from_function(fn=get_36kr, name="get-36kr-trending", description="36kr trending.")
+        """)
+    write(tmp_path, "server.py", """
+        from fastmcp import FastMCP
+        from tools.kr36 import kr36_tool
+        server = FastMCP("hot")
+        for tool in [kr36_tool]:
+            server.add_tool(tool)
+        """)
+    report = analyze_repo(tmp_path)
+    assert [t.name for t in report.tools] == ["get-36kr-trending"]
+    assert report.tools[0].param_count == 1
+
+
+def test_by_reference_registration_ignored_outside_fastmcp_files(tmp_path):
+    # pydantic-ai and other agent frameworks have their own `.tool(fn)` and
+    # `.add_tool(fn)`; without a FastMCP import these aren't MCP tools.
+    write(tmp_path, "agent.py", """
+        from pydantic_ai import Agent
+        agent = Agent("model")
+
+        def roll_die() -> str:
+            \"\"\"Roll a die.\"\"\"
+            return "4"
+
+        agent.tool(roll_die)
+        agent.add_tool(roll_die)
+        """)
+    report = analyze_repo(tmp_path)
+    assert report.tools == []
+
+
+def test_unresolvable_reference_without_name_not_reported(tmp_path):
+    # A loop variable or a factory call can't be named without running code.
+    write(tmp_path, "server.py", """
+        from fastmcp import FastMCP
+        mcp = FastMCP("x")
+        for fn in load_plugins():
+            mcp.tool()(fn)
+        mcp.add_tool(make_tool("x"))
+        """)
+    report = analyze_repo(tmp_path)
+    assert report.tools == []
+
+
 def test_direct_call_not_confused_with_decorator_usage(tmp_path):
     # A decorator call site (`@mcp.tool(name=...)`) shouldn't also be
     # double-counted as a direct-call registration — its shape (no
@@ -1585,3 +1750,98 @@ def test_annotated_type_alone_is_not_docs(tmp_path):
         """)
     issues = _param_docs_issues(analyze_repo(tmp_path))
     assert len(issues) == 1 and "aren't documented" in issues[0].message
+
+
+def test_readme_named_directory_does_not_crash(tmp_path):
+    # MaximeRivest/mcp2py ships a README_files/ directory next to README.md.
+    (tmp_path / "README_files").mkdir()
+    write(tmp_path, "README.md", "# x\n\nTools: ping\n")
+    write(tmp_path, "server.py", """
+        from fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        @mcp.tool()
+        def ping() -> str:
+            \"\"\"Ping.\"\"\"
+            return "pong"
+        """)
+    report = analyze_repo(tmp_path)
+    assert [t.name for t in report.tools] == ["ping"]
+
+
+def test_broken_symlink_py_file_does_not_crash(tmp_path):
+    # jiangyi01/SpatialOmicsLab has a .py symlink whose target isn't in the repo.
+    (tmp_path / "gone.py").symlink_to(tmp_path / "missing" / "gone.py")
+    write(tmp_path, "server.py", """
+        from fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        @mcp.tool()
+        def ping() -> str:
+            \"\"\"Ping.\"\"\"
+            return "pong"
+        """)
+    report = analyze_repo(tmp_path)
+    assert [t.name for t in report.tools] == ["ping"]
+
+
+def test_registration_onto_passed_in_server_without_fastmcp_import(tmp_path):
+    # Raudbjorn/MDMAI: session/mcp_tools.py gets the server as a parameter and
+    # never imports FastMCP; main.py does.
+    write(tmp_path, "main.py", """
+        from fastmcp import FastMCP
+        from mcp_tools import register_session_tools
+        mcp = FastMCP("x")
+        register_session_tools(mcp)
+        """)
+    write(tmp_path, "mcp_tools.py", """
+        async def start_session(campaign_id: str) -> dict:
+            \"\"\"Start a game session.\"\"\"
+            return {}
+
+        def register_session_tools(mcp_server):
+            mcp_server.tool()(start_session)
+        """)
+    report = analyze_repo(tmp_path)
+    assert [t.name for t in report.tools] == ["start_session"]
+
+
+def test_langchain_tool_from_function_not_counted(tmp_path):
+    # LangChain has Tool.from_function too; only FastMCP's Tool counts, even
+    # in a repo (and file) that also uses FastMCP.
+    write(tmp_path, "server.py", """
+        from fastmcp import FastMCP
+        from langchain_core.tools import Tool, StructuredTool
+        mcp = FastMCP("x")
+
+        def search(q: str) -> str:
+            \"\"\"Search.\"\"\"
+            return q
+
+        lc_tool = Tool.from_function(func=search, name="search", description="Search.")
+        lc_tool2 = StructuredTool.from_function(search)
+        """)
+    report = analyze_repo(tmp_path)
+    assert report.tools == []
+
+
+def test_identical_files_keep_the_same_copy_on_any_python(tmp_path, monkeypatch):
+    # Bsh13lder/Lazy-Claw ships the same server twice; rglob order differs
+    # between Python 3.12 and 3.14, which changed which copy was reported.
+    # Force the unfavourable order: the result must not depend on it.
+    real_rglob = Path.rglob
+    monkeypatch.setattr(Path, "rglob", lambda self, pattern: iter(sorted(real_rglob(self, pattern), reverse=True)))
+    src = """
+        from fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        @mcp.tool()
+        def search_jobs(q: str) -> str:
+            \"\"\"Search jobs.\"\"\"
+            return q
+        """
+    for d in ("z_copy", "a_copy"):
+        (tmp_path / d).mkdir()
+        write(tmp_path, f"{d}/server.py", src)
+    report = analyze_repo(tmp_path)
+    assert [(t.name, t.file) for t in report.tools] == [("search_jobs", "a_copy/server.py")]

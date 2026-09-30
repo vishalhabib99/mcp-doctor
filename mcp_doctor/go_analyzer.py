@@ -915,7 +915,7 @@ def find_go_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
     root = root.resolve()
     skip_dirs = {"vendor", ".git"}
     files = []
-    for p in root.rglob("*.go"):
+    for p in sorted(root.rglob("*.go")):  # same order on every Python version
         rel_parts = p.relative_to(root).parts
         if any(part in skip_dirs or part.startswith(".") for part in rel_parts):
             continue

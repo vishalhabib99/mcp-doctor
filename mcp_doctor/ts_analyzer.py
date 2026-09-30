@@ -739,7 +739,7 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
     root = root.resolve()
     skip_dirs = {"node_modules", "dist", "build", ".next", "out"}
     files = []
-    for p in root.rglob("*"):
+    for p in sorted(root.rglob("*")):  # same order on every Python version
         if p.suffix not in (".ts", ".tsx", ".js", ".jsx"):
             continue
         rel_parts = p.relative_to(root).parts
