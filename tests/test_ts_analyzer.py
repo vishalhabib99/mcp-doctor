@@ -219,7 +219,9 @@ def test_cross_file_member_expression_name_and_description(tmp_path):
 def test_cross_file_dynamic_description_is_skipped_not_crashed(tmp_path):
     # `fooTool.getDescription(x)` — a genuine runtime call, not a property
     # access. Must not be resolved to a false description; still a real,
-    # correctly-attributed finding (not a dropped tool).
+    # correctly-attributed finding (not a dropped tool). Since v1.12.5 an
+    # unresolvable description is unknown, not missing, so it isn't flagged
+    # (this used to assert a "no description" error, a false positive).
     write(tmp_path, "tools/download-tool.ts", """
         function getDescription(dir) {
           return dir ? `Download to ${dir}` : "Download images";
@@ -246,7 +248,7 @@ def test_cross_file_dynamic_description_is_skipped_not_crashed(tmp_path):
     assert len(findings) == 1
     tool = findings[0]
     assert tool.name == "download_figma_images"
-    assert any(i.check == "description" for i in tool.issues)
+    assert not any(i.check == "description" for i in tool.issues)
 
 
 def test_low_level_server_list_tools_handler(tmp_path):
@@ -936,3 +938,65 @@ def test_object_with_tool_keys_passed_to_an_unrelated_call_is_not_a_tool(tmp_pat
         """)
     findings, _ = find_ts_tools(tmp_path)
     assert findings == []
+
+
+def test_mcp_ts_core_tool_definitions_are_recognized(tmp_path):
+    # Verified against a real miss: cyanheads/clinicaltrialsgov-mcp-server
+    # (0 of 7 found). `@cyanheads/mcp-ts-core`'s `tool(name, { description,
+    # input, handler })` style is used by 30+ public servers.
+    write(tmp_path, "src/tools/get-study-count.tool.ts", """
+        import { tool, z } from '@cyanheads/mcp-ts-core';
+
+        export const getStudyCount = tool('clinicaltrials_get_study_count', {
+          description: `Get the total study count matching a query, without fetching study data.`,
+          annotations: { readOnlyHint: true },
+          input: z.object({
+            query: z.string().optional().describe('Free-text search across all fields.'),
+            phase: z.string().optional(),
+          }),
+          async handler(input, ctx) {
+            if (!input.query) throw new Error('blank');
+            return { total: 1 };
+          },
+        });
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert [f.name for f in findings] == ["clinicaltrials_get_study_count"]
+    tool = findings[0]
+    assert tool.param_count == 2
+    # The framework catches what handlers throw, so no error_handling warning.
+    assert {i.check for i in tool.issues} == {"param_docs"}
+
+
+def test_sdk_two_arg_tool_call_is_not_mistaken_for_mcp_ts_core(tmp_path):
+    # The official SDK's `server.tool(name, callback)` also takes two args.
+    write(tmp_path, "server.ts", """
+        server.tool('ping', async () => ({ content: [{ type: 'text', text: 'pong' }] }));
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert findings == []
+
+
+def test_description_built_at_runtime_is_not_reported_missing(tmp_path):
+    # cyanheads/pubmed-mcp-server: `description: buildFulltextDescription({...})`
+    # can't be resolved statically, but the tool clearly has one.
+    write(tmp_path, "fetch.tool.ts", """
+        import { tool, z } from '@cyanheads/mcp-ts-core';
+
+        export const fetchFulltext = tool('pubmed_fetch_fulltext', {
+          description: buildFulltextDescription({ europePmc: true }),
+          input: z.object({ pmid: z.string().describe('PubMed ID') }),
+          async handler(input) { return {}; },
+        });
+
+        export const noDesc = tool('pubmed_no_desc', {
+          description: '',
+          input: z.object({}),
+          async handler() { return {}; },
+        });
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    by_name = {f.name: f for f in findings}
+    assert by_name["pubmed_fetch_fulltext"].issues == []
+    # A description that really is empty is still flagged.
+    assert {i.check for i in by_name["pubmed_no_desc"].issues} == {"description"}

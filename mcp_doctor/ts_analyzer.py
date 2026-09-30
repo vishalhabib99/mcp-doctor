@@ -537,9 +537,16 @@ def _analyze_ts_tool(
     name: str, config_or_desc, config_src: bytes, schema_arg, schema_src: bytes,
     handler, consts: dict, file: str, line: int
 ) -> ToolFinding:
+    # A description the code passes but that can't be resolved statically
+    # (`description: buildFulltextDescription({...})`, found on
+    # cyanheads/pubmed-mcp-server) is unknown, not missing: flagging it as
+    # "no description" was a false error.
+    description_unresolved = False
     if config_or_desc is not None and config_or_desc.type == "object":
         pairs = _object_pairs(config_or_desc, config_src)
-        description = _resolve_str(pairs.get("description"), config_src, consts) or ""
+        resolved_description = _resolve_str(pairs.get("description"), config_src, consts)
+        description = resolved_description or ""
+        description_unresolved = resolved_description is None and "description" in pairs
         if schema_arg is None:
             # registerTool uses inputSchema; fastmcp's addTool uses parameters;
             # the defineTool/definePageTool wrapper style uses schema.
@@ -561,6 +568,9 @@ def _analyze_ts_tool(
         "Zod schema properties have no .describe(...)",
     )
     finding.has_try_except = has_try
+    if description_unresolved:
+        finding.has_description = True
+        finding.issues = [i for i in finding.issues if i.check != "description"]
 
     if handler is not None and not has_try:
         finding.issues.append(ToolIssue(
@@ -865,6 +875,33 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
                 findings.append(
                     _analyze_ts_tool(
                         name_val, config, config_src, None, config_src, handler, consts,
+                        rel, node.start_point[0] + 1,
+                    )
+                )
+                continue
+
+            if method == "tool" and len(arg_nodes) == 2:
+                # `@cyanheads/mcp-ts-core`'s definition style (30+ public
+                # servers): `tool('name', { description, input: z.object(...),
+                # async handler(input, ctx) {...} })`. Verified against a real
+                # miss, cyanheads/clinicaltrialsgov-mcp-server (0 of 8 found).
+                # Requiring both `description` and `input` keeps the SDK's
+                # two-arg `server.tool(name, callback)` from matching.
+                # error_handling isn't checked: the framework's documented
+                # rule is "logic throws, framework catches".
+                config, config_src = _resolve(arg_nodes[1], src, consts)
+                if config.type != "object":
+                    continue
+                pairs = _object_pairs(config, config_src)
+                if "description" not in pairs or "input" not in pairs:
+                    continue
+                name_val = _resolve_str(arg_nodes[0], src, consts)
+                if name_val is None:
+                    continue  # dynamic tool name — can't attribute a finding to it
+                schema_arg, schema_src = _resolve(pairs["input"], config_src, consts)
+                findings.append(
+                    _analyze_ts_tool(
+                        name_val, config, config_src, schema_arg, schema_src, None, consts,
                         rel, node.start_point[0] + 1,
                     )
                 )
