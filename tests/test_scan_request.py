@@ -141,3 +141,12 @@ def test_grades_shown_when_tools_found():
     comment = render_comment(parse_request(_body()), summarize(_report()))
     assert "| Grade |" in comment and "**B**" in comment
     assert "Not graded" not in comment
+
+
+@pytest.mark.parametrize("tools,flagged", [([], True), ([{"name": "t", "issues": []}], False)])
+def test_zero_tool_scan_is_flagged_for_a_look(monkeypatch, tools, flagged):
+    import scan_request
+    monkeypatch.setattr(scan_request, "_clone", lambda owner, repo, dest, subdir: dest.mkdir(parents=True))
+    monkeypatch.setattr(scan_request, "_scan", lambda target: {**_report(), "tools": tools})
+    _, outcome = scan_request.handle(_body())
+    assert outcome["needs_look"] is flagged

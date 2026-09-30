@@ -262,6 +262,9 @@ def handle(body: str) -> tuple[str, dict]:
     return render_comment(req, summary), {
         "ok": True,
         "leaderboard": ok_for_leaderboard,
+        # 0 tools is usually an mcp-doctor miss (scan request #3), so the
+        # workflow labels it for a human look instead of letting it close quietly.
+        "needs_look": summary["tool_count"] == 0,
         "repo": f"{req['owner']}/{req['repo']}",
     }
 
@@ -274,6 +277,7 @@ def main() -> int:
         with open(output, "a") as fh:
             fh.write(f"ok={str(outcome['ok']).lower()}\n")
             fh.write(f"leaderboard={str(outcome['leaderboard']).lower()}\n")
+            fh.write(f"needs_look={str(outcome.get('needs_look', False)).lower()}\n")
     print(json.dumps(outcome))
     return 0
 

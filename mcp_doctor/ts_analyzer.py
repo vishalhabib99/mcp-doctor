@@ -60,6 +60,8 @@ LIST_TOOLS_SCHEMA = "ListToolsRequestSchema"
 # be resolved since every `defineTool`/`definePageTool` call site already is
 # one tool definition on its own.
 WRAPPER_FACTORY_METHODS = {"defineTool", "definePageTool"}
+# mcp-framework's tool base class: `class FooTool extends MCPTool { name; description; schema }`
+MCP_FRAMEWORK_BASE = "MCPTool"
 
 
 def _text(node, src: bytes) -> str:
@@ -585,6 +587,81 @@ def _analyze_ts_tool(
     return finding
 
 
+def _extends_name(class_node, src: bytes) -> str | None:
+    """`class A extends B<T>` -> 'B' (also `extends ns.B` -> 'B')."""
+    for child in class_node.children:
+        if child.type != "class_heritage":
+            continue
+        for clause in child.children:
+            if clause.type != "extends_clause":
+                continue
+            value = clause.child_by_field_name("value")
+            if value is None:
+                return None
+            if value.type == "member_expression":
+                prop = value.child_by_field_name("property")
+                return _text(prop, src) if prop is not None else None
+            return _text(value, src) if value.type == "identifier" else None
+    return None
+
+
+def _class_fields(class_node, src: bytes) -> dict[str, "Node"]:
+    """Map a class body's `field = value` declarations (any modifiers) to value nodes."""
+    body = class_node.child_by_field_name("body")
+    fields: dict[str, "Node"] = {}
+    if body is None:
+        return fields
+    for member in body.children:
+        if member.type != "public_field_definition":
+            continue
+        name_node = member.child_by_field_name("name")
+        value_node = member.child_by_field_name("value")
+        if name_node is not None and value_node is not None:
+            fields[_text(name_node, src)] = value_node
+    return fields
+
+
+def _analyze_mcp_framework_tool(
+    name: str, desc_node, schema_node, src: bytes, consts: dict, file: str, line: int
+) -> ToolFinding:
+    """mcp-framework's `schema` is either `z.object({ f: z.x().describe(...) })`
+    or its older per-field form, `{ f: { type: z.x(), description: "..." } }`,
+    where a field counts as documented when it carries a `description`."""
+    resolved_description = _resolve_str(desc_node, src, consts)
+    description = resolved_description or ""
+
+    param_count = documented = 0
+    label = "Zod schema properties have no .describe(...)"
+    if schema_node is not None:
+        schema, schema_src = _resolve(schema_node, src, consts)
+        if schema.type == "object":
+            label = "schema fields have no description"
+            for value in _object_pairs(schema, schema_src).values():
+                field, field_src = _resolve(value, schema_src, consts)
+                param_count += 1
+                if field.type == "object":
+                    field_desc = _object_pairs(field, field_src).get("description")
+                    # A description that isn't a literal is present, just unresolvable.
+                    if field_desc is not None and _resolve_str(field_desc, field_src, consts) != "":
+                        documented += 1
+                elif _has_describe_call(field, field_src, consts):
+                    documented += 1
+        else:
+            zod_obj = _zod_object_arg(schema)
+            if zod_obj is not None:
+                props = _object_pairs(zod_obj, schema_src)
+                param_count = len(props)
+                documented = sum(1 for v in props.values() if _has_describe_call(v, schema_src, consts))
+
+    finding = _finding_with_description_and_param_issues(
+        name, file, line, description, param_count, documented, label,
+    )
+    if resolved_description is None and desc_node is not None:
+        finding.has_description = True
+        finding.issues = [i for i in finding.issues if i.check != "description"]
+    return finding
+
+
 def _analyze_json_schema_tool(
     name: str, desc_node, schema_node, schema_src: bytes, consts: dict, src: bytes, file: str, line: int
 ) -> ToolFinding:
@@ -939,6 +1016,57 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
                     rel, node.start_point[0] + 1,
                 )
             )
+
+    # `mcp-framework` (QuantGeekDev/mcp-framework, ~60 public servers): each
+    # tool is a class, `class FooTool extends MCPTool<In> { name = "foo";
+    # description = "..."; schema = {...}; async execute(input) {...} }`,
+    # auto-discovered from a tools/ directory — there's no registration call
+    # anywhere to resolve. Found in the 2026-09-30 framework sweep, where
+    # every one of these servers scanned as 0 tools. Tools may extend a
+    # repo-local base class that itself extends MCPTool, so the chain is
+    # followed repo-wide (by class name, the same simplification as the
+    # const registry). error_handling isn't checked: the framework's
+    # `toolCall` wraps every `execute()` in its own try/catch.
+    class_bases: dict[str, str] = {}
+    tool_classes: list[tuple[Path, "Node", "Node", bytes]] = []
+    for f, file_root, src in parsed:
+        for node in _walk(file_root):
+            if node.type not in ("class_declaration", "abstract_class_declaration"):
+                continue
+            name_node = node.child_by_field_name("name")
+            base = _extends_name(node, src)
+            if name_node is None or base is None:
+                continue
+            class_bases.setdefault(_text(name_node, src), base)
+            if node.type == "class_declaration":
+                tool_classes.append((f, file_root, node, src))
+
+    def _extends_mcp_tool(base: str) -> bool:
+        seen: set[str] = set()
+        while base not in seen and len(seen) < 6:
+            if base == MCP_FRAMEWORK_BASE:
+                return True
+            seen.add(base)
+            base = class_bases.get(base, "")
+        return False
+
+    known_names = {fd.name for fd in findings}
+    for f, file_root, class_node, src in tool_classes:
+        if not _extends_mcp_tool(_extends_name(class_node, src)):
+            continue
+        rel = str(f.relative_to(root))
+        consts = {**global_consts, **_collect_const_objects(file_root, src)}
+        fields = _class_fields(class_node, src)
+        name_val = _resolve_str(fields.get("name"), src, consts)
+        if name_val is None or name_val in known_names:
+            continue  # inherited/dynamic name, or already reported by another style
+        known_names.add(name_val)
+        findings.append(
+            _analyze_mcp_framework_tool(
+                name_val, fields.get("description"), fields.get("schema"), src, consts,
+                rel, class_node.start_point[0] + 1,
+            )
+        )
 
     # Plain tool-definition objects registered by a runtime loop, e.g.
     # `export function assignmentTools(canvas): ToolDefinition[] { return [

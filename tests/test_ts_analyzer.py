@@ -1020,3 +1020,86 @@ def test_file_name_containing_test_is_not_skipped_as_a_test(tmp_path):
         write(tmp_path, f"src/tools/{name}", tool_src.replace("{name}", "from_" + name.split(".")[0]))
     findings, _ = find_ts_tools(tmp_path)
     assert sorted(f.name for f in findings) == ["latest_release", "pentest_encode"]
+
+
+def test_mcp_framework_tool_classes_are_recognized(tmp_path):
+    # mcp-framework (~60 public servers) defines each tool as a class with no
+    # registration call anywhere; all of them scanned as 0 tools. Both schema
+    # forms: the older per-field `{ type, description }` and `z.object(...)`.
+    write(tmp_path, "src/tools/BalanceTool.ts", """
+        import { MCPTool } from "mcp-framework";
+        import { z } from "zod";
+
+        class BalanceTool extends MCPTool<BalanceInput> {
+          name = "hledger_balance";
+          description = "Get account balances using the hledger balance command";
+          schema = {
+            period: { type: z.string().optional(), description: "Time period to report on" },
+            depth: { type: z.number().optional() },
+          };
+          async execute(input) { return run(input); }
+        }
+        export default BalanceTool;
+        """)
+    write(tmp_path, "src/tools/SearchTool.ts", """
+        import { MCPTool } from "mcp-framework";
+        import { z } from "zod";
+
+        const schema = z.object({
+          query: z.string().describe("Search text"),
+          limit: z.number().optional(),
+        });
+
+        export default class SearchTool extends MCPTool {
+          name = "search_docs";
+          protected description: string = "Search the documentation for a phrase.";
+          schema = schema;
+          async execute(input) { return search(input.query); }
+        }
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    by_name = {f.name: f for f in findings}
+    assert set(by_name) == {"hledger_balance", "search_docs"}
+    balance = by_name["hledger_balance"]
+    assert balance.param_count == 2
+    assert [i.check for i in balance.issues] == ["param_docs"]  # depth has no description
+    search = by_name["search_docs"]
+    assert search.param_count == 2
+    assert [i.check for i in search.issues] == ["param_docs"]  # limit has no .describe
+    # The framework's toolCall wraps execute() in its own try/catch.
+    assert all(i.check != "error_handling" for f in findings for i in f.issues)
+
+
+def test_mcp_framework_tool_via_repo_local_base_class(tmp_path):
+    # futuur/Futuur-MCP: 11 of 18 tools extend an abstract FutuurBaseTool,
+    # which extends MCPTool; the base class itself is not a tool.
+    write(tmp_path, "src/tools/FutuurBaseTool.ts", """
+        import { MCPTool } from "mcp-framework";
+        export abstract class FutuurBaseTool<I> extends MCPTool<I> {
+          protected client = makeClient();
+        }
+        """)
+    write(tmp_path, "src/tools/PlaceBetTool.ts", """
+        import { FutuurBaseTool } from "./FutuurBaseTool";
+        class PlaceBetTool extends FutuurBaseTool<PlaceBetInput> {
+          name = "place_bet";
+          description = "";
+          schema = {};
+          async execute(input) { return this.client.bet(input); }
+        }
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert [f.name for f in findings] == ["place_bet"]
+    assert [i.check for i in findings[0].issues] == ["description"]
+
+
+def test_unrelated_class_with_a_name_field_is_not_a_tool(tmp_path):
+    write(tmp_path, "src/models.ts", """
+        class Base {}
+        class User extends Base {
+          name = "alice";
+          description = "A user of the app";
+        }
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert findings == []

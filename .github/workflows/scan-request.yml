@@ -56,6 +56,14 @@ jobs:
           gh label create leaderboard --repo "$GITHUB_REPOSITORY" --color 5319e7 --description "Opted in to the public leaderboard" 2>/dev/null || true
           gh issue edit "$ISSUE" --repo "$GITHUB_REPOSITORY" --add-label leaderboard
           gh workflow run leaderboard.yml --repo "$GITHUB_REPOSITORY"
+      - name: Flag a 0-tool scan for a look
+        if: steps.scan.outputs.needs_look == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: |
+          gh label create needs-look --repo "$GITHUB_REPOSITORY" --color d93f0b --description "Scan found 0 tools: likely an mcp-doctor miss" 2>/dev/null || true
+          gh issue edit "$ISSUE" --repo "$GITHUB_REPOSITORY" --add-label needs-look
       - name: Close the request
         if: steps.scan.outputs.ok == 'true'
         env:
