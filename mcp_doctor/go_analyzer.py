@@ -121,6 +121,7 @@ except ImportError:  # pragma: no cover - exercised via GO_AVAILABLE branch
 # package, verified against its own mcp/tools.go rather than assumed. Tool-
 # level options (WithDescription, WithToolTitle, WithToolAnnotation, ...)
 # are deliberately not in this set — only these declare a named parameter.
+MARK3LABS_MCP_IMPORT = "github.com/mark3labs/mcp-go/mcp"
 MARK3LABS_PARAM_OPTIONS = {
     "WithString", "WithNumber", "WithInteger", "WithBoolean",
     "WithObject", "WithArray", "WithAny",
@@ -1159,4 +1160,63 @@ def find_go_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
 
             findings.append(finding)
 
+    # A `mcp.NewTool("name", ...)` call is one tool definition on its own,
+    # wherever it's registered. Found in the 2026-09-30 mcp-go sweep (175
+    # public repos): 954 of 1,765 independently counted tools were found,
+    # because most repos build the tool in a helper function, another file or
+    # a registry (`func NewTool() mcp.Tool { return mcp.NewTool(...) }`,
+    # `Registry.Register(...)`, `filter.AddTool(s, t, h)`) that the AddTool
+    # call site above can't be traced back through. Only a selector on the
+    # package imported from github.com/mark3labs/mcp-go/mcp counts (aliases
+    # included), so another library's NewTool can't match; names already
+    # reported by a traced path are skipped, so nothing is double-counted.
+    known_names = {fd.name for fd in findings}
+    for f, file_root, src in parsed:
+        mcp_aliases = _mark3labs_mcp_aliases(file_root, src)
+        if not mcp_aliases:
+            continue
+        rel = str(f.relative_to(root))
+        for node in _walk(file_root):
+            if node.type == "composite_literal" and _composite_type_name(node, src) in {
+                f"{alias}.Tool" for alias in mcp_aliases
+            }:
+                # The same package's bare `mcp.Tool{Name: "...", ...}` literal,
+                # returned from a helper or passed straight to a two-arg
+                # AddTool (sinadarbouy/mcp-nats, Yantrio/mcp-gopls,
+                # openshift/sippy). Parameters are left unchecked here, as on
+                # the slice-element path, rather than guessed at.
+                finding = _build_tool_slice_element_finding(node, rel, node.start_point[0] + 1, src, const_registry)
+                if finding is not None and finding.name not in known_names:
+                    known_names.add(finding.name)
+                    findings.append(finding)
+                continue
+            if node.type != "call_expression":
+                continue
+            func = node.child_by_field_name("function")
+            if func is None or func.type != "selector_expression" or _selector_field(func) != "NewTool":
+                continue
+            operand = func.child_by_field_name("operand")
+            if operand is None or _text(operand, src) not in mcp_aliases:
+                continue
+            finding = _build_mark3labs_finding(node, rel, node.start_point[0] + 1, src, const_registry)
+            if finding is None or finding.name in known_names:
+                continue
+            known_names.add(finding.name)
+            findings.append(finding)
+
     return findings, unparseable
+
+
+def _mark3labs_mcp_aliases(tree_root, src: bytes) -> set[str]:
+    """Local names this file imports github.com/mark3labs/mcp-go/mcp under
+    (`mcp` by default, or an explicit alias). Empty if it doesn't import it."""
+    aliases: set[str] = set()
+    for node in _walk(tree_root):
+        if node.type != "import_spec":
+            continue
+        path_node = node.child_by_field_name("path")
+        if path_node is None or _string_value(path_node, src) != MARK3LABS_MCP_IMPORT:
+            continue
+        name_node = node.child_by_field_name("name")
+        aliases.add(_text(name_node, src) if name_node is not None else "mcp")
+    return aliases

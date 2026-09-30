@@ -921,3 +921,94 @@ def test_cjk_description_is_not_falsely_flagged_as_too_short(tmp_path):
     findings, _ = find_go_tools(tmp_path)
     assert len(findings) == 1
     assert findings[0].issues == []
+
+
+def test_mark3labs_new_tool_built_in_a_helper_is_found(tmp_path):
+    # 2026-09-30 mcp-go sweep: most repos build the tool in a helper or
+    # another file and register it where the call can't be traced back
+    # (seekrays/mcp-monitor: `s.AddTool(cpu.NewTool(), cpu.Handler)`).
+    # Recall was 954 of 1,765 tools across 175 repos.
+    write(tmp_path, "cpu/tool.go", """
+        package cpu
+
+        import "github.com/mark3labs/mcp-go/mcp"
+
+        func NewTool() mcp.Tool {
+            return mcp.NewTool("get_cpu_info",
+                mcp.WithDescription("Get CPU model, cores and current usage."),
+                mcp.WithBoolean("per_cpu", mcp.Description("Report each core separately")),
+                mcp.WithNumber("interval"),
+            )
+        }
+        """)
+    write(tmp_path, "main.go", """
+        package main
+
+        import "github.com/mark3labs/mcp-go/server"
+
+        func main() {
+            s := server.NewMCPServer("monitor", "1.0.0")
+            s.AddTool(cpu.NewTool(), cpu.Handler)
+        }
+        """)
+    findings, _ = find_go_tools(tmp_path)
+    assert [f.name for f in findings] == ["get_cpu_info"]
+    tool = findings[0]
+    assert tool.param_count == 2
+    assert [i.check for i in tool.issues] == ["param_docs"]  # interval has no Description
+
+
+def test_aliased_mark3labs_import_and_bare_tool_literal_are_found(tmp_path):
+    write(tmp_path, "tools.go", """
+        package tools
+
+        import mcpgo "github.com/mark3labs/mcp-go/mcp"
+
+        var search = mcpgo.NewTool("search", mcpgo.WithDescription("Search the index for a phrase."))
+
+        func Health() mcpgo.Tool {
+            return mcpgo.Tool{Name: "health_check", Description: ""}
+        }
+        """)
+    findings, _ = find_go_tools(tmp_path)
+    by_name = {f.name: f for f in findings}
+    assert set(by_name) == {"search", "health_check"}
+    assert [i.check for i in by_name["health_check"].issues] == ["description"]
+
+
+def test_new_tool_from_another_package_is_not_mcp_go(tmp_path):
+    # Only the package imported from github.com/mark3labs/mcp-go/mcp counts:
+    # a repo-local `internal/mcp` package (adrianco/retort) or another
+    # library's NewTool must not be read as mcp-go.
+    write(tmp_path, "agent.go", """
+        package agent
+
+        import (
+            "example.com/agentkit/tools"
+            "example.com/app/internal/mcp"
+        )
+
+        var a = tools.NewTool("summarize", handler)
+        var b = mcp.NewTool("lookup", mcp.WithDescription("Look up a record by id."))
+        var c = &mcp.Tool{Name: "player"}
+        """)
+    findings, _ = find_go_tools(tmp_path)
+    assert findings == []
+
+
+def test_new_tool_also_registered_directly_is_counted_once(tmp_path):
+    write(tmp_path, "main.go", """
+        package main
+
+        import (
+            "github.com/mark3labs/mcp-go/mcp"
+            "github.com/mark3labs/mcp-go/server"
+        )
+
+        func main() {
+            s := server.NewMCPServer("demo", "1.0.0")
+            s.AddTool(mcp.NewTool("echo", mcp.WithDescription("Echo the input text back.")), echo)
+        }
+        """)
+    findings, _ = find_go_tools(tmp_path)
+    assert [f.name for f in findings] == ["echo"]
