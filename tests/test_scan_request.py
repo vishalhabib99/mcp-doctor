@@ -125,3 +125,19 @@ def test_backticks_in_a_bad_url_cannot_break_out_of_the_code_span():
     with pytest.raises(RequestError) as exc:
         parse_request(_body(url="`x` @someone **bold**"))
     assert str(exc.value).startswith("`'x' @someone **bold**` isn't")
+
+
+def test_no_tools_found_shows_no_grade():
+    # Scan request #3 got "Quality A 100%" for a 165-tool server mcp-doctor
+    # couldn't parse: a grade on nothing reads as a real result.
+    report = {**_report(), "tools": [], "percent": 100, "grade": "A"}
+    comment = render_comment(parse_request(_body()), summarize(report))
+    assert "Not graded: no tools found." in comment
+    assert "| Grade |" not in comment
+    assert "**A**" not in comment and "**C**" not in comment
+
+
+def test_grades_shown_when_tools_found():
+    comment = render_comment(parse_request(_body()), summarize(_report()))
+    assert "| Grade |" in comment and "**B**" in comment
+    assert "Not graded" not in comment

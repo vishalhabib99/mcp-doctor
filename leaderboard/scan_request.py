@@ -125,18 +125,26 @@ def render_comment(req: dict, summary: dict) -> str:
     lines = [
         f"## mcp-doctor report for `{target}`",
         "",
-        "| | Grade | Score |",
-        "|---|---|---|",
-        f"| Quality (can an agent tell what each tool does?) | **{summary['quality_grade']}** | {summary['quality_percent']}% |",
-        f"| Security (risky patterns in the code an agent can reach) | **{summary['security_grade']}** | {summary['security_percent']}% |",
-        "",
-        f"Found **{summary['tool_count']}** tool(s).",
     ]
     if summary["tool_count"] == 0:
+        # No grade on nothing: an A for "no tools, so no bad descriptions" read
+        # as a real result on scan request #3 (a 165-tool server mcp-doctor
+        # couldn't parse yet).
         lines += [
+            "**Not graded: no tools found.**",
             "",
-            "No tools were found, so the grades above don't mean much yet. If the server lives in a subfolder, "
-            "open a new request and fill in **Subdirectory**. mcp-doctor reads Python, TypeScript and Go servers.",
+            "Either the server lives in a subfolder (open a new request and fill in **Subdirectory**), "
+            "or it registers tools in a way mcp-doctor can't read yet. mcp-doctor reads Python, TypeScript "
+            "and Go servers. If this repo does have tools, reply here: that's a mcp-doctor bug worth fixing.",
+        ]
+    else:
+        lines += [
+            "| | Grade | Score |",
+            "|---|---|---|",
+            f"| Quality (can an agent tell what each tool does?) | **{summary['quality_grade']}** | {summary['quality_percent']}% |",
+            f"| Security (risky patterns in the code an agent can reach) | **{summary['security_grade']}** | {summary['security_percent']}% |",
+            "",
+            f"Found **{summary['tool_count']}** tool(s).",
         ]
 
     quality = summary["quality_issues"]

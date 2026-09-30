@@ -891,4 +891,41 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
                 )
             )
 
+    # Plain tool-definition objects registered by a runtime loop, e.g.
+    # `export function assignmentTools(canvas): ToolDefinition[] { return [
+    #   { name: 'list_assignments', description, inputSchema: {...}, handler }, ...
+    # ] }` with `for (const tool of tools) server.registerTool(tool.name, ...)`.
+    # Verified against a real miss: bruchris/canvas-lms-mcp (scan request #3),
+    # 165 tools, 0 found — the only registration call has property-accessed
+    # args, unresolvable there. The name+description+inputSchema+handler
+    # combination on one object literal is distinctive enough to trust, and
+    # the object must sit directly in an array or a const so a registerTool
+    # config object (no `name` key) or a same-shaped call argument can't match.
+    # Runs last and skips names already found, so a repo that also registers
+    # the same tool through a resolvable style isn't double-counted.
+    # error_handling isn't checked: the loop's shared wrapper (canvas's
+    # buildHandler) is where the catch lives, not each handler.
+    known_names = {fd.name for fd in findings}
+    for f, file_root, src in parsed:
+        rel = str(f.relative_to(root))
+        consts = {**global_consts, **_collect_const_objects(file_root, src)}
+        for node in _walk(file_root):
+            if node.type != "object" or node.parent is None:
+                continue
+            if node.parent.type not in ("array", "variable_declarator"):
+                continue
+            pairs = _object_pairs(node, src)
+            if not {"name", "description", "inputSchema", "handler"} <= pairs.keys():
+                continue
+            name_val = _string_value(pairs["name"], src)
+            if name_val is None or name_val in known_names:
+                continue  # dynamic name, or already reported by another style
+            known_names.add(name_val)
+            findings.append(
+                _analyze_ts_tool(
+                    name_val, node, src, None, src, None, consts,
+                    rel, node.start_point[0] + 1,
+                )
+            )
+
     return findings, unparseable

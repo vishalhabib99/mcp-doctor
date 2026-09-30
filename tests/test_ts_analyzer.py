@@ -858,3 +858,81 @@ def test_cjk_description_is_not_falsely_flagged_as_too_short(tmp_path):
     findings, _ = find_ts_tools(tmp_path)
     tool = findings[0]
     assert not any(i.check == "description" for i in tool.issues)
+
+
+def test_tool_definition_objects_registered_by_a_loop_are_recognized(tmp_path):
+    # Verified against a real miss: bruchris/canvas-lms-mcp (scan request #3)
+    # returns `ToolDefinition[]` arrays of plain objects and registers them in
+    # a loop, `server.registerTool(tool.name, ...)`, whose property-accessed
+    # args can't be resolved there. mcp-doctor found 0 of its 165 tools.
+    write(tmp_path, "src/tools/assignments.ts", """
+        import { z } from 'zod'
+        import type { ToolDefinition } from './types'
+
+        export function assignmentTools(canvas): ToolDefinition[] {
+          return [
+            {
+              name: 'list_assignments',
+              description: 'List assignments in a course, optionally filtered by bucket.',
+              inputSchema: {
+                course_id: z.number().describe('Canvas course ID'),
+                bucket: z.string().optional(),
+              },
+              handler: async (params) => canvas.assignments.list(params.course_id),
+            },
+            {
+              name: 'get_assignment',
+              description: 'Get one assignment by ID.',
+              inputSchema: { course_id: z.number().describe('Canvas course ID') },
+              handler: async (params) => canvas.assignments.get(params.course_id),
+            },
+          ]
+        }
+        """)
+    write(tmp_path, "src/tools/index.ts", """
+        export function registerAllTools(server, canvas) {
+          for (const tool of getAllTools(canvas)) {
+            server.registerTool(
+              tool.name,
+              { title: tool.title, description: tool.description, inputSchema: tool.inputSchema },
+              buildHandler(tool),
+            )
+          }
+        }
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    by_name = {f.name: f for f in findings}
+    assert set(by_name) == {"list_assignments", "get_assignment"}
+    listing = by_name["list_assignments"]
+    assert listing.param_count == 2
+    assert {i.check for i in listing.issues} == {"param_docs"}  # bucket has no .describe
+    assert by_name["get_assignment"].issues == []
+    # The catch lives in the loop's shared wrapper, not each handler.
+    assert all(i.check != "error_handling" for f in findings for i in f.issues)
+
+
+def test_tool_definition_object_already_registered_directly_is_not_double_counted(tmp_path):
+    write(tmp_path, "server.ts", """
+        import { z } from 'zod'
+
+        const echoTool = {
+          name: 'echo',
+          description: 'Echo the text back unchanged.',
+          inputSchema: { text: z.string().describe('Text to echo') },
+          handler: async ({ text }) => ({ content: [{ type: 'text', text }] }),
+        }
+
+        server.registerTool('echo', { description: echoTool.description, inputSchema: echoTool.inputSchema }, echoTool.handler)
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert [f.name for f in findings] == ["echo"]
+
+
+def test_object_with_tool_keys_passed_to_an_unrelated_call_is_not_a_tool(tmp_path):
+    # Only objects sitting directly in an array or a const count; a same-shaped
+    # object passed as a call argument (a log line, a test double) doesn't.
+    write(tmp_path, "log.ts", """
+        logger.info({ name: 'startup', description: 'booted', inputSchema: {}, handler: 'none' })
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert findings == []

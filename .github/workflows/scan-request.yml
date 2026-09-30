@@ -2,7 +2,8 @@ name: Scan request
 
 on:
   issues:
-    types: [opened, edited]
+    # reopened: lets a maintainer re-scan a closed request after an mcp-doctor fix
+    types: [opened, edited, reopened]
 
 permissions:
   contents: read
@@ -36,7 +37,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE: ${{ github.event.issue.number }}
-        run: gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/scan-comment.md"
+        # A re-scan (edited or reopened issue) updates the earlier report rather
+        # than stacking a second one under it (seen on request #5).
+        run: |
+          previous=$(gh api "repos/$GITHUB_REPOSITORY/issues/$ISSUE/comments" --paginate \
+            --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("## "))) | .id' | tail -n 1)
+          if [ -n "$previous" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$previous" -F "body=@$RUNNER_TEMP/scan-comment.md" > /dev/null
+          else
+            gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/scan-comment.md"
+          fi
       - name: Add to leaderboard
         if: steps.scan.outputs.leaderboard == 'true'
         env:
