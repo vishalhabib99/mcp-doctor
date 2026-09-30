@@ -9,7 +9,7 @@ on:
 
 permissions:
   contents: read
-  issues: read # opted-in scan requests join the leaderboard
+  issues: write # read: opted-in scan requests join the leaderboard; write: tool-count alarm issue
   pages: write
   id-token: write
 
@@ -32,6 +32,7 @@ jobs:
       - name: Scan seed repos with the current checkout's mcp-doctor
         env:
           GH_TOKEN: ${{ github.token }}
+          ALARMS_FILE: ${{ runner.temp }}/tool-count-alarms.md
         run: python leaderboard/scan.py
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
@@ -39,3 +40,16 @@ jobs:
           path: leaderboard
       - id: deployment
         uses: actions/deploy-pages@v4
+      - name: Open an issue if a server's tool count collapsed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          f="$RUNNER_TEMP/tool-count-alarms.md"
+          [ -s "$f" ] || { echo "No tool-count alarms."; exit 0; }
+          body="$(printf 'The leaderboard rescan at %s found tool counts that fell to 0 or by more than 20%% since the last published scan. A grade built on missing tools is wrong, so check each one.\n\n' "${GITHUB_SHA::7}"; cat "$f")"
+          open=$(gh issue list --label recall-alarm --state open --json number --jq '.[0].number // empty')
+          if [ -n "$open" ]; then
+            gh issue comment "$open" --body "$body"
+          else
+            gh issue create --title "Leaderboard: tool count dropped" --label recall-alarm --body "$body"
+          fi

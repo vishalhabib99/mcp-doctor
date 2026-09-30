@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -132,6 +133,30 @@ def scan_one(entry: dict, tmp_root: Path, previous_by_repo: dict[str, dict]) -> 
     }
 
 
+# A tool count that collapses between scans is the silent failure that
+# matters most: mcp-doctor graded bruchris/canvas-lms-mcp after seeing 0 of
+# its 166 tools. Scores alone don't show it, since a server with 0 tools
+# found can still get a grade.
+TOOL_DROP_FRACTION = 0.2
+
+
+def tool_count_alarms(results: list[dict], previous_by_repo: dict[str, dict]) -> list[str]:
+    """One markdown line per repo whose tool count fell to 0 or by more than
+    TOOL_DROP_FRACTION since the last published scan, or that the last scan
+    had but this one couldn't scan at all."""
+    alarms = []
+    scanned = {row["repo"] for row in results}
+    for row in results:
+        before = (previous_by_repo.get(row["repo"]) or {}).get("tool_count")
+        after = row["tool_count"]
+        if before and (after == 0 or after < before * (1 - TOOL_DROP_FRACTION)):
+            alarms.append(f"- [`{row['repo']}`]({row['url']}): {before} → {after} tools")
+    for repo, prev in sorted(previous_by_repo.items()):
+        if repo not in scanned and prev.get("tool_count"):
+            alarms.append(f"- [`{repo}`](https://github.com/{repo}): not scanned this run (had {prev['tool_count']} tools)")
+    return alarms
+
+
 _LANGUAGE_LABELS = {"Python": "Python", "TypeScript": "TS", "JavaScript": "TS", "Go": "Go"}
 
 
@@ -181,6 +206,13 @@ def main() -> int:
 
     DATA_FILE.write_text(json.dumps(results, indent=2) + "\n")
     print(f"Wrote {len(results)}/{len(entries)} repo(s) to {DATA_FILE}", file=sys.stderr)
+
+    alarms = tool_count_alarms(results, previous_by_repo)
+    if alarms:
+        print("Tool-count alarms:\n" + "\n".join(alarms), file=sys.stderr)
+        alarms_file = os.environ.get("ALARMS_FILE")
+        if alarms_file:
+            Path(alarms_file).write_text("\n".join(alarms) + "\n")
     return 0 if results else 1
 
 
