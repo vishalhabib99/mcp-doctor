@@ -1163,3 +1163,67 @@ def test_list_tools_handler_returning_a_const_tool_object_is_recognized(tmp_path
         """)
     findings, _ = find_ts_tools(tmp_path)
     assert [f.name for f in findings] == ["generate_mermaid_diagram"]
+
+
+def test_tools_registered_through_a_local_wrapper_function_are_recognized(tmp_path):
+    # Verified against a real miss: strausmann/mcp-dockhand, 0 of 357 tools.
+    # A local `registerTool(server, name, schema, callback)` forwards to
+    # `server.tool(name, describeTool(name), schema, ...)` inside its own
+    # try/catch, and every tool is a call to it.
+    write(tmp_path, "src/utils/tool-helper.ts", """
+        export function registerTool(server, name, schema, callback) {
+          const description = describeTool(name)
+          ;(server as any).tool(name, description, schema, async (args) => {
+            try {
+              return await callback(args)
+            } catch (error) {
+              return errorResponse(error)
+            }
+          })
+        }
+        """)
+    write(tmp_path, "src/tools/backups.ts", """
+        import { z } from 'zod'
+        import { registerTool } from '../utils/tool-helper.js'
+        export function registerBackupTools(server, client) {
+          registerTool(server, 'list_backups', {}, async () => client.get('/api/backups'))
+          registerTool(server, 'get_backup',
+            { id: z.string().describe('Backup ID') },
+            async ({ id }) => client.get(`/api/backups/${id}`))
+          registerTool(server, 'delete_backup',
+            { id: z.string() },
+            async ({ id }) => client.delete(`/api/backups/${id}`))
+        }
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    by_name = {f.name: f for f in findings}
+    assert sorted(by_name) == ["delete_backup", "get_backup", "list_backups"]
+    # Description is built at runtime (unknown, not missing); the wrapper's
+    # try/catch covers every tool; the undocumented schema field is still flagged.
+    assert all(f.has_description and f.has_try_except for f in findings)
+    assert {i.check for i in by_name["get_backup"].issues} == set()
+    assert any("describe" in i.message for i in by_name["delete_backup"].issues)
+
+
+def test_wrapper_forwarding_a_description_argument_checks_it(tmp_path):
+    write(tmp_path, "src/index.ts", """
+        const addTool = (server, name, description, shape, handler) => {
+          server.tool(name, description, shape, handler)
+        }
+        addTool(server, 'ping', '', {}, async () => ok())
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert [f.name for f in findings] == ["ping"]
+    assert not findings[0].has_description  # literal empty string: really missing
+    assert any(i.check == "error_handling" for i in findings[0].issues)
+
+
+def test_function_registering_a_literal_name_is_not_a_wrapper(tmp_path):
+    write(tmp_path, "src/index.ts", """
+        export function setup(server, name) {
+          server.tool('fixed_tool', 'A fixed tool for the test.', {}, async () => ok())
+        }
+        setup(server, 'not_a_tool')
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert [f.name for f in findings] == ["fixed_tool"]

@@ -10,6 +10,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 def write(tmp_path: Path, name: str, content: str) -> Path:
     p = tmp_path / name
+    p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(dedent(content))
     return p
 
@@ -1882,3 +1883,159 @@ def test_delegation_result_does_not_depend_on_resolution_order(tmp_path):
     report = analyze_repo(tmp_path)
     checks = {i.check for i in report.tools[0].issues}
     assert "error_handling" not in checks
+
+
+def test_sdk_v2_tools_registered_in_a_loop_over_a_literal_tuple_are_found(tmp_path):
+    # Verified against a real miss: tskovlund/mcp-score, 0 of 23 tools found.
+    # Each module registers its tools with
+    # `for tool in (a, b): server.tool()(tool)` on the SDK v2 MCPServer.
+    write(tmp_path, "tools.py", """
+        from mcp.server.mcpserver import MCPServer
+
+        async def ping(host: str) -> str:
+            \"\"\"Ping the app.
+
+            Args:
+                host: Host to ping.
+            \"\"\"
+            return host
+
+        async def stop() -> str:
+            \"\"\"Stop the app.\"\"\"
+            return "ok"
+
+        def register(server: MCPServer) -> None:
+            for tool in (ping, stop):
+                server.tool()(tool)
+        """)
+    names = sorted(t.name for t in analyze_repo(tmp_path).tools)
+    assert names == ["ping", "stop"]
+
+
+def test_loop_over_a_runtime_value_is_not_expanded(tmp_path):
+    write(tmp_path, "tools.py", """
+        from mcp.server.mcpserver import MCPServer
+
+        def ping() -> str:
+            \"\"\"Ping.\"\"\"
+            return "ok"
+
+        def register(server: MCPServer, extra) -> None:
+            for tool in extra:
+                server.tool()(tool)
+        """)
+    assert analyze_repo(tmp_path).tools == []
+
+
+def test_context_alias_and_subscripted_context_are_not_tool_parameters(tmp_path):
+    # mcp-score: `ScoreContext = Context[AppState, Any]`, injected by the SDK
+    # and never shown to the model, was counted as an undocumented parameter.
+    write(tmp_path, "context.py", """
+        from typing import Any
+        from mcp.server.mcpserver import Context
+        ScoreContext = Context[dict, Any]
+        """)
+    write(tmp_path, "server.py", """
+        from typing import Any
+        from mcp.server.mcpserver import MCPServer, Context
+        from context import ScoreContext
+        mcp = MCPServer("x")
+
+        @mcp.tool()
+        def disconnect(context: ScoreContext) -> str:
+            \"\"\"Disconnect from the running score application.\"\"\"
+            try:
+                return "ok"
+            except OSError:
+                return "failed"
+
+        @mcp.tool()
+        def connect(ctx: Context[dict, Any], host: str) -> str:
+            \"\"\"Connect to a running score application.
+
+            Args:
+                host: Host to connect to.
+            \"\"\"
+            try:
+                return host
+            except OSError:
+                return "failed"
+        """)
+    report = analyze_repo(tmp_path)
+    assert {t.name: t.param_count for t in report.tools} == {"disconnect": 0, "connect": 1}
+    assert all(not t.issues for t in report.tools)
+
+
+def test_local_decorator_with_its_own_try_except_counts_as_error_handling(tmp_path):
+    write(tmp_path, "server.py", """
+        import functools
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        def score_tool(fn):
+            @functools.wraps(fn)
+            async def deliver(*args, **kwargs):
+                try:
+                    return await fn(*args, **kwargs)
+                except ValueError as error:
+                    raise RuntimeError(str(error)) from error
+            return deliver
+
+        @mcp.tool()
+        @score_tool
+        async def stop() -> str:
+            \"\"\"Stop the app.\"\"\"
+            return "ok"
+        """)
+    checks = {i.check for i in analyze_repo(tmp_path).tools[0].issues}
+    assert "error_handling" not in checks
+
+
+def test_test_prefixed_module_with_tools_and_no_tests_is_analyzed(tmp_path):
+    # Verified against a real miss: oaslananka/kicad-mcp-pro keeps 4 tools in
+    # src/kicad_mcp/tools/test_points.py (test points on a PCB), skipped as a
+    # test file by name alone.
+    write(tmp_path, "src/pkg/tools/test_points.py", """
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        @mcp.tool()
+        def pcb_list_test_points() -> list[str]:
+            \"\"\"List the test points placed on the active board.\"\"\"
+            try:
+                return []
+            except OSError:
+                return []
+        """)
+    write(tmp_path, "src/pkg/test_server.py", """
+        import pytest
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        @mcp.tool()
+        def fixture_tool() -> str:
+            \"\"\"A tool defined only inside a test module.\"\"\"
+            return "ok"
+
+        def test_fixture_tool():
+            assert fixture_tool() == "ok"
+        """)
+    names = [t.name for t in analyze_repo(tmp_path).tools]
+    assert names == ["pcb_list_test_points"]
+
+
+def test_test_named_harness_script_without_mcp_import_stays_auxiliary(tmp_path):
+    # pal-mcp-server's communication_simulator_test.py drives the server with
+    # subprocess but has no pytest functions; it must not be security-scanned
+    # as server code.
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+        """)
+    write(tmp_path, "communication_simulator_test.py", """
+        import subprocess
+        def main(cmd):
+            subprocess.run(cmd, shell=True)
+        """)
+    report = analyze_repo(tmp_path)
+    assert not any(i.check == "dangerous_exec" for i in report.repo_issues)

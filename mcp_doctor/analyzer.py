@@ -295,6 +295,42 @@ def _annotation_base_name(annotation: ast.expr | None) -> str | None:
     return None
 
 
+# Repo-local names for FastMCP's Context, e.g. `ScoreContext = Context[AppState, Any]`
+# (tskovlund/mcp-score). Set per scan by analyze_repo via _collect_context_aliases.
+_CONTEXT_NAMES: set[str] = {"Context"}
+
+
+def _collect_context_aliases(trees: list[tuple[str, "ast.Module"]]) -> set[str]:
+    """Module-level aliases of Context: `X = Context`, `X = Context[...]`,
+    `X: TypeAlias = Context[...]` and `type X = Context[...]`. Name-based,
+    like the rest of the Context handling."""
+    names = {"Context"}
+
+    def base(value):
+        if isinstance(value, ast.Subscript):
+            value = value.value
+        return _annotation_base_name(value)
+
+    for _, tree in trees:
+        for node in tree.body:
+            target, value = None, None
+            if isinstance(node, ast.Assign) and len(node.targets) == 1:
+                target, value = node.targets[0], node.value
+            elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                target, value = node.target, node.value
+            elif type(node).__name__ == "TypeAlias":  # `type X = ...`, Python 3.12+
+                target, value = node.name, node.value
+            if isinstance(target, ast.Name) and base(value) == "Context":
+                names.add(target.id)
+    return names
+
+
+def _is_context_name(annotation: ast.expr | None) -> bool:
+    if isinstance(annotation, ast.Subscript):  # Context[AppState, Any]
+        annotation = annotation.value
+    return _annotation_base_name(annotation) in _CONTEXT_NAMES
+
+
 def _is_context_param(arg: ast.arg) -> bool:
     """A `Context`-typed parameter (`ctx: Context`, `mcp.server.fastmcp.Context`,
     `Context | None`, `Optional[Context]`) is injected by FastMCP at call time
@@ -303,20 +339,17 @@ def _is_context_param(arg: ast.arg) -> bool:
     Name-based, like everywhere else here: doesn't verify the annotation
     actually resolves to fastmcp's Context class."""
     annotation = arg.annotation
-    if _annotation_base_name(annotation) == "Context":
+    if _is_context_name(annotation):
         return True
     if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
-        return (
-            _annotation_base_name(annotation.left) == "Context"
-            or _annotation_base_name(annotation.right) == "Context"
-        )
+        return _is_context_name(annotation.left) or _is_context_name(annotation.right)
     if isinstance(annotation, ast.Subscript):
         base_name = _annotation_base_name(annotation.value)
         if base_name == "Optional":
-            return _annotation_base_name(annotation.slice) == "Context"
+            return _is_context_name(annotation.slice)
         if base_name == "Union":
             elts = annotation.slice.elts if isinstance(annotation.slice, ast.Tuple) else [annotation.slice]
-            return any(_annotation_base_name(e) == "Context" for e in elts)
+            return any(_is_context_name(e) for e in elts)
     return False
 
 
@@ -888,6 +921,15 @@ def _analyze_function_as_tool(
         has_try = any(
             error_handling_registry.get(callee, False) for callee in _direct_call_names(fn)
         )
+        # ...or be wrapped by a locally-defined decorator that does, e.g.
+        # tskovlund/mcp-score's `@score_tool`, which turns BridgeError into an
+        # actionable ToolError around every tool.
+        if not has_try:
+            has_try = any(
+                error_handling_registry.get(_annotation_base_name(
+                    d.func if isinstance(d, ast.Call) else d) or "", False)
+                for d in fn.decorator_list
+            )
 
     finding = ToolFinding(
         name=tool_name,
@@ -1137,9 +1179,10 @@ def _imports_fastmcp(tree: ast.Module) -> bool:
     """Whether a file imports FastMCP, standalone or the official SDK's copy."""
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module and not node.level:
-            if node.module == "fastmcp" or node.module.startswith(("fastmcp.", "mcp.server.fastmcp")):
+            if node.module == "fastmcp" or node.module.startswith(("fastmcp.", "mcp.server.fastmcp", "mcp.server.mcpserver")):
+                # mcp.server.mcpserver: the SDK v2 name for FastMCP (MCPServer)
                 return True
-            if node.module == "mcp.server" and any(a.name == "FastMCP" for a in node.names):
+            if node.module == "mcp.server" and any(a.name in ("FastMCP", "MCPServer") for a in node.names):
                 return True
         elif isinstance(node, ast.Import) and any(a.name.split(".")[0] == "fastmcp" for a in node.names):
             return True
@@ -1335,6 +1378,18 @@ def _find_direct_call_tools(
     function's own, as FastMCP derives it); see `_resolve_function_ref`."""
     findings = []
     tool_classes = _fastmcp_tool_classes(tree)
+    # `for tool in (a, b, c): server.tool()(tool)` (tskovlund/mcp-score): a
+    # loop variable over a literal tuple/list of function names stands for
+    # each of them. Anything else a loop iterates is built at runtime, skipped.
+    loop_refs: dict[int, tuple[str, list[ast.expr]]] = {}
+    for loop in ast.walk(tree):
+        if (isinstance(loop, (ast.For, ast.AsyncFor)) and isinstance(loop.target, ast.Name)
+                and isinstance(loop.iter, (ast.Tuple, ast.List))
+                and loop.iter.elts and all(isinstance(e, (ast.Name, ast.Attribute)) for e in loop.iter.elts)):
+            for stmt in loop.body:
+                for inner in ast.walk(stmt):
+                    if isinstance(inner, ast.Call):
+                        loop_refs[id(inner)] = (loop.target.id, list(loop.iter.elts))
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -1359,16 +1414,23 @@ def _find_direct_call_tools(
         if not isinstance(ref, (ast.Name, ast.Attribute)):
             continue
         description_override = _kwarg_str(kw_call, "description") or ""
-        resolved = _resolve_function_ref(ref, node, tree, file, repo)
-        if resolved is not None:
-            fn_node, fn_file = resolved
-            excluded_args = _kwarg_str_list(kw_call, "exclude_args")
-            findings.append(_analyze_function_as_tool(
-                fn_node, fn_file, description_override or None, alias_registry, name_override,
-                excluded_args, error_handling_registry, plain_string_ok=plain_string_ok,
-            ))
-        elif name_override is not None:
-            findings.append(_bare_direct_call_finding(name_override, description_override, file, node.lineno))
+        refs = [ref]
+        loop = loop_refs.get(id(node))
+        if loop is not None and isinstance(ref, ast.Name) and ref.id == loop[0]:
+            if name_override is not None:
+                continue  # one literal name for several functions: ambiguous
+            refs = loop[1]
+        for one_ref in refs:
+            resolved = _resolve_function_ref(one_ref, node, tree, file, repo)
+            if resolved is not None:
+                fn_node, fn_file = resolved
+                excluded_args = _kwarg_str_list(kw_call, "exclude_args")
+                findings.append(_analyze_function_as_tool(
+                    fn_node, fn_file, description_override or None, alias_registry, name_override,
+                    excluded_args, error_handling_registry, plain_string_ok=plain_string_ok,
+                ))
+            elif name_override is not None:
+                findings.append(_bare_direct_call_finding(name_override, description_override, file, node.lineno))
     return findings
 
 
@@ -1634,10 +1696,29 @@ def _dedupe_by_content(files: list[Path]) -> list[Path]:
     return result
 
 
+_PY_TEST_CONTENT = re.compile(
+    r"^\s*(?:async\s+)?def test_|^class Test|^\s*(?:import|from)\s+(?:pytest|unittest)\b", re.M
+)
+_PY_MCP_IMPORT = re.compile(r"^\s*(?:import|from)\s+(?:mcp|fastmcp)\b", re.M)
+
+
 def _is_auxiliary_file(path: Path) -> bool:
     name = path.name
-    if name.startswith("test_") or name.endswith("_test.py") or name.endswith("_test.go"):
-        return True
+    if name.endswith("_test.go"):
+        return True  # enforced by the Go toolchain
+    if name.startswith("test_") or name.endswith("_test.py"):
+        # Only a naming convention in Python: oaslananka/kicad-mcp-pro keeps 4
+        # real tools in tools/test_points.py (test points on a PCB). Outside a
+        # test folder, such a file is source when it imports an MCP server
+        # library and holds no tests; a test harness script without pytest
+        # functions (pal-mcp-server's communication_simulator_test.py) still isn't.
+        if any(part in ("test", "tests") for part in path.parts):
+            return True
+        try:
+            text = path.read_text(errors="ignore")
+        except OSError:
+            return True
+        return not (_PY_MCP_IMPORT.search(text) and not _PY_TEST_CONTENT.search(text))
     if name.endswith(_JS_TEST_SUFFIXES):
         return True
     return any(part in ("test", "tests", "scripts", "benchmarks") for part in path.parts)
@@ -1716,6 +1797,8 @@ def analyze_repo(root: Path) -> Report:
     for _, tree in trees:
         _collect_field_aliases(tree, alias_registry)
 
+    global _CONTEXT_NAMES
+    _CONTEXT_NAMES = _collect_context_aliases(trees)
     error_handling_registry = _build_error_handling_registry(trees, _build_import_aliases(trees))
 
     plain_string_ok = _plain_string_docs_reach_model(trees)

@@ -1114,4 +1114,107 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
                 )
             )
 
+    # A repo-local wrapper around the SDK call, e.g. strausmann/mcp-dockhand's
+    # `function registerTool(server, name, schema, callback) {
+    #    (server as any).tool(name, describeTool(name), schema, async (args) => {
+    #      try { return await callback(args) } catch ... }) }`,
+    # called 350+ times as `registerTool(server, 'list_x', {...}, async () => ...)`.
+    # The wrapper's own `.tool(name, ...)` has a parameter as its name, so it
+    # was skipped and every tool was missed. A function counts as a wrapper
+    # when its body passes one of its own parameters as the name to `.tool(...)`
+    # or `.registerTool(...)`; each call to it with a literal name is a tool,
+    # with description, schema and handler read from the arguments the wrapper
+    # forwards. A description the wrapper builds itself is unknown, not
+    # missing; a wrapper with its own try/catch handles errors for every tool.
+    wrappers: dict[str, dict] = {}
+    for f, file_root, src in parsed:
+        for node in _walk(file_root):
+            if node.type == "function_declaration":
+                fname_node, fn = node.child_by_field_name("name"), node
+            elif node.type == "variable_declarator":
+                value = node.child_by_field_name("value")
+                if value is None or value.type not in ("arrow_function", "function_expression", "function"):
+                    continue
+                fname_node, fn = node.child_by_field_name("name"), value
+            else:
+                continue
+            params_node, body = fn.child_by_field_name("parameters"), fn.child_by_field_name("body")
+            if fname_node is None or params_node is None or body is None:
+                continue
+            params = []
+            for p in params_node.children:
+                if p.type in ("required_parameter", "optional_parameter"):
+                    pat = p.child_by_field_name("pattern")
+                    params.append(_text(pat, src) if pat is not None else None)
+                elif p.type == "identifier":
+                    params.append(_text(p, src))
+            for call in _walk(body):
+                if call.type != "call_expression":
+                    continue
+                callee = call.child_by_field_name("function")
+                if callee is None or callee.type != "member_expression":
+                    continue
+                prop = callee.child_by_field_name("property")
+                method = _text(prop, src) if prop is not None else ""
+                if method not in ("tool", "registerTool"):
+                    continue
+                cargs_node = call.child_by_field_name("arguments")
+                cargs = [c for c in cargs_node.children if c.type not in ("(", ")", ",")] if cargs_node else []
+                if len(cargs) < 3 or cargs[0].type != "identifier" or _text(cargs[0], src) not in params:
+                    continue
+
+                def idx(n):
+                    return params.index(_text(n, src)) if n is not None and n.type == "identifier" and _text(n, src) in params else None
+
+                spec = {"name": params.index(_text(cargs[0], src)), "desc": None, "schema": None,
+                        "handler": idx(cargs[-1]), "has_try": _find_try(body)}
+                if method == "tool" and len(cargs) >= 4:
+                    spec["desc"], spec["schema"] = idx(cargs[1]), idx(cargs[2])
+                elif method == "registerTool" and cargs[1].type == "object":
+                    pairs = _object_pairs(cargs[1], src)
+                    spec["desc"], spec["schema"] = idx(pairs.get("description")), idx(pairs.get("inputSchema"))
+                wrappers[_text(fname_node, src)] = spec
+                break
+    known_names = {fd.name for fd in findings}
+    for f, file_root, src in parsed if wrappers else ():
+        rel = str(f.relative_to(root))
+        consts = {**global_consts, **_collect_const_objects(file_root, src)}
+        for node in _walk(file_root):
+            if node.type != "call_expression":
+                continue
+            callee = node.child_by_field_name("function")
+            if callee is None or callee.type != "identifier":
+                continue
+            spec = wrappers.get(_text(callee, src))
+            if spec is None:
+                continue
+            args_node = node.child_by_field_name("arguments")
+            args = [c for c in args_node.children if c.type not in ("(", ")", ",")] if args_node else []
+            if spec["name"] >= len(args):
+                continue
+            name_val = _resolve_str(args[spec["name"]], src, consts)
+            if name_val is None or name_val in known_names:
+                continue
+            known_names.add(name_val)
+
+            def arg(i):
+                return args[i] if i is not None and i < len(args) else None
+
+            desc_node = arg(spec["desc"])
+            schema_node = arg(spec["schema"])
+            schema_arg, schema_src = _resolve(schema_node, src, consts) if schema_node is not None else (None, src)
+            handler = arg(spec["handler"])
+            if spec["has_try"] or (handler is not None and handler.type not in ("arrow_function", "function_expression")):
+                handler = None
+            finding = _analyze_ts_tool(
+                name_val, desc_node, src, schema_arg, schema_src, handler, consts,
+                rel, node.start_point[0] + 1,
+            )
+            if desc_node is None or _resolve_str(desc_node, src, consts) is None:
+                finding.has_description = True  # built at runtime: unknown, not missing
+                finding.issues = [i for i in finding.issues if i.check != "description"]
+            if spec["has_try"]:
+                finding.has_try_except = True
+            findings.append(finding)
+
     return findings, unparseable
