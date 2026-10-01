@@ -1103,3 +1103,63 @@ def test_unrelated_class_with_a_name_field_is_not_a_tool(tmp_path):
         """)
     findings, _ = find_ts_tools(tmp_path)
     assert findings == []
+
+
+def test_tool_object_with_run_handler_in_exported_const_is_recognized(tmp_path):
+    # Verified against a real miss: hustcc/mcp-echarts, 0 of 18 tools found.
+    # Each tool is `export const x = { name, description, inputSchema, run }`,
+    # registered by a loop: `server.tool(name, description, inputSchema.shape, run)`.
+    write(tmp_path, "src/tools/bar.ts", """
+        import { z } from 'zod'
+        export const generateBarChartTool = {
+          name: 'generate_bar_chart',
+          description: 'Generate a bar chart.',
+          inputSchema: z.object({ title: z.string().describe('Chart title') }),
+          run: async (params) => render(params),
+        }
+        """)
+    write(tmp_path, "src/index.ts", """
+        import { tools } from './tools'
+        for (const tool of tools) {
+          const { name, description, inputSchema, run } = tool
+          server.tool(name, description, inputSchema.shape, run)
+        }
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert [f.name for f in findings] == ["generate_bar_chart"]
+
+
+def test_tool_object_without_any_handler_key_is_not_counted_on_its_own(tmp_path):
+    # name + description + inputSchema alone is a JSON tool listing shape, used
+    # in docs and tests too; it only counts via a ListTools handler.
+    write(tmp_path, "src/fixtures.ts", """
+        export const sample = {
+          name: 'not_a_tool',
+          description: 'A fixture.',
+          inputSchema: { type: 'object' },
+        }
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert findings == []
+
+
+def test_list_tools_handler_returning_a_const_tool_object_is_recognized(tmp_path):
+    # Verified against a real miss: hustcc/mcp-mermaid, 0 of 1 tools found.
+    # The ListTools handler returns `{ tools: [tool] }` with the object in a
+    # const in another file.
+    write(tmp_path, "src/tools/index.ts", """
+        export const tool = {
+          name: 'generate_mermaid_diagram',
+          description: 'Generate a mermaid diagram.',
+          inputSchema: { type: 'object', properties: {} },
+        }
+        """)
+    write(tmp_path, "src/server.ts", """
+        import { ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
+        import { tool } from './tools'
+        server.server.setRequestHandler(ListToolsRequestSchema, async () => ({
+          tools: [tool],
+        }))
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert [f.name for f in findings] == ["generate_mermaid_diagram"]

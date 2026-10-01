@@ -226,6 +226,13 @@ def _collect_tool_array_elements(array_node, src: bytes, consts: dict, depth: in
     for child in array_node.children:
         if child.type == "object":
             out.append((child, src))
+        elif child.type == "identifier":
+            # `tools: [tool]` with `const tool = { name, description, inputSchema }`
+            # defined elsewhere (hustcc/mcp-mermaid). Only a const that resolves
+            # to an object literal counts; anything built at runtime is skipped.
+            resolved, resolved_src = _resolve(child, src, consts)
+            if resolved is not None and resolved.type == "object":
+                out.append((resolved, resolved_src))
         elif child.type == "spread_element":
             inner = child.children[-1] if child.children else None
             if inner is not None:
@@ -1075,7 +1082,7 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
     # Verified against a real miss: bruchris/canvas-lms-mcp (scan request #3),
     # 165 tools, 0 found — the only registration call has property-accessed
     # args, unresolvable there. The name+description+inputSchema+handler
-    # combination on one object literal is distinctive enough to trust, and
+    # (or `run`/`execute`, as in hustcc/mcp-echarts) combination on one object literal is distinctive enough to trust, and
     # the object must sit directly in an array or a const so a registerTool
     # config object (no `name` key) or a same-shaped call argument can't match.
     # Runs last and skips names already found, so a repo that also registers
@@ -1092,8 +1099,10 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
             if node.parent.type not in ("array", "variable_declarator"):
                 continue
             pairs = _object_pairs(node, src)
-            if not {"name", "description", "inputSchema", "handler"} <= pairs.keys():
+            if not {"name", "description", "inputSchema"} <= pairs.keys():
                 continue
+            if not pairs.keys() & {"handler", "run", "execute"}:
+                continue  # hustcc/mcp-echarts names its handler `run`
             name_val = _string_value(pairs["name"], src)
             if name_val is None or name_val in known_names:
                 continue  # dynamic name, or already reported by another style

@@ -1845,3 +1845,40 @@ def test_identical_files_keep_the_same_copy_on_any_python(tmp_path, monkeypatch)
         write(tmp_path, f"{d}/server.py", src)
     report = analyze_repo(tmp_path)
     assert [(t.name, t.file) for t in report.tools] == [("search_jobs", "a_copy/server.py")]
+
+
+def test_delegation_result_does_not_depend_on_resolution_order(tmp_path):
+    # The registry used to memoize recursively, caching a result cut short by
+    # the depth limit (or by a call cycle's provisional False). Here c1 is
+    # resolved first and reaches c6 at depth 5, where h is one hop past the
+    # limit, so c6 was cached as unhandled even though it calls h directly.
+    # The same flaw made oraios/serena's results change with the hash seed.
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        def c1(x): return c2(x)
+        def c2(x): return c3(x)
+        def c3(x): return c4(x)
+        def c4(x): return c5(x)
+        def c5(x): return c6(x)
+        def c6(x): return h(x)
+
+        def h(x):
+            try:
+                return 1 / x
+            except ZeroDivisionError:
+                return 0
+
+        @mcp.tool()
+        def divide(x: int) -> int:
+            \"\"\"Divide.
+
+            Args:
+                x: The divisor.
+            \"\"\"
+            return c6(x)
+        """)
+    report = analyze_repo(tmp_path)
+    checks = {i.check for i in report.tools[0].issues}
+    assert "error_handling" not in checks

@@ -773,26 +773,29 @@ def _build_error_handling_registry(
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 functions[n.name] = n
 
+    # Bounded breadth-first search per function: handled if it, or anything it
+    # reaches within 5 calls, has its own try/except. An earlier memoized
+    # recursion cached a provisional False for a function on a call cycle (and
+    # results cut short by the depth limit), so the answer depended on which
+    # end of the cycle was resolved first: set iteration order, which changes
+    # with the hash seed. Found as run-to-run flips on oraios/serena.
+    own = {name: _contains_try_except(node)[0] for name, node in functions.items()}
+    callees = {name: _direct_call_names(node, import_aliases) for name, node in functions.items()}
     memo: dict[str, bool] = {}
-
-    def resolve(name: str, depth: int = 0) -> bool:
-        if name in memo:
-            return memo[name]
-        if depth > 5:
-            return False
-        node = functions.get(name)
-        if node is None:
-            return False
-        memo[name] = False  # cycle guard: assume unhandled while resolving
-        has_own, _ = _contains_try_except(node)
-        result = has_own or any(
-            resolve(callee, depth + 1) for callee in _direct_call_names(node, import_aliases)
-        )
-        memo[name] = result
-        return result
-
-    for name in list(functions):
-        resolve(name)
+    for name in functions:
+        seen, frontier, found = {name}, [name], own[name]
+        for _ in range(5):
+            if found or not frontier:
+                break
+            nxt = []
+            for fn_name in frontier:
+                for callee in callees[fn_name]:
+                    if callee in functions and callee not in seen:
+                        seen.add(callee)
+                        nxt.append(callee)
+            found = any(own[c] for c in nxt)
+            frontier = nxt
+        memo[name] = found
     # A tool calling the alias directly (e.g. `_compare_strategies()` for a
     # function actually `def`-ed as `compare_strategies`) should still hit —
     # make the registry itself alias-aware rather than requiring every call
