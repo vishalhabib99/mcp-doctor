@@ -726,11 +726,59 @@ def _analyze_json_schema_tool(
 # substring: `"test" in stem` skipped every tool in
 # cyanheads/pentest-mcp-server (`pentest-encode.tool.ts`), and would skip
 # `latest`, `contest` or `attestation` the same way.
-_TEST_STEM = re.compile(r"(?:^|[._\-])(?:tests?|specs?)(?:$|[._\-])|^tests?(?=[A-Z])|[a-z](?:Tests?|Specs?)$")
+# A camelCase suffix (`setupTests`, `fooSpec`) is only a convention, though:
+# fr0ster/mcp-abap-adt keeps 17 real tools in `handleCreateUnitTest.ts`-style
+# files (ABAP unit tests are the domain), so those files count as tests only
+# when they hold test-framework code.
+_TEST_STEM = re.compile(r"(?:^|[._\-])(?:tests?|specs?)(?:$|[._\-])|^tests?(?=[A-Z])")
+_TEST_STEM_CAMEL = re.compile(r"[a-z](?:Tests?|Specs?)$")
+_JS_TEST_CONTENT = re.compile(
+    r"^\s*(?:describe|it|test|beforeAll|beforeEach|afterAll|afterEach)(?:\.\w+)?\s*\("
+    r"|\bexpect(?:\.\w+)?\s*\("
+    r"|from\s+['\"](?:vitest|@jest/globals|node:test|mocha|chai|@testing-library/[\w-]+)['\"]"
+    r"|^\s*import\s+['\"]@testing-library/",
+    re.M,
+)
 
 
 def _is_test_stem(stem: str) -> bool:
     return bool(_TEST_STEM.search(stem))
+
+
+def _is_test_file(p: Path) -> bool:
+    if _is_test_stem(p.stem):
+        return True
+    if not _TEST_STEM_CAMEL.search(p.stem):
+        return False
+    try:
+        return bool(_JS_TEST_CONTENT.search(p.read_text(errors="ignore")))
+    except OSError:
+        return True
+
+
+_IMPORT_NAMED = re.compile(
+    r"""\b(?:import|export)\s+(?:type\s+)?\{([^}]*)\}\s*from\s*['"](\.[^'"]+)['"]"""
+)
+
+
+def _module_key(path: Path) -> str:
+    """A module's identity for import matching: no extension, `/index` dropped."""
+    p = path.with_suffix("") if path.suffix in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs") else path
+    return str(p.parent if p.name == "index" else p)
+
+
+def _imported_names(parsed) -> set[tuple[str, str]]:
+    """(module_key, exported_name) for every named import/re-export between
+    the repo's own (non-test) files; `X as Y` keeps the exported name X."""
+    out: set[tuple[str, str]] = set()
+    for f, _root, src in parsed:
+        for m in _IMPORT_NAMED.finditer(src.decode("utf-8", errors="ignore")):
+            target = _module_key((f.parent / m.group(2)).resolve())
+            for spec in m.group(1).split(","):
+                name = spec.strip().removeprefix("type ").split(" as ")[0].strip()
+                if name:
+                    out.add((target, name))
+    return out
 
 
 def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
@@ -759,7 +807,7 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
         # ... for agent integration tests") whose filename stem alone
         # (`simple_server`) and directory (`tests`, not Jest's `__tests__`)
         # both slipped past the old check.
-        if _is_test_stem(p.stem) or any(part in ("test", "tests", "__tests__") for part in rel_parts):
+        if _is_test_file(p) or any(part in ("test", "tests", "__tests__") for part in rel_parts):
             continue
         files.append(p)
 
@@ -1089,6 +1137,15 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
     # the same tool through a resolvable style isn't double-counted.
     # error_handling isn't checked: the loop's shared wrapper (canvas's
     # buildHandler) is where the catch lives, not each handler.
+    # An exported const needs no handler key when other source code imports
+    # it: fr0ster/mcp-abap-adt has 300+
+    # `export const TOOL_DEFINITION = { name, description, inputSchema } as const`,
+    # one per handler file, imported under aliases into group files and
+    # registered in a loop (0 found before). Exported alone isn't enough: the
+    # same shape is a docs/test fixture, and abap keeps 5 definitions nothing
+    # imports. Test files are already out of `parsed`, so a fixture used only
+    # by tests stays uncounted. `as const` / `satisfies` wrappers are looked through.
+    imported = _imported_names(parsed)
     known_names = {fd.name for fd in findings}
     for f, file_root, src in parsed:
         rel = str(f.relative_to(root))
@@ -1096,17 +1153,39 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
         for node in _walk(file_root):
             if node.type != "object" or node.parent is None:
                 continue
-            if node.parent.type not in ("array", "variable_declarator"):
+            holder = node.parent
+            while holder is not None and holder.type in ("as_expression", "satisfies_expression", "parenthesized_expression"):
+                holder = holder.parent
+            if holder is None or holder.type not in ("array", "variable_declarator"):
                 continue
             pairs = _object_pairs(node, src)
             if not {"name", "description", "inputSchema"} <= pairs.keys():
                 continue
-            if not pairs.keys() & {"handler", "run", "execute"}:
+            used_export = (
+                holder.type == "variable_declarator"
+                and holder.parent is not None
+                and holder.parent.parent is not None
+                and holder.parent.parent.type == "export_statement"
+                and (_module_key(f), _text(holder.child_by_field_name("name"), src)) in imported
+            )
+            if not used_export and not pairs.keys() & {"handler", "run", "execute"}:
                 continue  # hustcc/mcp-echarts names its handler `run`
             name_val = _string_value(pairs["name"], src)
             if name_val is None or name_val in known_names:
                 continue  # dynamic name, or already reported by another style
             known_names.add(name_val)
+            # Raw JSON Schema (`{ type: 'object', properties }`, as abap uses)
+            # is read as JSON Schema; reading it as a Zod shape counted `type`
+            # and `properties` as two undescribed params.
+            schema, schema_src = _resolve(pairs["inputSchema"], src, consts)
+            if schema is not None and schema.type == "object" and "properties" in _object_pairs(schema, schema_src):
+                findings.append(
+                    _analyze_json_schema_tool(
+                        name_val, pairs["description"], pairs["inputSchema"], src, consts, src,
+                        rel, node.start_point[0] + 1,
+                    )
+                )
+                continue
             findings.append(
                 _analyze_ts_tool(
                     name_val, node, src, None, src, None, consts,

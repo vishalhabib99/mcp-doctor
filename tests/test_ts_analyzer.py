@@ -1016,10 +1016,88 @@ def test_file_name_containing_test_is_not_skipped_as_a_test(tmp_path):
     write(tmp_path, "src/tools/pentest-encode.tool.ts", tool_src.replace("{name}", "pentest_encode"))
     write(tmp_path, "src/tools/latest.ts", tool_src.replace("{name}", "latest_release"))
     # Real test files are still skipped.
-    for name in ("encode.test.ts", "encode.spec.ts", "encode-test.ts", "testUtils.ts", "setupTests.ts"):
+    for name in ("encode.test.ts", "encode.spec.ts", "encode-test.ts"):
         write(tmp_path, f"src/tools/{name}", tool_src.replace("{name}", "from_" + name.split(".")[0]))
+    # A camelCase Test/Spec suffix is a test file when it holds test-framework code.
+    for name, marker in (("testUtils.ts", "beforeEach(() => {});"),
+                         ("setupTests.ts", "import '@testing-library/jest-dom';"),
+                         ("encodeSpec.ts", "describe('encode', () => {});")):
+        write(tmp_path, f"src/tools/{name}", marker + tool_src.replace("{name}", "from_" + name.split(".")[0]))
     findings, _ = find_ts_tools(tmp_path)
     assert sorted(f.name for f in findings) == ["latest_release", "pentest_encode"]
+
+
+def test_camel_case_test_suffix_without_test_code_is_source(tmp_path):
+    # fr0ster/mcp-abap-adt: ABAP unit tests are the domain, so 17 tools live in
+    # files like handlers/unit_test/high/handleCreateUnitTest.ts and were skipped.
+    write(tmp_path, "src/groups.ts", """
+        import { TOOL_DEFINITION as CreateUnitTest_Tool } from '../src/handlers/unit_test/handleCreateUnitTest.js';
+        """)
+    write(tmp_path, "src/handlers/unit_test/handleCreateUnitTest.ts", """
+        export const TOOL_DEFINITION = {
+          name: 'CreateUnitTest',
+          description: 'Create an ABAP unit test class.',
+          inputSchema: { type: 'object', properties: { class_name: { type: 'string', description: 'Class name.' } } },
+        } as const;
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert [f.name for f in findings] == ["CreateUnitTest"]
+
+
+def test_exported_tool_shaped_const_counts_without_handler(tmp_path):
+    # fr0ster/mcp-abap-adt: 300+ `export const TOOL_DEFINITION = {...} as const`,
+    # imported under aliases and registered in a loop; 0 found before.
+    write(tmp_path, "src/groups/index.ts", """
+        import { TOOL_DEFINITION as GetClass_Tool } from '../handlers/handleGetClass';
+        import {
+          TOOL_DEFINITION as GetTable_Tool,
+        } from '../handlers/handleGetTable.js';
+        export const tools = [{ toolDefinition: GetClass_Tool }, { toolDefinition: GetTable_Tool }];
+        """)
+    # Exported but never imported by source code (only a test uses it): dead, not counted.
+    write(tmp_path, "src/handlers/handleGetUnused.ts", """
+        export const TOOL_DEFINITION = {
+          name: 'GetUnused',
+          description: 'A definition no group registers.',
+          inputSchema: { type: 'object', properties: {} },
+        } as const;
+        """)
+    write(tmp_path, "src/__tests__/unused.test.ts", """
+        import { TOOL_DEFINITION } from '../handlers/handleGetUnused';
+        """)
+    write(tmp_path, "src/handlers/handleGetClass.ts", """
+        export const TOOL_DEFINITION = {
+          name: 'GetClass',
+          description: 'Retrieve ABAP class source code.',
+          inputSchema: {
+            type: 'object',
+            properties: { class_name: { type: 'string' } },
+            required: ['class_name'],
+          },
+        } as const;
+        export async function handleGetClass(context, args) { return {}; }
+        """)
+    write(tmp_path, "src/handlers/handleGetTable.ts", """
+        export const TOOL_DEFINITION = {
+          name: 'GetTable',
+          description: 'Retrieve an ABAP table definition.',
+          inputSchema: { type: 'object', properties: { table_name: { type: 'string', description: 'Table name.' } } },
+        } satisfies ToolDefinition;
+        """)
+    # Not exported and no handler: could be anything (a fixture, a config), not counted.
+    write(tmp_path, "src/handlers/local.ts", """
+        const draft = {
+          name: 'NotATool',
+          description: 'Local object with the same keys.',
+          inputSchema: { type: 'object', properties: {} },
+        };
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    by_name = {f.name: f for f in findings}
+    assert sorted(by_name) == ["GetClass", "GetTable"]
+    # Raw JSON Schema params are read: the undescribed one is flagged.
+    assert {i.check for i in by_name["GetClass"].issues} == {"param_docs"}
+    assert by_name["GetTable"].issues == []
 
 
 def test_mcp_framework_tool_classes_are_recognized(tmp_path):
