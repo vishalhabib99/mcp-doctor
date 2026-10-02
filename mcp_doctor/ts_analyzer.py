@@ -761,6 +761,23 @@ _IMPORT_NAMED = re.compile(
 )
 
 
+def _sdk_register_method(node, src: bytes) -> str:
+    """'tool'/'registerTool' when `node` is `x.registerTool`, `x.registerTool.bind(x)`
+    or either wrapped in `as T` / parentheses; '' otherwise."""
+    while node is not None and node.type in ("as_expression", "parenthesized_expression", "satisfies_expression"):
+        node = node.children[1] if node.type == "parenthesized_expression" and len(node.children) > 1 else (node.children[0] if node.children else None)
+    if node is not None and node.type == "call_expression":
+        fn = node.child_by_field_name("function")
+        if fn is None or fn.type != "member_expression" or _text(fn.child_by_field_name("property"), src) != "bind":
+            return ""
+        node = fn.child_by_field_name("object")
+    if node is None or node.type != "member_expression":
+        return ""
+    prop = node.child_by_field_name("property")
+    method = _text(prop, src) if prop is not None else ""
+    return method if method in ("tool", "registerTool") else ""
+
+
 def _module_key(path: Path) -> str:
     """A module's identity for import matching: no extension, `/index` dropped."""
     p = path.with_suffix("") if path.suffix in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs") else path
@@ -1205,9 +1222,19 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
     # with description, schema and handler read from the arguments the wrapper
     # forwards. A description the wrapper builds itself is unknown, not
     # missing; a wrapper with its own try/catch handles errors for every tool.
+    # Also (cmer81/open-meteo-mcp, 0 of 17): the wrapper can be a class method
+    # called as `this.registerReadOnlyTool(server, WEATHER_FORECAST_TOOL, schema,
+    # handler)`, the SDK call inside can go through a saved alias
+    # (`const reg = server.registerTool.bind(server)`), and the name and
+    # description can be fields of a parameter (`meta.name`, `meta.description`),
+    # read at each call site from the const object passed in. Method wrappers
+    # only match `this.method(...)` calls, so an unrelated `x.method(...)` with
+    # the same name can't.
     wrappers: dict[str, dict] = {}
+    method_wrappers: dict[str, dict] = {}
     for f, file_root, src in parsed:
         for node in _walk(file_root):
+            is_method = False
             if node.type == "function_declaration":
                 fname_node, fn = node.child_by_field_name("name"), node
             elif node.type == "variable_declarator":
@@ -1215,6 +1242,8 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
                 if value is None or value.type not in ("arrow_function", "function_expression", "function"):
                     continue
                 fname_node, fn = node.child_by_field_name("name"), value
+            elif node.type == "method_definition":
+                fname_node, fn, is_method = node.child_by_field_name("name"), node, True
             else:
                 continue
             params_node, body = fn.child_by_field_name("parameters"), fn.child_by_field_name("body")
@@ -1227,69 +1256,107 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
                     params.append(_text(pat, src) if pat is not None else None)
                 elif p.type == "identifier":
                     params.append(_text(p, src))
+            aliases = {}
+            for d in _walk(body):
+                if d.type == "variable_declarator":
+                    alias_name, alias_method = d.child_by_field_name("name"), _sdk_register_method(d.child_by_field_name("value"), src)
+                    if alias_name is not None and alias_name.type == "identifier" and alias_method:
+                        aliases[_text(alias_name, src)] = alias_method
             for call in _walk(body):
                 if call.type != "call_expression":
                     continue
                 callee = call.child_by_field_name("function")
-                if callee is None or callee.type != "member_expression":
+                if callee is None:
                     continue
-                prop = callee.child_by_field_name("property")
-                method = _text(prop, src) if prop is not None else ""
+                if callee.type == "member_expression":
+                    prop = callee.child_by_field_name("property")
+                    method = _text(prop, src) if prop is not None else ""
+                elif callee.type == "identifier":
+                    method = aliases.get(_text(callee, src), "")
+                else:
+                    continue
                 if method not in ("tool", "registerTool"):
                     continue
                 cargs_node = call.child_by_field_name("arguments")
                 cargs = [c for c in cargs_node.children if c.type not in ("(", ")", ",")] if cargs_node else []
-                if len(cargs) < 3 or cargs[0].type != "identifier" or _text(cargs[0], src) not in params:
+
+                def ref(n):
+                    """(param index, field or None) for `param` or `param.field`."""
+                    if n is None:
+                        return None
+                    if n.type == "identifier" and _text(n, src) in params:
+                        return params.index(_text(n, src)), None
+                    if n.type == "member_expression":
+                        obj, fld = n.child_by_field_name("object"), n.child_by_field_name("property")
+                        if obj is not None and fld is not None and obj.type == "identifier" and _text(obj, src) in params:
+                            return params.index(_text(obj, src)), _text(fld, src)
+                    return None
+
+                if len(cargs) < 3 or ref(cargs[0]) is None:
                     continue
-
-                def idx(n):
-                    return params.index(_text(n, src)) if n is not None and n.type == "identifier" and _text(n, src) in params else None
-
-                spec = {"name": params.index(_text(cargs[0], src)), "desc": None, "schema": None,
-                        "handler": idx(cargs[-1]), "has_try": _find_try(body)}
+                handler_ref = ref(cargs[-1])
+                spec = {"name": ref(cargs[0]), "desc": None, "schema": None,
+                        "handler": handler_ref if handler_ref and handler_ref[1] is None else None,
+                        "has_try": _find_try(body)}
                 if method == "tool" and len(cargs) >= 4:
-                    spec["desc"], spec["schema"] = idx(cargs[1]), idx(cargs[2])
+                    spec["desc"], spec["schema"] = ref(cargs[1]), ref(cargs[2])
                 elif method == "registerTool" and cargs[1].type == "object":
                     pairs = _object_pairs(cargs[1], src)
-                    spec["desc"], spec["schema"] = idx(pairs.get("description")), idx(pairs.get("inputSchema"))
-                wrappers[_text(fname_node, src)] = spec
+                    spec["desc"], spec["schema"] = ref(pairs.get("description")), ref(pairs.get("inputSchema"))
+                (method_wrappers if is_method else wrappers)[_text(fname_node, src)] = spec
                 break
     known_names = {fd.name for fd in findings}
-    for f, file_root, src in parsed if wrappers else ():
+    for f, file_root, src in parsed if wrappers or method_wrappers else ():
         rel = str(f.relative_to(root))
         consts = {**global_consts, **_collect_const_objects(file_root, src)}
         for node in _walk(file_root):
             if node.type != "call_expression":
                 continue
             callee = node.child_by_field_name("function")
-            if callee is None or callee.type != "identifier":
+            if callee is None:
                 continue
-            spec = wrappers.get(_text(callee, src))
+            if callee.type == "identifier":
+                spec = wrappers.get(_text(callee, src))
+            elif callee.type == "member_expression":
+                obj, prop = callee.child_by_field_name("object"), callee.child_by_field_name("property")
+                if obj is None or prop is None or obj.type != "this":
+                    continue
+                spec = method_wrappers.get(_text(prop, src))
+            else:
+                continue
             if spec is None:
                 continue
             args_node = node.child_by_field_name("arguments")
             args = [c for c in args_node.children if c.type not in ("(", ")", ",")] if args_node else []
-            if spec["name"] >= len(args):
-                continue
-            name_val = _resolve_str(args[spec["name"]], src, consts)
+
+            def arg(r):
+                """The call-site node (and its src) a wrapper parameter ref points to."""
+                if r is None or r[0] >= len(args):
+                    return None, src
+                n = args[r[0]]
+                if r[1] is None:
+                    return n, src
+                obj_node, obj_src = _resolve(n, src, consts)
+                if obj_node is None or obj_node.type != "object":
+                    return None, src
+                return _object_pairs(obj_node, obj_src).get(r[1]), obj_src
+
+            name_node, name_src = arg(spec["name"])
+            name_val = _resolve_str(name_node, name_src, consts) if name_node is not None else None
             if name_val is None or name_val in known_names:
                 continue
             known_names.add(name_val)
-
-            def arg(i):
-                return args[i] if i is not None and i < len(args) else None
-
-            desc_node = arg(spec["desc"])
-            schema_node = arg(spec["schema"])
+            desc_node, desc_src = arg(spec["desc"])
+            schema_node, _ = arg(spec["schema"])
             schema_arg, schema_src = _resolve(schema_node, src, consts) if schema_node is not None else (None, src)
-            handler = arg(spec["handler"])
+            handler, _ = arg(spec["handler"])
             if spec["has_try"] or (handler is not None and handler.type not in ("arrow_function", "function_expression")):
                 handler = None
             finding = _analyze_ts_tool(
-                name_val, desc_node, src, schema_arg, schema_src, handler, consts,
+                name_val, desc_node, desc_src, schema_arg, schema_src, handler, consts,
                 rel, node.start_point[0] + 1,
             )
-            if desc_node is None or _resolve_str(desc_node, src, consts) is None:
+            if desc_node is None or _resolve_str(desc_node, desc_src, consts) is None:
                 finding.has_description = True  # built at runtime: unknown, not missing
                 finding.issues = [i for i in finding.issues if i.check != "description"]
             if spec["has_try"]:

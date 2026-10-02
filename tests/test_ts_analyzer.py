@@ -1305,3 +1305,60 @@ def test_function_registering_a_literal_name_is_not_a_wrapper(tmp_path):
         """)
     findings, _ = find_ts_tools(tmp_path)
     assert [f.name for f in findings] == ["fixed_tool"]
+
+
+def test_class_method_wrapper_with_bound_alias_and_meta_fields(tmp_path):
+    # cmer81/open-meteo-mcp, 0 of 17: tools are registered through a private
+    # method that saves `server.registerTool.bind(server)` under another name
+    # and reads name/description from a metadata const passed in.
+    write(tmp_path, "src/tools.ts", """
+        export const FORECAST_TOOL: ToolDefinition = {
+          name: 'weather_forecast',
+          title: 'Weather Forecast',
+          description: 'Get a weather forecast for coordinates.',
+        };
+        export const ELEVATION_TOOL: ToolDefinition = {
+          name: 'elevation',
+          title: 'Elevation',
+          description: 'Get terrain elevation for coordinates.',
+        };
+        """)
+    write(tmp_path, "src/index.ts", """
+        import { z } from 'zod';
+        import { FORECAST_TOOL, ELEVATION_TOOL } from './tools.js';
+        const ForecastSchema = z.object({ latitude: z.number().describe('Latitude.') });
+        const ElevationSchema = z.object({ latitude: z.number() });
+        class Server {
+          private registerReadOnlyTool(server: McpServer, meta: ToolDefinition, schema, handler): void {
+            const registerToolUntyped = server.registerTool.bind(server) as (n: string, c: unknown, cb: unknown) => void;
+            registerToolUntyped(meta.name, { title: meta.title, description: meta.description, inputSchema: schema },
+              async (params) => { try { return await handler(params); } catch (e) { return { isError: true }; } });
+          }
+          private setup(server: McpServer) {
+            this.registerReadOnlyTool(server, FORECAST_TOOL, ForecastSchema, (p) => this.client.forecast(p));
+            this.registerReadOnlyTool(server, ELEVATION_TOOL, ElevationSchema, (p) => this.client.elevation(p));
+            // Not a wrapper: same-named method on another object is ignored.
+            other.registerReadOnlyTool(server, { name: 'not_a_tool', description: 'x' }, ForecastSchema, () => {});
+          }
+        }
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    by_name = {f.name: f for f in findings}
+    assert sorted(by_name) == ["elevation", "weather_forecast"]
+    assert by_name["weather_forecast"].issues == []
+    assert {i.check for i in by_name["elevation"].issues} == {"param_docs"}
+    assert by_name["weather_forecast"].has_try_except
+
+
+def test_method_not_forwarding_a_param_as_name_is_not_a_wrapper(tmp_path):
+    write(tmp_path, "src/index.ts", """
+        class Server {
+          private setupFixed(server: McpServer, extra) {
+            const reg = server.registerTool.bind(server);
+            reg('status', { description: 'Report server status.', inputSchema: {} }, async () => ({}));
+          }
+          private run() { this.setupFixed(server, 'ignored'); }
+        }
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert "ignored" not in [f.name for f in findings]
