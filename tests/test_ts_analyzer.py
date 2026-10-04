@@ -1362,3 +1362,49 @@ def test_method_not_forwarding_a_param_as_name_is_not_a_wrapper(tmp_path):
         """)
     findings, _ = find_ts_tools(tmp_path)
     assert "ignored" not in [f.name for f in findings]
+
+
+def test_list_tools_handler_mapping_a_registry_through_a_helper(tmp_path):
+    # chrisryugj/korean-law-mcp reported 0 of 99: the handler calls a local
+    # `listTools()`, which returns `{ tools: exposed.map(t => ({ name: t.name, ... })) }`
+    # over a filtered array of `{ name, description, schema: z.object(...), handler }`.
+    write(tmp_path, "tools/search.ts", """
+        import { z } from "zod";
+        export const SearchLawSchema = z.object({ query: z.string().describe("Law name keyword") });
+        """)
+    write(tmp_path, "tool-registry.ts", """
+        import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+        import { z } from "zod";
+        import { SearchLawSchema } from "./tools/search.js";
+
+        export const allTools = [
+          { name: "search_law", description: "Search laws by keyword.", schema: SearchLawSchema, handler: searchLaw },
+          { name: "get_law_text", description: "Get a law's full text.", schema: z.object({ mst: z.string() }), handler: getLawText },
+        ];
+        const exposedTools = allTools.filter(t => EXPOSED.has(t.name));
+
+        function listTools() {
+          return { tools: exposedTools.map(tool => ({ name: tool.name, description: tool.description, inputSchema: toJson(tool.schema) })) };
+        }
+
+        export function registerTools(server) {
+          server.setRequestHandler(ListToolsRequestSchema, async () => listTools());
+        }
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    by_name = {f.name: f for f in findings}
+    assert set(by_name) == {"search_law", "get_law_text"}
+    assert by_name["search_law"].issues == []
+    assert any("no .describe" in i.message for i in by_name["get_law_text"].issues)
+
+
+def test_list_tools_map_that_does_not_project_tools_is_not_read_as_a_registry(tmp_path):
+    # A `.map` whose callback doesn't build a `{ name, ... }` object isn't a
+    # one-tool-per-element projection, so the array it maps over isn't tools.
+    write(tmp_path, "server.ts", """
+        import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+        const loaders = [{ name: "not_a_tool", description: "A loader config." }];
+        server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: loaders.map(l => l.load()) }));
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert findings == []

@@ -201,16 +201,55 @@ def _zod_wrapped_schema(node, src: bytes, consts: dict):
     return _resolve(arg_nodes[0], src, consts)
 
 
-def _find_tools_array(handler_node, src: bytes):
+def _find_tools_array(handler_node, src: bytes, local_funcs: dict | None = None, depth: int = 0):
     """Search a `setRequestHandler(ListToolsRequestSchema, handler)` handler body
     for the object literal it builds its response from (`{ tools: [...] }`,
-    however it's returned) and return that `tools` property's raw value node."""
+    however it's returned) and return that `tools` property's raw value node.
+    A handler that only calls a same-file helper (`async () => listTools()`)
+    is followed into that function (chrisryugj/korean-law-mcp, 99 tools)."""
     for n in _walk(handler_node):
         if n.type == "object":
             tools_val = _object_pairs(n, src).get("tools")
             if tools_val is not None:
                 return tools_val
+    if local_funcs and depth < 2:
+        for n in _walk(handler_node):
+            if n.type != "call_expression":
+                continue
+            func = n.child_by_field_name("function")
+            if func is None or func.type != "identifier":
+                continue
+            target = local_funcs.get(_text(func, src))
+            if target is not None and target is not handler_node:
+                found = _find_tools_array(target, src, local_funcs, depth + 1)
+                if found is not None:
+                    return found
     return None
+
+
+def _map_projection_receiver(node, src: bytes):
+    """For `tools: someTools.map(t => ({ name: t.name, ... }))`, return the
+    array being mapped (`someTools`), or None if `node` isn't that shape.
+    Only a callback that returns an object with a `name` key counts: that's
+    a projection of each registry entry into a `Tool`, one tool per element."""
+    if node is None or node.type != "call_expression":
+        return None
+    func = node.child_by_field_name("function")
+    if func is None or func.type != "member_expression":
+        return None
+    prop = func.child_by_field_name("property")
+    if prop is None or _text(prop, src) != "map":
+        return None
+    args_node = node.child_by_field_name("arguments")
+    if args_node is None:
+        return None
+    call_args = [c for c in args_node.children if c.type not in ("(", ")", ",")]
+    if len(call_args) != 1:
+        return None
+    projected, _ = _extract_definition_object(call_args[0], src)
+    if projected is None or "name" not in _object_pairs(projected, src):
+        return None
+    return func.child_by_field_name("object")
 
 
 def _collect_tool_array_elements(array_node, src: bytes, consts: dict, depth: int = 0):
@@ -709,6 +748,10 @@ def _analyze_json_schema_tool(
         # Unwrap to the underlying Zod schema so param docs are still checked,
         # rather than going blind on every tool that uses this (common) idiom.
         zod_node, zod_src = _zod_wrapped_schema(schema, resolved_schema_src, consts)
+        if zod_node is None and _callee_name(schema) == "object":
+            # A registry entry's own Zod schema (`schema: z.object({...})`),
+            # converted to JSON Schema later by the projection that lists it.
+            zod_node, zod_src = schema, resolved_schema_src
         zod_obj = _zod_object_arg(zod_node)
         if zod_obj is not None:
             zod_props = _object_pairs(zod_obj, zod_src)
@@ -943,7 +986,7 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
                     continue
                 if _text(arg_nodes[0], src) != LIST_TOOLS_SCHEMA:
                     continue
-                tools_array_raw = _find_tools_array(arg_nodes[1], src)
+                tools_array_raw = _find_tools_array(arg_nodes[1], src, local_funcs)
                 if tools_array_raw is None:
                     continue
 
@@ -968,7 +1011,12 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
                             if resolved_val.type == "object":
                                 tool_elements.append((resolved_val, resolved_val_src))
                 else:
-                    tools_array, tools_array_src = _resolve(tools_array_raw, src, consts)
+                    # `tools: registry.map(t => ({ name: t.name, ... }))`: each
+                    # registry entry is one tool, so read the entries themselves.
+                    mapped = _map_projection_receiver(tools_array_raw, src)
+                    tools_array, tools_array_src = _resolve(
+                        mapped if mapped is not None else tools_array_raw, src, consts
+                    )
                     tool_elements = _collect_tool_array_elements(tools_array, tools_array_src, consts)
 
                 for tool_obj, tool_src in tool_elements:
@@ -988,7 +1036,9 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
                     seen_list_tools.add(dedup_key)
                     findings.append(
                         _analyze_json_schema_tool(
-                            name_val, pairs.get("description"), pairs.get("inputSchema"), tool_src,
+                            name_val, pairs.get("description"),
+                            pairs.get("inputSchema") if "inputSchema" in pairs else pairs.get("schema"),
+                            tool_src,
                             consts, tool_src, tool_file, tool_line,
                         )
                     )
