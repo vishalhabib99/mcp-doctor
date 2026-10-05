@@ -2205,3 +2205,42 @@ def test_none_default_on_typing_generic_flagged(tmp_path):
     issue = next(i for i in tool.issues if i.check == "none_default_type")
     assert all(n in issue.message for n in ("overrides", "names", "extra"))
     assert "ok" not in issue.message.split(" defaults")[0].split(", ")
+
+
+def test_partially_documented_params_name_the_missing_ones(tmp_path):
+    # chigwell/telegram-mcp: an Args: section that covers page/page_size but
+    # leaves out `account` was reported as "no Args: section" (bug #75).
+    write(tmp_path, "server.py", """
+        from typing import Optional
+        from fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        @mcp.tool
+        def get_chats(account: Optional[str] = None, page: int = 1, page_size: int = 20) -> str:
+            \"\"\"
+            Get a paginated list of chats.
+            Args:
+                page: Page number (1-indexed).
+                page_size: Number of chats per page.
+            \"\"\"
+            return ""
+        """)
+    issues = _param_docs_issues(analyze_repo(tmp_path))
+    assert len(issues) == 1
+    msg = issues[0].message
+    assert msg.startswith("1 of 3 parameters aren't documented: account")
+    assert "no Args:" not in msg
+
+
+def test_fully_undocumented_params_keep_the_section_message(tmp_path):
+    write(tmp_path, "server.py", """
+        from fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        @mcp.tool
+        def get_chat(chat_id: int) -> str:
+            \"\"\"Get one chat.\"\"\"
+            return ""
+        """)
+    issues = _param_docs_issues(analyze_repo(tmp_path))
+    assert len(issues) == 1 and "no Args:/:param: docstring section" in issues[0].message

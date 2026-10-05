@@ -1062,10 +1062,21 @@ def _analyze_function_as_tool(
                 "or an Args: docstring section instead."
             )
         else:
-            message = (
-                "Parameters aren't documented — no Args:/:param: docstring section and no per-parameter "
-                "Field(description=...) — the model only sees names, not intent."
-            )
+            documented_names = doc_params | field_documented_names
+            missing = [a.arg for a in args if a.arg not in documented_names]
+            if len(missing) < len(args):
+                # Some parameters are documented, so saying "no Args: section"
+                # would be wrong: name the ones that aren't.
+                message = (
+                    f"{len(missing)} of {len(args)} parameters aren't documented: {', '.join(missing)} — "
+                    "the model only sees their names, not intent. Add them to the docstring's "
+                    "Args:/:param: section or give each a Field(description=...)."
+                )
+            else:
+                message = (
+                    "Parameters aren't documented — no Args:/:param: docstring section and no per-parameter "
+                    "Field(description=...) — the model only sees names, not intent."
+                )
         finding.issues.append(ToolIssue(tool_name, file, fn.lineno, "param_docs", message, "warning"))
 
     url_params_missing_format = [
