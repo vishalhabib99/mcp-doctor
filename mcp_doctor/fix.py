@@ -18,7 +18,14 @@ import ast
 import re
 from pathlib import Path
 
-from .analyzer import Report, ToolFinding, _field_call_has_description, _get_docstring_sections
+from .analyzer import (
+    Report,
+    ToolFinding,
+    _field_call_has_description,
+    _get_docstring_sections,
+    _get_numpy_documented_params,
+    _get_sphinx_documented_params,
+)
 
 _DOCSTRING_QUOTE = re.compile(r'^(\s*)(\'\'\'|""")(.*)\2\s*\n?$')
 _CLOSING_QUOTE_ONLY = re.compile(r'^(\s*)(\'\'\'|""")\s*\n?$')
@@ -55,7 +62,7 @@ def _find_function_at_line(tree: ast.Module, lineno: int) -> ast.FunctionDef | a
 
 def _fully_undocumented_args(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str] | None:
     """Names of every param, if none of them have any documentation at all
-    (docstring Args: section or Field(description=...)); None if some do
+    (an Args:, :param: or NumPy Parameters section, or Field(description=...)); None if some do
     (partial docs — too risky to merge, so this fix skips it)."""
     all_args = fn.args.args
     args = [a for a in all_args if a.arg not in ("self", "cls")]
@@ -63,7 +70,11 @@ def _fully_undocumented_args(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> list
         return None
 
     docstring = ast.get_docstring(fn)
-    doc_params = _get_docstring_sections(docstring)
+    doc_params = (
+        _get_docstring_sections(docstring)
+        | _get_sphinx_documented_params(docstring)
+        | _get_numpy_documented_params(docstring)
+    )
 
     defaults_by_arg = dict(zip(all_args[len(all_args) - len(fn.args.defaults):], fn.args.defaults))
     field_documented = {a.arg for a in args if _field_call_has_description(defaults_by_arg.get(a))}

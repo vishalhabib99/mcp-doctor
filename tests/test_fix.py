@@ -169,3 +169,33 @@ def test_fix_flag_improves_score_via_cli():
         after_pct = json.loads(after.stdout)["percent"]
         assert after_pct > before_pct
         assert "Fixed 1 file(s)" in after.stderr
+
+
+def test_no_args_stub_when_numpy_or_sphinx_docs_exist(tmp_path):
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        @mcp.tool()
+        def get_forecast(city: str) -> str:
+            \"\"\"Get a weather forecast.
+
+            Parameters
+            ----------
+            city : str
+                The city name.
+            \"\"\"
+            return city
+
+        @mcp.tool()
+        def get_alerts(region: str) -> str:
+            \"\"\"Get weather alerts.
+
+            :param region: the region code
+            \"\"\"
+            return region
+        """)
+
+    report = analyze_repo(tmp_path)
+    apply_fixes(tmp_path, report)
+    assert "TODO: describe this parameter" not in (tmp_path / "server.py").read_text()

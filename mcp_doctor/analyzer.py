@@ -255,6 +255,41 @@ def _get_sphinx_documented_params(docstring: str | None) -> set[str]:
     return names
 
 
+_NUMPY_UNDERLINE = re.compile(r"^-{3,}\s*$")
+_NUMPY_PARAM_HEADINGS = {"parameters", "other parameters", "keyword arguments", "args", "arguments"}
+
+
+def _get_numpy_documented_params(docstring: str | None) -> set[str]:
+    """NumPy-style sections: a heading line underlined with dashes, then
+    `name : type` (or `a, b : type`, or a bare `name`) at the heading's
+    indent, with the description indented below. Only names under a
+    Parameters-like heading count; the section ends at the next underlined
+    heading. Verified against oaslananka/kicad-mcp-pro, which documents
+    ~35 tools this way. No colon after the heading, so it never overlaps
+    with the Google-style `Parameters:` that _get_docstring_sections reads."""
+    if not docstring:
+        return set()
+    lines = docstring.splitlines()
+    names: set[str] = set()
+    in_params = False
+    indent = 0
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        nxt = lines[i + 1] if i + 1 < len(lines) else ""
+        if stripped and _NUMPY_UNDERLINE.match(nxt.strip()):
+            in_params = stripped.lower() in _NUMPY_PARAM_HEADINGS
+            indent = len(line) - len(line.lstrip())
+            continue
+        if not in_params or not stripped or _NUMPY_UNDERLINE.match(stripped):
+            continue
+        if len(line) - len(line.lstrip()) != indent:
+            continue
+        m = re.match(r"^\*{0,2}([A-Za-z_][A-Za-z0-9_]*(?:\s*,\s*\*{0,2}[A-Za-z_][A-Za-z0-9_]*)*)\s*(?::.*)?$", stripped)
+        if m:
+            names.update(n.strip().lstrip("*") for n in m.group(1).split(","))
+    return names
+
+
 def _field_call_has_description(node: ast.expr) -> bool:
     if not isinstance(node, ast.Call):
         return False
@@ -947,7 +982,11 @@ def _analyze_function_as_tool(
         if a.arg not in ("self", "cls") and a.arg not in excluded and not _is_context_param(a)
     ]
     typed = sum(1 for a in args if a.annotation is not None)
-    doc_params = _get_docstring_sections(docstring) | _get_sphinx_documented_params(docstring)
+    doc_params = (
+        _get_docstring_sections(docstring)
+        | _get_sphinx_documented_params(docstring)
+        | _get_numpy_documented_params(docstring)
+    )
 
     defaults_by_arg = dict(zip(all_args[len(all_args) - len(fn.args.defaults):], fn.args.defaults))
     field_documented_names = {

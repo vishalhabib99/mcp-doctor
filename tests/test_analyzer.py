@@ -532,6 +532,72 @@ def test_sphinx_style_param_docs_recognized_for_decorator_tool(tmp_path):
     assert not any(i.check == "param_docs" for i in tool.issues)
 
 
+def test_numpy_style_param_docs_recognized(tmp_path):
+    # NumPy style: a "Parameters" heading underlined with dashes, then
+    # "name : type" lines (kicad-mcp-pro uses it on ~35 tools). FastMCP sends
+    # the whole docstring as the tool description, so the model sees these.
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        @mcp.tool()
+        def get_forecast(city: str, days: int, lat: float, lon: float) -> str:
+            \"\"\"Get a weather forecast.
+
+            Parameters
+            ----------
+            city : str
+                The city name.
+            days : int
+                How many days out.
+            lat, lon : float
+                Optional coordinates.
+
+            Returns
+            -------
+            str
+                The forecast.
+            \"\"\"
+            try:
+                return f"{city} {days} {lat} {lon}"
+            except ValueError as e:
+                return str(e)
+        """)
+    report = analyze_repo(tmp_path)
+    tool = report.tools[0]
+    assert not any(i.check == "param_docs" for i in tool.issues)
+
+
+def test_numpy_style_partial_docs_still_flagged(tmp_path):
+    # Only `city` is documented, and names under Returns don't count.
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        @mcp.tool()
+        def get_forecast(city: str, days: int) -> str:
+            \"\"\"Get a weather forecast.
+
+            Parameters
+            ----------
+            city : str
+                The city name.
+
+            Returns
+            -------
+            days : str
+                Not a parameter.
+            \"\"\"
+            try:
+                return f"{city} {days}"
+            except ValueError as e:
+                return str(e)
+        """)
+    report = analyze_repo(tmp_path)
+    tool = report.tools[0]
+    assert any(i.check == "param_docs" for i in tool.issues)
+
+
 def test_hardcoded_secret_flagged(tmp_path):
     write(tmp_path, "server.py", """
         api_key = "sk-ab12cd34ef56gh78ij90kl"
