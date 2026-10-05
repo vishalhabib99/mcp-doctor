@@ -335,6 +335,59 @@ def test_low_level_server_list_tools_deduped_across_call_sites(tmp_path):
     assert findings[0].name == "chrome_screenshot"
 
 
+def test_hand_rolled_jsonrpc_switch_tools_list(tmp_path):
+    # kitfunso/hippo-memory: no SDK at all, a JSON-RPC `switch (method)` whose
+    # `case 'tools/list'` returns an imported static array nested under
+    # `result`. Was 0 tools; the `initialize` case's `tools: {}` capability
+    # object must not be mistaken for a tool list.
+    write(tmp_path, "src/mcp/tools.ts", """
+        export const TOOLS: readonly McpToolDefinition[] = [
+          { name: "hippo_recall", description: "Retrieve relevant memories from the store", inputSchema: { type: "object", properties: { query: { type: "string", description: "What to search for" } } } },
+          { name: "hippo_status", description: "Show memory store health and counts", inputSchema: { type: "object", properties: {} } },
+        ];
+        """)
+    write(tmp_path, "src/mcp/request.ts", """
+        import { TOOLS } from "./tools.js";
+        export function handle(method: string, id: number) {
+          switch (method) {
+            case 'initialize':
+              return { jsonrpc: '2.0', id, result: { capabilities: { tools: {} } } };
+            case 'tools/list':
+              return { jsonrpc: '2.0', id, result: { tools: TOOLS } };
+          }
+        }
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert sorted(f.name for f in findings) == ["hippo_recall", "hippo_status"]
+    assert all(f.file == "src/mcp/tools.ts" for f in findings)
+
+
+def test_hand_rolled_jsonrpc_if_tools_list_and_runtime_proxy_skipped(tmp_path):
+    # `if (method === "tools/list")` form resolves the same way; a proxy that
+    # returns another server's list at runtime has nothing static to read and
+    # must report nothing rather than guess.
+    write(tmp_path, "server.ts", """
+        const TOOLS = [
+          { name: "get_quote", description: "Get the latest quote for a ticker", inputSchema: { type: "object", properties: {} } },
+        ];
+        export async function onMessage(msg) {
+          if (msg.method === "tools/list") {
+            return { result: { tools: TOOLS } };
+          }
+        }
+        """)
+    write(tmp_path, "proxy.ts", """
+        export async function forward(msg, upstream) {
+          switch (msg.method) {
+            case "tools/list":
+              return { result: { tools: await upstream.listTools() } };
+          }
+        }
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert [f.name for f in findings] == ["get_quote"]
+
+
 def test_list_tools_handler_with_filter_and_template_description(tmp_path):
     # Two real patterns found dogfooding wonderwhy-er/DesktopCommanderMCP:
     # (1) the base tools array is filtered before being returned, which must

@@ -227,6 +227,32 @@ def _find_tools_array(handler_node, src: bytes, local_funcs: dict | None = None,
     return None
 
 
+def _raw_tools_list_branch(node, src: bytes):
+    """If `node` is a hand-rolled JSON-RPC dispatch branch for `tools/list` —
+    `case 'tools/list':` in a switch, or `if (method === 'tools/list') {...}` —
+    return the node whose body builds the response; otherwise None."""
+    if node.type == "switch_case":
+        value = node.child_by_field_name("value")
+        if value is not None and _string_value(value, src) == "tools/list":
+            return node
+        return None
+    if node.type == "if_statement":
+        cond = node.child_by_field_name("condition")
+        if cond is None:
+            return None
+        for n in _walk(cond):
+            if n.type != "binary_expression":
+                continue
+            op = n.child_by_field_name("operator")
+            if op is None or _text(op, src) not in ("===", "=="):
+                continue
+            for side in ("left", "right"):
+                v = n.child_by_field_name(side)
+                if v is not None and v.type == "string" and _string_value(v, src) == "tools/list":
+                    return node.child_by_field_name("consequence")
+    return None
+
+
 def _map_projection_receiver(node, src: bytes):
     """For `tools: someTools.map(t => ({ name: t.name, ... }))`, return the
     array being mapped (`someTools`), or None if `node` isn't that shape.
@@ -916,6 +942,64 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
         target = (current_file.parent / spec).resolve().with_suffix("")
         return by_module_path.get(target)
 
+    def _emit_static_list_tools(tools_array_raw, f, rel, src, consts, namespace_imports):
+        """Report every tool in a static `tools` list a list-tools handler returns."""
+        if tools_array_raw is None:
+            return
+
+        # `Object.values(tools)` where `tools` is a namespace import
+        # (`import * as tools from "./tools.js"`) — the module it
+        # points at exports one `const` object per tool rather than a
+        # single array, so its elements come from that module's own
+        # top-level exports instead of `_collect_tool_array_elements`.
+        ns_arg = _object_values_arg(tools_array_raw)
+        tool_elements: list[tuple["Node", bytes]] = []
+        if ns_arg is not None:
+            spec = namespace_imports.get(_text(ns_arg, src))
+            module_entry = _resolve_namespace_module(f, spec) if spec else None
+            if module_entry is not None:
+                mod_path, mod_root, mod_src = module_entry
+                mod_exports = module_exports_cache.get(mod_path)
+                if mod_exports is None:
+                    mod_exports = _module_exported_consts(mod_root, mod_src)
+                    module_exports_cache[mod_path] = mod_exports
+                for value_node, value_src in mod_exports.values():
+                    resolved_val, resolved_val_src = _resolve(value_node, value_src, consts)
+                    if resolved_val.type == "object":
+                        tool_elements.append((resolved_val, resolved_val_src))
+        else:
+            # `tools: registry.map(t => ({ name: t.name, ... }))`: each
+            # registry entry is one tool, so read the entries themselves.
+            mapped = _map_projection_receiver(tools_array_raw, src)
+            tools_array, tools_array_src = _resolve(
+                mapped if mapped is not None else tools_array_raw, src, consts
+            )
+            tool_elements = _collect_tool_array_elements(tools_array, tools_array_src, consts)
+
+        for tool_obj, tool_src in tool_elements:
+            pairs = _object_pairs(tool_obj, tool_src)
+            name_val = _resolve_str(pairs.get("name"), tool_src, consts)
+            if name_val is None:
+                continue  # dynamic tool name — can't attribute a finding to it
+            tool_file = src_to_rel.get(id(tool_src), rel)
+            tool_line = tool_obj.start_point[0] + 1
+            # The same static tool list is commonly wired into more than
+            # one setRequestHandler call site (e.g. separate stdio/HTTP
+            # transport entrypoints) — dedupe by the tool's own
+            # definition, not the call site, so it's reported once.
+            dedup_key = (name_val, tool_file, tool_line)
+            if dedup_key in seen_list_tools:
+                continue
+            seen_list_tools.add(dedup_key)
+            findings.append(
+                _analyze_json_schema_tool(
+                    name_val, pairs.get("description"),
+                    pairs.get("inputSchema") if "inputSchema" in pairs else pairs.get("schema"),
+                    tool_src,
+                    consts, tool_src, tool_file, tool_line,
+                )
+            )
+
     for f, file_root, src in parsed:
         rel = str(f.relative_to(root))
         local_consts = _collect_const_objects(file_root, src)
@@ -966,6 +1050,18 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
                 )
                 findings.append(finding)
                 continue
+            # Hand-rolled JSON-RPC dispatch with no SDK at all:
+            # `switch (method) { case 'tools/list': return { result: { tools: TOOLS } } }`
+            # or `if (method === 'tools/list') { ... }` (kitfunso/hippo-memory, 13
+            # tools). Same static-list resolution as the SDK handler below; a
+            # proxy that builds its list at runtime doesn't resolve and is skipped.
+            raw_list_body = _raw_tools_list_branch(node, src)
+            if raw_list_body is not None:
+                _emit_static_list_tools(
+                    _find_tools_array(raw_list_body, src, local_funcs),
+                    f, rel, src, consts, namespace_imports,
+                )
+                continue
             if node.type != "call_expression":
                 continue
             method = _callee_name(node)
@@ -986,62 +1082,10 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
                     continue
                 if _text(arg_nodes[0], src) != LIST_TOOLS_SCHEMA:
                     continue
-                tools_array_raw = _find_tools_array(arg_nodes[1], src, local_funcs)
-                if tools_array_raw is None:
-                    continue
-
-                # `Object.values(tools)` where `tools` is a namespace import
-                # (`import * as tools from "./tools.js"`) — the module it
-                # points at exports one `const` object per tool rather than a
-                # single array, so its elements come from that module's own
-                # top-level exports instead of `_collect_tool_array_elements`.
-                ns_arg = _object_values_arg(tools_array_raw)
-                tool_elements: list[tuple["Node", bytes]] = []
-                if ns_arg is not None:
-                    spec = namespace_imports.get(_text(ns_arg, src))
-                    module_entry = _resolve_namespace_module(f, spec) if spec else None
-                    if module_entry is not None:
-                        mod_path, mod_root, mod_src = module_entry
-                        mod_exports = module_exports_cache.get(mod_path)
-                        if mod_exports is None:
-                            mod_exports = _module_exported_consts(mod_root, mod_src)
-                            module_exports_cache[mod_path] = mod_exports
-                        for value_node, value_src in mod_exports.values():
-                            resolved_val, resolved_val_src = _resolve(value_node, value_src, consts)
-                            if resolved_val.type == "object":
-                                tool_elements.append((resolved_val, resolved_val_src))
-                else:
-                    # `tools: registry.map(t => ({ name: t.name, ... }))`: each
-                    # registry entry is one tool, so read the entries themselves.
-                    mapped = _map_projection_receiver(tools_array_raw, src)
-                    tools_array, tools_array_src = _resolve(
-                        mapped if mapped is not None else tools_array_raw, src, consts
-                    )
-                    tool_elements = _collect_tool_array_elements(tools_array, tools_array_src, consts)
-
-                for tool_obj, tool_src in tool_elements:
-                    pairs = _object_pairs(tool_obj, tool_src)
-                    name_val = _resolve_str(pairs.get("name"), tool_src, consts)
-                    if name_val is None:
-                        continue  # dynamic tool name — can't attribute a finding to it
-                    tool_file = src_to_rel.get(id(tool_src), rel)
-                    tool_line = tool_obj.start_point[0] + 1
-                    # The same static tool list is commonly wired into more than
-                    # one setRequestHandler call site (e.g. separate stdio/HTTP
-                    # transport entrypoints) — dedupe by the tool's own
-                    # definition, not the call site, so it's reported once.
-                    dedup_key = (name_val, tool_file, tool_line)
-                    if dedup_key in seen_list_tools:
-                        continue
-                    seen_list_tools.add(dedup_key)
-                    findings.append(
-                        _analyze_json_schema_tool(
-                            name_val, pairs.get("description"),
-                            pairs.get("inputSchema") if "inputSchema" in pairs else pairs.get("schema"),
-                            tool_src,
-                            consts, tool_src, tool_file, tool_line,
-                        )
-                    )
+                _emit_static_list_tools(
+                    _find_tools_array(arg_nodes[1], src, local_funcs),
+                    f, rel, src, consts, namespace_imports,
+                )
                 continue
 
             if method in WRAPPER_FACTORY_METHODS:
