@@ -21,21 +21,15 @@ declared metadata alone: is the tool documented well enough for an agent
 to decide whether to call it, and is its own self-declared annotations
 internally consistent.
 
-The annotation_contradiction rule itself is deliberately NOT a direct
-port of the static check's "destructiveHint present at all, regardless
-of value" rule — dogfooding against the real official
-`@modelcontextprotocol/server-memory` reference server found that rule
-miscalibrated for live data before it ever shipped: that server declares
-all four ToolAnnotations fields explicitly on every tool as a matter of
-good, complete practice (read_graph: readOnlyHint=true, destructiveHint
-=false — sensible and consistent), which the presence-based rule flagged
-as contradictory anyway. Presence is a fair proxy for "leftover" in
-source code, where an author who didn't think about a field usually
-doesn't write it — but at the wire level, a careful implementer setting
-every field explicitly is common and not a bug. What's still a genuine,
-low-false-positive signal: `destructiveHint` explicitly `true` alongside
-`readOnlyHint: true` — an actual conflicting *value*, not mere
-co-presence.
+The annotation_contradiction rule flags only `destructiveHint` explicitly
+`true` alongside `readOnlyHint: true`. This live gate shipped that way
+first: the official `@modelcontextprotocol/server-memory` server sets all
+four ToolAnnotations fields on every tool (read_graph: readOnlyHint=true,
+destructiveHint=false, which is consistent), and the static check's old
+"present at all" rule flagged it anyway. The static check matches this
+since v1.13.4 (bug #74), after source code showed the same thing: careful
+authors write `destructiveHint=False` there too (yfinance-mcp,
+pfsense-mcp-server).
 """
 
 from __future__ import annotations

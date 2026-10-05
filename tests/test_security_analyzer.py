@@ -743,11 +743,11 @@ def test_read_only_and_destructive_hint_together_flags_contradiction(tmp_path):
     assert contradiction.category == "security"
 
 
-def test_read_only_and_destructive_hint_false_still_flags_contradiction(tmp_path):
-    # The property has no defined meaning at all when readOnlyHint is true —
-    # not "no defined meaning unless true" — so an explicit destructiveHint:
-    # false is just as contradictory as true, and camelCase (the spec's own
-    # spelling, as an SDK consumer would actually write it) must be read too.
+def test_read_only_and_destructive_hint_false_is_not_a_contradiction(tmp_path):
+    # An explicit destructiveHint: false agrees with readOnlyHint: true —
+    # careful code sets all four hints (yfinance-mcp, pfsense-mcp-server,
+    # the official server-memory). Only a leftover `true` is the copy-paste
+    # bug; camelCase (the spec's own spelling) must still be read.
     write(tmp_path, "server.py", """
         from mcp.server.fastmcp import FastMCP
         from mcp.types import ToolAnnotations
@@ -759,6 +759,26 @@ def test_read_only_and_destructive_hint_false_still_flags_contradiction(tmp_path
                 record_id: the record to check.
             \"\"\"
             return cursor.execute(f"SELECT status FROM records WHERE id = '{record_id}'").fetchone()
+        """)
+    make_clean_repo(tmp_path)
+
+    report = analyze_repo(tmp_path)
+    tool = next(t for t in report.tools if t.name == "get_status")
+    assert not any(i.check == "annotation_contradiction" for i in tool.issues)
+
+
+def test_read_only_and_destructive_hint_true_camel_case_flags_contradiction(tmp_path):
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        from mcp.types import ToolAnnotations
+        mcp = FastMCP("x")
+
+        @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=True))
+        def get_status(record_id: str) -> str:
+            \"\"\"Args:
+                record_id: the record to check.
+            \"\"\"
+            return record_id
         """)
     make_clean_repo(tmp_path)
 

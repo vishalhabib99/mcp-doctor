@@ -959,7 +959,7 @@ def _analyze_function_as_tool(
     excluded_arg_names: set[str] | None = None,
     error_handling_registry: dict[str, bool] | None = None,
     declared_read_only: bool | None = None,
-    declared_destructive_present: bool = False,
+    declared_destructive_true: bool = False,
     plain_string_ok: bool = True,
 ) -> ToolFinding:
     tool_name = name_override or fn.name
@@ -1129,14 +1129,14 @@ def _analyze_function_as_tool(
                 "action that isn't actually read-only. Heuristic — worth a human look, not confirmed.",
                 "warning", "security",
             ))
-        if declared_destructive_present:
+        if declared_destructive_true:
             finding.issues.append(ToolIssue(
                 tool_name, file, fn.lineno, "annotation_contradiction",
-                "Declared readOnlyHint: true and also set destructiveHint — the spec defines "
+                "Declared readOnlyHint: true and destructiveHint: true — the spec defines "
                 "destructiveHint as meaningful only when readOnlyHint is false, so this combination "
-                "is self-contradictory and destructiveHint's value here has no defined meaning. "
-                "Common when a new tool is cloned from an existing write-tool's annotation block and "
-                "only readOnlyHint gets flipped to true.",
+                "is self-contradictory. Common when a new tool is cloned from an existing "
+                "write-tool's annotation block and only readOnlyHint gets flipped to true, leaving "
+                "destructiveHint: true behind.",
                 "warning", "security",
             ))
 
@@ -1174,14 +1174,17 @@ def _find_fastmcp_tools(
                 _kwarg_bool(annotations_call, "read_only_hint", "readOnlyHint")
                 if annotations_call is not None else None
             )
-            declared_destructive_present = (
-                _kwarg_present(annotations_call, "destructive_hint", "destructiveHint")
+            # Only an explicit `true` contradicts readOnlyHint: an explicit
+            # `false` agrees with it (careful code sets all four hints), so
+            # flagging it was noise (yfinance-mcp, pfsense-mcp-server).
+            declared_destructive_true = (
+                _kwarg_bool(annotations_call, "destructive_hint", "destructiveHint") is True
                 if annotations_call is not None else False
             )
             findings.append(_analyze_function_as_tool(
                 node, file, description_override, alias_registry, name_override,
                 excluded_args, error_handling_registry, declared_read_only,
-                declared_destructive_present, plain_string_ok,
+                declared_destructive_true, plain_string_ok,
             ))
             break
     return findings
