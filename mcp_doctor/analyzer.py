@@ -460,6 +460,9 @@ def _annotation_is_str_like(annotation: ast.expr | None) -> bool:
 # null. Deliberately a closed list: a repo-defined alias or class could be
 # anything (including `X | None` behind a name), so it's never flagged.
 _NON_NULLABLE_BUILTINS = {"str", "int", "float", "bool", "list", "dict", "tuple", "set", "bytes"}
+# typing's capitalized aliases of the same containers (`Dict[str, Any]`), which
+# are just as non-nullable and still common in older FastMCP code.
+_NON_NULLABLE_TYPING = {"List", "Dict", "Tuple", "Set", "FrozenSet", "Sequence", "Mapping"}
 
 
 def _is_none_default(default: ast.expr | None) -> bool:
@@ -483,13 +486,15 @@ def _annotation_rejects_none(annotation: ast.expr | None) -> bool:
     Union/Any, or any name this module can't see the definition of, is
     treated as nullable so the check can't false-positive on it."""
     if isinstance(annotation, ast.Name):
-        return annotation.id in _NON_NULLABLE_BUILTINS
+        return annotation.id in _NON_NULLABLE_BUILTINS or annotation.id in _NON_NULLABLE_TYPING
     if isinstance(annotation, ast.Subscript):
         base_name = _annotation_base_name(annotation.value)
         if base_name == "Annotated":
             sl = annotation.slice
             elts = sl.elts if isinstance(sl, ast.Tuple) else [sl]
             return bool(elts) and _annotation_rejects_none(elts[0])
+        if base_name in _NON_NULLABLE_TYPING:
+            return True  # `Dict[...]` or `typing.Dict[...]`
         return isinstance(annotation.value, ast.Name) and base_name in _NON_NULLABLE_BUILTINS
     return False
 

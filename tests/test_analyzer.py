@@ -2111,3 +2111,31 @@ def test_none_default_on_nullable_or_unknown_type_not_flagged(tmp_path):
         """)
     tool = analyze_repo(tmp_path).tools[0]
     assert not any(i.check == "none_default_type" for i in tool.issues)
+
+
+def test_none_default_on_typing_generic_flagged(tmp_path):
+    # Missed by v1.13.0: ahujasid/mcp-for-blender's describe_node_type has
+    # `property_overrides: Dict[str, Any] = None`.
+    write(tmp_path, "server.py", """
+        import typing
+        from typing import Any, Dict, List
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        @mcp.tool()
+        def describe(
+            overrides: Dict[str, Any] = None,
+            names: List[str] = None,
+            extra: typing.Dict[str, int] = None,
+            ok: typing.Optional[Dict[str, Any]] = None,
+        ) -> str:
+            \"\"\"Describe a node.\"\"\"
+            try:
+                return ""
+            except ValueError as e:
+                return str(e)
+        """)
+    tool = analyze_repo(tmp_path).tools[0]
+    issue = next(i for i in tool.issues if i.check == "none_default_type")
+    assert all(n in issue.message for n in ("overrides", "names", "extra"))
+    assert "ok" not in issue.message.split(" defaults")[0].split(", ")
