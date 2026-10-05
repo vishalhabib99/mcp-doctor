@@ -2039,3 +2039,75 @@ def test_test_named_harness_script_without_mcp_import_stays_auxiliary(tmp_path):
         """)
     report = analyze_repo(tmp_path)
     assert not any(i.check == "dangerous_exec" for i in report.repo_issues)
+
+
+def test_none_default_on_non_optional_type_flagged(tmp_path):
+    # Reproduced on barvhaim/qiskit-mcp-server: `name: str = None` advertises
+    # {"type": "string", "default": null}, and an explicit `name: null` call
+    # fails pydantic validation.
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        @mcp.tool()
+        def create_circuit(num_qubits: int, num_bits: int = None, name: str = None) -> str:
+            \"\"\"Create a circuit.\"\"\"
+            try:
+                return str(num_qubits)
+            except ValueError as e:
+                return str(e)
+        """)
+    tool = analyze_repo(tmp_path).tools[0]
+    issue = next(i for i in tool.issues if i.check == "none_default_type")
+    assert "num_bits" in issue.message and "name" in issue.message
+    assert "num_qubits" not in issue.message
+
+
+def test_none_default_field_and_annotated_forms_flagged(tmp_path):
+    write(tmp_path, "server.py", """
+        from typing import Annotated
+        from pydantic import Field
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        @mcp.tool()
+        def search(
+            query: Annotated[str, Field(description="Query.")] = None,
+            tags: list[str] = Field(default=None, description="Tags."),
+        ) -> str:
+            \"\"\"Search things.\"\"\"
+            try:
+                return query or ""
+            except ValueError as e:
+                return str(e)
+        """)
+    tool = analyze_repo(tmp_path).tools[0]
+    issue = next(i for i in tool.issues if i.check == "none_default_type")
+    assert "query" in issue.message and "tags" in issue.message
+
+
+def test_none_default_on_nullable_or_unknown_type_not_flagged(tmp_path):
+    write(tmp_path, "server.py", """
+        from typing import Any, Optional, Union
+        from mcp.server.fastmcp import FastMCP
+        from .types import MaybeName
+        mcp = FastMCP("x")
+
+        @mcp.tool()
+        def create_circuit(
+            a: str | None = None,
+            b: Optional[int] = None,
+            c: Union[int, None] = None,
+            d: Any = None,
+            e: MaybeName = None,
+            f: str = "",
+            g=None,
+        ) -> str:
+            \"\"\"Create a circuit.\"\"\"
+            try:
+                return ""
+            except ValueError as e:
+                return str(e)
+        """)
+    tool = analyze_repo(tmp_path).tools[0]
+    assert not any(i.check == "none_default_type" for i in tool.issues)

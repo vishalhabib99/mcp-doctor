@@ -456,6 +456,44 @@ def _annotation_is_str_like(annotation: ast.expr | None) -> bool:
     return False
 
 
+# Builtin annotations that, written bare, give a schema `type` that excludes
+# null. Deliberately a closed list: a repo-defined alias or class could be
+# anything (including `X | None` behind a name), so it's never flagged.
+_NON_NULLABLE_BUILTINS = {"str", "int", "float", "bool", "list", "dict", "tuple", "set", "bytes"}
+
+
+def _is_none_default(default: ast.expr | None) -> bool:
+    """`= None`, or `= Field(None, ...)` / `= Field(default=None, ...)`."""
+    if isinstance(default, ast.Constant) and default.value is None:
+        return True
+    if isinstance(default, ast.Call) and _annotation_base_name(default.func) == "Field":
+        if default.args and isinstance(default.args[0], ast.Constant) and default.args[0].value is None:
+            return True
+        return any(
+            kw.arg == "default" and isinstance(kw.value, ast.Constant) and kw.value.value is None
+            for kw in default.keywords
+        )
+    return False
+
+
+def _annotation_rejects_none(annotation: ast.expr | None) -> bool:
+    """True only when the annotation is provably non-nullable: a bare builtin
+    (`str`, `int`, ...), a parameterized builtin container (`list[str]`), or
+    `Annotated[<one of those>, ...]`. Anything that mentions None/Optional/
+    Union/Any, or any name this module can't see the definition of, is
+    treated as nullable so the check can't false-positive on it."""
+    if isinstance(annotation, ast.Name):
+        return annotation.id in _NON_NULLABLE_BUILTINS
+    if isinstance(annotation, ast.Subscript):
+        base_name = _annotation_base_name(annotation.value)
+        if base_name == "Annotated":
+            sl = annotation.slice
+            elts = sl.elts if isinstance(sl, ast.Tuple) else [sl]
+            return bool(elts) and _annotation_rejects_none(elts[0])
+        return isinstance(annotation.value, ast.Name) and base_name in _NON_NULLABLE_BUILTINS
+    return False
+
+
 def _dict_has_str_key(d: ast.Dict, key: str) -> bool:
     return any(isinstance(k, ast.Constant) and k.value == key for k in d.keys)
 
@@ -1000,6 +1038,21 @@ def _analyze_function_as_tool(
             "schema-driven agent) sees a bare string, not a URL. Add it via "
             "`Field(json_schema_extra={\"format\": \"uri\"})`. Name-based heuristic — worth a "
             "human look, not confirmed.",
+            "warning",
+        ))
+
+    none_default_mismatch = [
+        a.arg for a in args
+        if _is_none_default(defaults_by_arg.get(a)) and _annotation_rejects_none(a.annotation)
+    ]
+    if none_default_mismatch:
+        finding.issues.append(ToolIssue(
+            tool_name, file, fn.lineno, "none_default_type",
+            f"{', '.join(none_default_mismatch)} defaults to None but is typed as a non-optional "
+            "type, so the schema advertises `\"default\": null` on a field whose `type` excludes "
+            "null — a client that sends that advertised default explicitly (some agent frameworks "
+            "fill every optional field with null) gets a validation error instead of the default. "
+            "Annotate it as `T | None` (or `Optional[T]`).",
             "warning",
         ))
 
