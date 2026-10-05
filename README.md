@@ -1,5 +1,7 @@
 # mcp-doctor
 
+**Lint MCP servers for what breaks the agent calling them.** Reads Python, TypeScript and Go source without running it, and grades quality and security separately.
+
 [![CI](https://github.com/vishalhabib99/mcp-doctor/actions/workflows/ci.yml/badge.svg)](https://github.com/vishalhabib99/mcp-doctor/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/mcp-server-lint.svg)](https://pypi.org/project/mcp-server-lint/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -9,7 +11,19 @@
 
 *Real output from a live scan of [`homeassistant-ai/ha-mcp`](https://github.com/homeassistant-ai/ha-mcp) (4.9k★) — not a cherry-picked fixture. Full example further down uses the bundled sample server for a smaller walkthrough.*
 
-> **Try it with no install:** [open a scan request](https://github.com/vishalhabib99/mcp-doctor/issues/new?template=scan-request.yml), paste your MCP server's GitHub URL, and a bot replies with your report in a few minutes. It reads the code only and never runs it. Security findings are posted as counts only, since the issue is public, and the reply includes the command to see the details locally. Tick the box to add your repo to the [leaderboard](https://vishalhabib99.github.io/mcp-doctor/) and get a badge.
+## Try it in 30 seconds
+
+- **No install:** [open a scan request](https://github.com/vishalhabib99/mcp-doctor/issues/new?template=scan-request.yml) with your server's GitHub URL. A bot replies with the report in a few minutes. It reads the code only and never runs it. Security findings are posted as counts only, since the issue is public.
+- **CLI:** `pip install mcp-server-lint`, then `mcp-doctor path/to/your/server`
+- **CI:** `uses: vishalhabib99/mcp-doctor@v1` fails a PR that drops below your score ([details](#github-action))
+
+## Why trust the grade
+
+- **Recall is measured in the open:** 11,228 of 11,411 tools found across 603 real servers on 4 frameworks. Every miss is listed in [docs/coverage.md](docs/coverage.md).
+- **75 bugs found and fixed after release** by running it on 40+ real servers, up to the 91.0k★ official `modelcontextprotocol/servers` monorepo. [How 69 of them got through](docs/postmortem-69-bugs.md).
+- **Maintainers act on the reports:** fixes merged upstream, e.g. [ha-mcp (4.9k★)](https://github.com/homeassistant-ai/ha-mcp/pull/2327). Every audited repo is ranked on the [leaderboard](https://vishalhabib99.github.io/mcp-doctor/), with a dated grade badge you can add to your README.
+
+## What it is
 
 A static analysis CLI that audits **MCP (Model Context Protocol) server** implementations for the things that actually break an agent calling them: missing tool descriptions, undocumented parameters, no error handling, no README coverage — plus a separate **security** score covering prompt-injection-prone tool descriptions ("tool poisoning"), dangerous dynamic execution, SSRF-prone outbound requests, unsafe deserialization, and hardcoded secrets. Quality and security are scored independently: a repo can be a documented, well-tested A on quality and still have a real security gap, and the two shouldn't be blended into one number that hides which is true.
 
