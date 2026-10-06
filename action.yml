@@ -18,6 +18,10 @@ inputs:
     description: "Post the report as a comment on the triggering pull request."
     required: false
     default: "true"
+  suggest-fixes:
+    description: "On a pull request, post mcp-doctor's safe fixes as one-click review suggestions on the lines the PR changes, and list the rest (with a patch) in the report comment. Needs `pull-requests: write`."
+    required: false
+    default: "true"
   version:
     description: "Git ref of mcp-doctor to install (branch, tag, or commit)."
     required: false
@@ -73,6 +77,33 @@ runs:
           echo "gate_failed=0" >> "$GITHUB_OUTPUT"
         fi
 
+    - name: Suggest fixes on pull request
+      if: ${{ inputs.suggest-fixes == 'true' && github.event_name == 'pull_request' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+        PR: ${{ github.event.pull_request.number }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        SCAN_PATH: ${{ inputs.path }}
+      run: |
+        # Suggestions are a convenience: a failure here (e.g. a read-only
+        # token on a fork's PR) warns instead of failing the check.
+        set +e
+        gh api "repos/$REPO/pulls/$PR/files" --paginate --jq '.[] | {filename, patch}' > mcp-doctor-pr-files.ndjson \
+          || { echo "::warning::mcp-doctor: couldn't read the PR's files; skipping fix suggestions"; exit 0; }
+        gh api "repos/$REPO/pulls/$PR/comments" --paginate \
+          --jq '.[] | select(.body | contains("<!-- mcp-doctor-fix -->")) | {path, line, body}' > mcp-doctor-existing.ndjson
+        python -m mcp_doctor.suggest "$SCAN_PATH" mcp-doctor-pr-files.ndjson \
+          --existing mcp-doctor-existing.ndjson --commit "$HEAD_SHA" \
+          --review-out mcp-doctor-review.json --summary-out mcp-doctor-fixes.md \
+          || { echo "::warning::mcp-doctor: couldn't plan fix suggestions"; exit 0; }
+        if [ -f mcp-doctor-review.json ]; then
+          gh api -X POST "repos/$REPO/pulls/$PR/reviews" --input mcp-doctor-review.json > /dev/null \
+            || echo "::warning::mcp-doctor: couldn't post fix suggestions (the workflow needs pull-requests: write)"
+        fi
+        exit 0
+
     - name: Comment on pull request
       if: ${{ inputs.comment == 'true' && github.event_name == 'pull_request' }}
       shell: bash
@@ -85,6 +116,7 @@ runs:
           echo '```'
           cat mcp-doctor-report.txt
           echo '```'
+          if [ -f mcp-doctor-fixes.md ]; then cat mcp-doctor-fixes.md; fi
         } > mcp-doctor-comment.md
         gh pr comment "${{ github.event.pull_request.number }}" \
           --repo "${{ github.repository }}" \
