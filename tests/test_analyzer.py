@@ -2244,3 +2244,84 @@ def test_fully_undocumented_params_keep_the_section_message(tmp_path):
         """)
     issues = _param_docs_issues(analyze_repo(tmp_path))
     assert len(issues) == 1 and "no Args:/:param: docstring section" in issues[0].message
+
+
+def test_blank_lines_between_args_entries_keep_the_section_open(tmp_path):
+    # Bug #76, from zinja-coder/jadx-mcp-server's search_classes: entries
+    # separated by blank lines were reported as undocumented.
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        @mcp.tool()
+        def search(search_term: str, package: str = "", count: int = 20) -> str:
+            \"\"\"Search the code.
+
+            Args:
+                search_term: The keyword to search for.
+
+                package (optional): Package name to limit the search scope.
+                    - If empty string (default), searches all packages
+
+                count: Max results.
+
+            Returns:
+                The matches.
+            \"\"\"
+            try:
+                return search_term
+            except ValueError as e:
+                return str(e)
+        """)
+    tool = analyze_repo(tmp_path).tools[0]
+    assert tool.has_docstring_params
+    assert not any(i.check == "param_docs" for i in tool.issues)
+
+
+def test_blank_line_then_dedent_still_ends_args_section(tmp_path):
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        @mcp.tool()
+        def search(query: str, limit: int = 5) -> str:
+            \"\"\"Search the code.
+
+            Args:
+                query: The query.
+
+            limit: this line is prose after the section, not an entry.
+            \"\"\"
+            try:
+                return query
+            except ValueError as e:
+                return str(e)
+        """)
+    tool = analyze_repo(tmp_path).tools[0]
+    issue = next(i for i in tool.issues if i.check == "param_docs")
+    assert "limit" in issue.message
+
+
+def test_langchain_tool_runtime_param_is_injected_not_undocumented(tmp_path):
+    # Bug #77, from MODSetter/SurfSense: LangChain injects `runtime: ToolRuntime`
+    # and strips it from the schema, like FastMCP's Context.
+    write(tmp_path, "server.py", """
+        from langchain.tools import ToolRuntime
+        from langchain_core.tools import tool
+
+        @tool
+        async def send_email(to: str, body: str, runtime: ToolRuntime) -> str:
+            \"\"\"Send an email.
+
+            Args:
+                to: Recipient address.
+                body: Email body content.
+            \"\"\"
+            try:
+                return to
+            except ValueError as e:
+                return str(e)
+        """)
+    tool = analyze_repo(tmp_path).tools[0]
+    assert tool.param_count == 2
+    assert not any(i.check == "param_docs" for i in tool.issues)

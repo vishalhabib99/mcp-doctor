@@ -219,13 +219,25 @@ def _get_docstring_sections(docstring: str | None) -> set[str]:
         return set()
     params = set()
     in_args = False
-    for line in docstring.splitlines():
+    heading_indent = 0
+    lines = docstring.splitlines()
+    for i, line in enumerate(lines):
         stripped = line.strip()
         if _ARGS_HEADING.match(stripped):
             in_args = True
+            heading_indent = len(line) - len(line.lstrip())
             continue
         if in_args:
-            if not stripped or _END_HEADING.match(stripped):
+            if not stripped:
+                # A blank line between entries is common in Google style
+                # (jadx-mcp-server's search_classes); the section only ends
+                # at a blank line when what follows isn't indented under the
+                # heading anymore.
+                nxt = next((l for l in lines[i + 1:] if l.strip()), None)
+                if nxt is None or len(nxt) - len(nxt.lstrip()) <= heading_indent or _END_HEADING.match(nxt.strip()):
+                    in_args = False
+                continue
+            if _END_HEADING.match(stripped):
                 in_args = False
                 continue
             # allow a leading bullet marker ("- confirm: ..." / "* confirm: ...")
@@ -332,14 +344,17 @@ def _annotation_base_name(annotation: ast.expr | None) -> str | None:
 
 # Repo-local names for FastMCP's Context, e.g. `ScoreContext = Context[AppState, Any]`
 # (tskovlund/mcp-score). Set per scan by analyze_repo via _collect_context_aliases.
-_CONTEXT_NAMES: set[str] = {"Context"}
+# LangChain's `ToolRuntime` is injected and stripped from the tool schema the
+# same way (MODSetter/SurfSense's `runtime: ToolRuntime` on every @tool).
+_INJECTED_CONTEXT_TYPES = {"Context", "ToolRuntime"}
+_CONTEXT_NAMES: set[str] = set(_INJECTED_CONTEXT_TYPES)
 
 
 def _collect_context_aliases(trees: list[tuple[str, "ast.Module"]]) -> set[str]:
     """Module-level aliases of Context: `X = Context`, `X = Context[...]`,
     `X: TypeAlias = Context[...]` and `type X = Context[...]`. Name-based,
     like the rest of the Context handling."""
-    names = {"Context"}
+    names = set(_INJECTED_CONTEXT_TYPES)
 
     def base(value):
         if isinstance(value, ast.Subscript):
@@ -355,7 +370,7 @@ def _collect_context_aliases(trees: list[tuple[str, "ast.Module"]]) -> set[str]:
                 target, value = node.target, node.value
             elif type(node).__name__ == "TypeAlias":  # `type X = ...`, Python 3.12+
                 target, value = node.name, node.value
-            if isinstance(target, ast.Name) and base(value) == "Context":
+            if isinstance(target, ast.Name) and base(value) in _INJECTED_CONTEXT_TYPES:
                 names.add(target.id)
     return names
 

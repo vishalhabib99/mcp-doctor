@@ -27,7 +27,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--fix",
         action="store_true",
-        help="Apply safe, mechanical fixes in place (bare except, missing Args: stubs), then re-report",
+        help="Apply safe, mechanical fixes in place (None defaults typed nullable, missing Args: "
+        "entries, bare except), then re-report",
+    )
+    parser.add_argument(
+        "--diff",
+        action="store_true",
+        help="Print the fixes --fix would make as a unified diff (pipe to `git apply`) and change nothing",
     )
     parser.add_argument(
         "--diff-against",
@@ -51,6 +57,20 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     report = analyze_repo(root)
+
+    if args.diff:
+        import difflib
+
+        from .fix import plan_fixes
+
+        planned = plan_fixes(root, report)
+        for rel_file, (original, fixed) in planned.items():
+            sys.stdout.writelines(difflib.unified_diff(
+                original.splitlines(keepends=True), fixed.splitlines(keepends=True),
+                fromfile=f"a/{rel_file}", tofile=f"b/{rel_file}",
+            ))
+        print(f"{len(planned)} file(s) would change." if planned else "Nothing to fix.", file=sys.stderr)
+        return 0
 
     if args.fix:
         from .fix import apply_fixes
