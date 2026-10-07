@@ -15,7 +15,7 @@
 
 - **No install:** [open a scan request](https://github.com/vishalhabib99/mcp-doctor/issues/new?template=scan-request.yml) with your server's GitHub URL. A bot replies with the report in a few minutes. It reads the code only and never runs it. Security findings are posted as counts only, since the issue is public.
 - **CLI:** `pip install mcp-server-lint`, then `mcp-doctor path/to/your/server`
-- **CI:** `uses: vishalhabib99/mcp-doctor@v1` fails a PR that drops below your score ([details](#github-action))
+- **CI:** `uses: vishalhabib99/mcp-doctor@v1` comments on each PR, suggests one-click fixes on the lines it changes, and can fail a PR that drops below your score ([details](#github-action))
 
 ## Why trust the grade
 
@@ -125,12 +125,24 @@ Deliberately doesn't touch the quality/security scores — those are properties 
 Gate PRs on server quality without installing anything yourself:
 
 ```yaml
-- uses: vishalhabib99/mcp-doctor@v1
-  with:
-    path: .              # default: repo root
-    fail-under: 70        # default: 0 (report only, don't fail the build)
-    comment: true          # default: true — posts/updates a PR comment with the report
+on: pull_request
+permissions:
+  contents: read
+  pull-requests: write   # for the report comment and fix suggestions
+jobs:
+  mcp-doctor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: vishalhabib99/mcp-doctor@v1
+        with:
+          path: .              # default: repo root
+          fail-under: 70        # default: 0 (report only, don't fail the build)
+          comment: true          # default: true — posts/updates a PR comment with the report
+          suggest-fixes: true    # default: true — one-click fix suggestions on the PR's lines
 ```
+
+**Fix suggestions:** on a pull request, the safe fixes from `--fix` (a `None` default typed as nullable, missing `Args:` entries, a bare `except:`) are posted as GitHub suggestion blocks on the lines the PR changes, so accepting one is a click. GitHub only allows suggestions inside the PR's diff, so fixes on other lines are counted in the report comment with the full patch, ready for `git apply`. A re-run never posts the same suggestion twice. On a PR from a fork, GitHub's token is read-only, so the suggestions and comment are skipped with a warning instead of failing the check.
 
 The report also gets written to the job summary either way. `@v1` tracks the latest `v1.x` release; pin an exact tag or commit SHA instead if you need stricter reproducibility.
 

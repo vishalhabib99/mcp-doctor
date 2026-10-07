@@ -124,7 +124,8 @@ runs:
           --edit-last || \
         gh pr comment "${{ github.event.pull_request.number }}" \
           --repo "${{ github.repository }}" \
-          --body-file mcp-doctor-comment.md
+          --body-file mcp-doctor-comment.md || \
+        echo "::warning::mcp-doctor: couldn't comment on the PR (a fork's PR gets a read-only token, or the workflow needs pull-requests: write); the report is in the job summary"
 
     - name: Enforce score gate
       if: ${{ steps.audit.outputs.gate_failed == '1' }}
