@@ -625,7 +625,7 @@ def _analyze_ts_tool(
         if schema_arg is None:
             # registerTool uses inputSchema; fastmcp's addTool uses parameters;
             # the defineTool/definePageTool wrapper style uses schema.
-            schema_key = pairs.get("inputSchema") or pairs.get("parameters") or pairs.get("schema")
+            schema_key = pairs.get("inputSchema") or pairs.get("parameters") or pairs.get("schema") or pairs.get("paramsSchema")
             if schema_key is not None:
                 schema_arg, schema_src = _resolve(schema_key, config_src, consts)
     else:
@@ -845,6 +845,44 @@ def _sdk_register_method(node, src: bytes) -> str:
     prop = node.child_by_field_name("property")
     method = _text(prop, src) if prop is not None else ""
     return method if method in ("tool", "registerTool") else ""
+
+
+# Tools registered from runtime values: `server.registerTool(tool.name, ...)`
+# / `.tool(def.name, ...)` in a loop, or a ListToolsRequestSchema handler
+# (whose tools a literal-only scan may not see).
+_DYNAMIC_REGISTRATION = re.compile(
+    r"\.(?:registerTool|tool)\(\s*[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+\s*[,)]"
+    r"|setRequestHandler\(\s*(?:[\w$]+\.)?ListToolsRequestSchema\b"
+)
+
+
+def _off_product_path(f: Path, root: Path) -> bool:
+    """Benchmark scripts, evals, examples, seed data and Storybook stories
+    restate tool lists without serving them (2026-10 census: DollhouseMCP's
+    scripts/benchmark-mcp-aql-tokens.ts, help-scout's evals/ prototype,
+    director's registry seed and .stories.tsx)."""
+    parts = f.relative_to(root).parts
+    return ".stories." in f.name or any(
+        p in ("scripts", "benchmarks", "benchmark", "evals", "eval", "examples", "example", "seed", "seeds")
+        for p in parts[:-1]
+    )
+
+
+def _not_a_tool_definition(node, pairs: dict, src: bytes) -> bool:
+    """Same-shaped objects that aren't tools, seen in the 2026-10 census:
+    resource definitions (`uri`/`uriTemplate`/`mimeType`, cyanheads/git-mcp-server),
+    OpenAPI parameters (`in`), and API parameter specs (`{ name, type: 'Query', schema, description }`,
+    tableau-mcp's zodios client) or any entry of a `parameters:` array."""
+    if pairs.keys() & {"uri", "uriTemplate", "mimeType", "in"}:
+        return True  # `in: 'query'`: an OpenAPI parameter (daiso-mcp's spec builder)
+    if "type" in pairs and pairs["type"].type == "string":
+        return True
+    holder = node.parent
+    if holder is not None and holder.type == "array" and holder.parent is not None and holder.parent.type == "pair":
+        key = holder.parent.child_by_field_name("key")
+        if key is not None and _text(key, src).strip("'\"") in ("parameters", "params", "args", "arguments", "properties", "fields"):
+            return True
+    return False
 
 
 def _module_key(path: Path) -> str:
@@ -1258,6 +1296,15 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
     # same shape is a docs/test fixture, and abap keeps 5 definitions nothing
     # imports. Test files are already out of `parsed`, so a fixture used only
     # by tests stays uncounted. `as const` / `satisfies` wrappers are looked through.
+    # When the repo registers tools only from runtime values (a loop's
+    # `server.registerTool(tool.name, ...)`, or a ListToolsRequestSchema
+    # handler that returns a variable or a `.map` over one), a definition
+    # object needs no handler key and may use `schema`/`parameters`/
+    # `paramsSchema` for its schema, or sit in `new SomeTool({...})`
+    # (2026-10 census: postman, tableau, reddit-mcp-buddy, memory-bank-mcp
+    # and others, 0 found before). Without that evidence the old, stricter
+    # shape still applies, so a docs or OpenAI-function fixture can't match.
+    dynamic_registration = any(_DYNAMIC_REGISTRATION.search(src.decode("utf-8", errors="ignore")) for _, _, src in parsed)
     imported = _imported_names(parsed)
     known_names = {fd.name for fd in findings}
     for f, file_root, src in parsed:
@@ -1269,10 +1316,18 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
             holder = node.parent
             while holder is not None and holder.type in ("as_expression", "satisfies_expression", "parenthesized_expression"):
                 holder = holder.parent
-            if holder is None or holder.type not in ("array", "variable_declarator"):
+            in_new = (
+                dynamic_registration and holder is not None and holder.type == "arguments"
+                and holder.parent is not None and holder.parent.type == "new_expression"
+            )
+            if holder is None or (holder.type not in ("array", "variable_declarator") and not in_new):
                 continue
             pairs = _object_pairs(node, src)
-            if not {"name", "description", "inputSchema"} <= pairs.keys():
+            schema_keys = ("inputSchema", "schema", "parameters", "paramsSchema") if dynamic_registration else ("inputSchema",)
+            schema_key = next((k for k in schema_keys if k in pairs), None)
+            if not {"name", "description"} <= pairs.keys() or schema_key is None:
+                continue
+            if dynamic_registration and _not_a_tool_definition(node, pairs, src):
                 continue
             used_export = (
                 holder.type == "variable_declarator"
@@ -1281,20 +1336,21 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
                 and holder.parent.parent.type == "export_statement"
                 and (_module_key(f), _text(holder.child_by_field_name("name"), src)) in imported
             )
-            if not used_export and not pairs.keys() & {"handler", "run", "execute"}:
+            strict = used_export or bool(pairs.keys() & {"handler", "run", "execute"})
+            if not strict and not (dynamic_registration and not _off_product_path(f, root)):
                 continue  # hustcc/mcp-echarts names its handler `run`
-            name_val = _string_value(pairs["name"], src)
+            name_val = _resolve_str(pairs["name"], src, consts)
             if name_val is None or name_val in known_names:
                 continue  # dynamic name, or already reported by another style
             known_names.add(name_val)
             # Raw JSON Schema (`{ type: 'object', properties }`, as abap uses)
             # is read as JSON Schema; reading it as a Zod shape counted `type`
             # and `properties` as two undescribed params.
-            schema, schema_src = _resolve(pairs["inputSchema"], src, consts)
+            schema, schema_src = _resolve(pairs[schema_key], src, consts)
             if schema is not None and schema.type == "object" and "properties" in _object_pairs(schema, schema_src):
                 findings.append(
                     _analyze_json_schema_tool(
-                        name_val, pairs["description"], pairs["inputSchema"], src, consts, src,
+                        name_val, pairs["description"], pairs[schema_key], src, consts, src,
                         rel, node.start_point[0] + 1,
                     )
                 )

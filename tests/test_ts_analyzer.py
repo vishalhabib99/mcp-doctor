@@ -761,7 +761,10 @@ def test_same_name_declared_twice_in_one_file_is_not_resolved(tmp_path):
         });
         """)
     findings, _ = find_ts_tools(tmp_path)
-    assert findings == []
+    # `tools` stays unresolved. Since bug #84 the definition object itself is
+    # found (the repo has a ListTools handler), so the one real tool is
+    # reported once, from its own literal, not from the wrong `tools`.
+    assert [(f.name, f.line) for f in findings] == [("a_tool", 8)]
 
 
 def test_tool_inside_a_plain_tests_directory_is_excluded(tmp_path):
@@ -1488,3 +1491,81 @@ def test_mjs_and_cjs_servers_are_scanned(tmp_path):
         """)
     findings, _ = find_ts_tools(tmp_path)
     assert sorted(f.name for f in findings) == ["list_clips", "make_clip"]
+
+
+def test_definition_objects_registered_in_a_loop_need_no_handler(tmp_path):
+    # Bug #84, from the 2026-10 census (tableau-mcp, agenticmail, anki-mcp-server,
+    # circleci and others, 0 found before): tools registered only through
+    # runtime values, with definition objects that use `schema`/`paramsSchema`,
+    # an `as const` name, no handler key, or sit in `new SomeTool({...})`.
+    write(tmp_path, "src/tools.ts", """
+        export const TOOLS = [
+          { name: "send_email" as const, description: "Send an email to one or more people.", schema: { to: z.string() } },
+          { name: "list_inbox", description: "List the newest messages in the inbox.", parameters: { type: "object", properties: {} } },
+        ];
+        export const listViews = new WebTool({
+          name: "list-views",
+          description: "List the views on a Tableau site.",
+          paramsSchema: { filter: z.string().optional() },
+          callback: async () => ({}),
+        });
+        """)
+    write(tmp_path, "src/server.ts", """
+        import { TOOLS } from "./tools.js";
+        for (const tool of TOOLS) {
+          server.registerTool(tool.name, { description: tool.description, inputSchema: tool.schema }, run);
+        }
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert sorted(f.name for f in findings) == ["list-views", "list_inbox", "send_email"]
+
+
+def test_loop_registration_skips_resources_and_api_parameters(tmp_path):
+    # Same-shaped objects that aren't tools: a resource definition
+    # (git-mcp-server), zodios query parameters (tableau-mcp), an OpenAPI
+    # parameter (daiso-mcp), and anything in a `parameters:` array.
+    write(tmp_path, "src/defs.ts", """
+        export const workingDir = {
+          name: "git-working-directory", description: "The session's working directory.",
+          uriTemplate: "git://working-directory", paramsSchema: Params,
+        };
+        export const paging = [
+          { name: "pageSize", type: "Query", schema: z.number(), description: "Page size." },
+        ];
+        export const specParams = [
+          { name: "q", in: "query", schema: { type: "string" }, description: "Search text." },
+        ];
+        export const endpoint = {
+          path: "/views",
+          parameters: [{ name: "filter", schema: z.string(), description: "Filter expression." }],
+        };
+        """)
+    # Benchmarks, evals and Storybook stories restate tool lists without
+    # serving them (DollhouseMCP, help-scout-mcp-server, director).
+    write(tmp_path, "scripts/benchmark-tokens.ts", """
+        const TOOLS = [{ name: "browse", description: "Browse the collection.", inputSchema: {} }];
+        """)
+    write(tmp_path, "src/components/tool-sheet.stories.tsx", """
+        export const storyTools = [{ name: "fetch", description: "Fetch a URL.", schema: {} }];
+        """)
+    write(tmp_path, "src/server.ts", """
+        server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert findings == []
+
+
+def test_handlerless_definition_needs_dynamic_registration(tmp_path):
+    # Without a loop or ListTools handler, the old strict shape applies: a
+    # `{ name, description, schema }` object alone could be a docs fixture
+    # or an OpenAI function definition.
+    write(tmp_path, "src/openai.ts", """
+        export const functions = [
+          { name: "get_weather", description: "Get the weather for a city.", schema: { city: z.string() } },
+        ];
+        """)
+    write(tmp_path, "src/server.ts", """
+        server.registerTool("ping", { description: "Check the server is up.", inputSchema: {} }, async () => ({ content: [] }));
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert [f.name for f in findings] == ["ping"]
