@@ -1557,4 +1557,188 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
                 finding.has_try_except = True
             findings.append(finding)
 
+    findings.extend(_module_per_tool_findings(parsed, root, global_consts, {fd.name for fd in findings}))
     return findings, unparseable
+
+
+def _member_path(node, src: bytes) -> tuple[str, list[str]] | None:
+    """`tool.metadata.name` -> ("tool", ["metadata", "name"]); `.shape` and a
+    wrapping one-argument call (`z.object(tool.schema)`,
+    `toolInputSchema(tool.inputSchema)`) are looked through."""
+    while node is not None and node.type == "call_expression":
+        args = node.child_by_field_name("arguments")
+        inner = [c for c in args.named_children] if args is not None else []
+        if len(inner) != 1:
+            return None
+        node = inner[0]
+    props: list[str] = []
+    while node is not None and node.type == "member_expression":
+        prop = node.child_by_field_name("property")
+        if prop is None or prop.type != "property_identifier":
+            return None
+        props.append(_text(prop, src))
+        node = node.child_by_field_name("object")
+    if node is None or node.type != "identifier" or not props:
+        return None
+    props.reverse()
+    if props[-1] == "shape" and len(props) > 1:
+        props.pop()
+    return _text(node, src), props
+
+
+def _is_runtime_binding(site, name: str, src: bytes) -> bool:
+    """`name` is a loop variable (`for (const tool of tools)`) or a parameter
+    of a function enclosing `site` (`tools.map((tool) => ...)`)."""
+    node = site
+    while node is not None:
+        if node.type in ("for_in_statement",):
+            left = node.child_by_field_name("left")
+            if left is not None and name in re.findall(r"[A-Za-z_$][\w$]*", _text(left, src)):
+                return True
+        if node.type in ("arrow_function", "function_expression", "function_declaration", "method_definition"):
+            params = node.child_by_field_name("parameters") or node.child_by_field_name("parameter")
+            if params is not None and name in re.findall(r"[A-Za-z_$][\w$]*", _text(params, src).split(":")[0] if params.type == "identifier" else _text(params, src)):
+                return True
+        node = node.parent
+    return False
+
+
+def _module_per_tool_signatures(parsed) -> set[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...] | None]]:
+    """(name path, description path, schema path) read off registrations that
+    take every field from one runtime tool object: `server.registerTool(
+    tool.method, { description: tool.description, inputSchema:
+    tool.parameters.shape }, ...)` (postmanlabs/postman-mcp-server), or a
+    ListTools handler's `tools.map((tool) => ({ name: tool.metadata.name,
+    description: tool.metadata.description, inputSchema: ... }))`
+    (vercel/next-devtools-mcp). The paths say which exports a tool module has."""
+    sigs = set()
+    for _f, file_root, src in parsed:
+        for node in _walk(file_root):
+            name_node = config = None
+            if node.type == "call_expression":
+                fn = node.child_by_field_name("function")
+                prop = fn.child_by_field_name("property") if fn is not None and fn.type == "member_expression" else None
+                if prop is None or _text(prop, src) not in ("registerTool", "tool"):
+                    continue
+                args = [c for c in node.child_by_field_name("arguments").named_children]
+                if len(args) < 2:
+                    continue
+                name_node = args[0]
+                config = args[1] if args[1].type == "object" else None
+                desc_node = _object_pairs(config, src).get("description") if config is not None else (
+                    args[1] if args[1].type == "member_expression" else None)
+            elif node.type == "object":
+                pairs = _object_pairs(node, src)
+                if "name" not in pairs or "description" not in pairs:
+                    continue
+                name_node, config, desc_node = pairs["name"], node, pairs["description"]
+            else:
+                continue
+            name_path = _member_path(name_node, src)
+            desc_path = _member_path(desc_node, src) if desc_node is not None else None
+            if name_path is None or desc_path is None or name_path[0] != desc_path[0]:
+                continue
+            if not _is_runtime_binding(node, name_path[0], src):
+                continue  # `constants.LIST_TERMINALS_NAME` (Adyen/adyen-mcp): a module, not a tool object
+            schema_path = None
+            if config is not None:
+                pairs = _object_pairs(config, src)
+                schema_val = next((pairs[k] for k in ("inputSchema", "parameters", "schema") if k in pairs), None)
+                sp = _member_path(schema_val, src) if schema_val is not None else None
+                if sp is not None and sp[0] == name_path[0]:
+                    schema_path = tuple(sp[1])
+            sigs.add((tuple(name_path[1]), tuple(desc_path[1]), schema_path))
+    return sigs
+
+
+def _module_per_tool_findings(parsed, root: Path, global_consts: dict, known_names: set) -> list[ToolFinding]:
+    """One tool per module that exports what a runtime registration reads
+    (see `_module_per_tool_signatures`): postman's 216 `src/tools/*.ts`, each
+    `export const method = '...'`, `description`, `parameters = z.object(...)`,
+    loaded with readdir + import() (0 found before). A module counts only when
+    every path resolves to its own top-level exports and the name is a literal."""
+    sigs = _module_per_tool_signatures(parsed)
+    if not sigs:
+        return []
+    # A module another module imports by name is a helper or a sub-tool
+    # (postman's getCollection/getCollectionMap.ts, dispatched by
+    # getCollection), not a module the loader registers on its own; a
+    # namespace import (`import * as browserEval`, next-devtools) still counts.
+    files_by_key = {str(f.with_suffix("")): f for f, _, _ in parsed}
+
+    def target_key(importer: Path, spec: str) -> str:
+        # Exact path, not `_module_key`: `getCollection.ts` and
+        # `getCollection/index.ts` must stay two modules here.
+        p = (importer.parent / spec).resolve()
+        p = p.with_suffix("") if p.suffix in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs") else p
+        return str(p) if str(p) in files_by_key else str(p / "index")
+
+    named_imported = {
+        target_key(f, m.group(2))
+        for f, _, src in parsed for m in _IMPORT_NAMED.finditer(src.decode("utf-8", errors="ignore"))
+    }
+    local_exports = {}
+    for f, file_root, src in parsed:
+        exports = {}
+        for node in file_root.named_children:
+            if node.type != "export_statement":
+                continue
+            # Only `export const x = ...` itself: not locals inside an
+            # exported function (1mcp-app/agent's `const name = arg.name || 'argument'`).
+            for lexical in node.named_children:
+                if lexical.type != "lexical_declaration":
+                    continue
+                for decl in lexical.named_children:
+                    if decl.type == "variable_declarator" and decl.child_by_field_name("value") is not None:
+                        exports[_text(decl.child_by_field_name("name"), src)] = (decl.child_by_field_name("value"), file_root, src)
+        local_exports[str(f.with_suffix(""))] = exports
+    out = []
+    for f, file_root, src in parsed:
+        if _off_product_path(f, root) or str(f.with_suffix("")) in named_imported:
+            continue
+        exports = {k: v[0] for k, v in local_exports.get(str(f.with_suffix("")), {}).items()}
+        if not exports:
+            # A file that only re-exports one module's tool fields
+            # (`export { method, description, parameters } from './getCollection/index.js'`,
+            # postman's top-level getCollection.ts) stands for that module.
+            targets = [
+                local_exports.get(target_key(f, m.group(2)), {})
+                for m in _IMPORT_NAMED.finditer(src.decode("utf-8", errors="ignore"))
+                if m.group(0).startswith("export")
+            ]
+            if len(targets) == 1 and targets[0]:
+                exports = {k: v[0] for k, v in targets[0].items()}
+                _, file_root, src = next(iter(targets[0].values()))
+        if not exports:
+            continue
+        consts = {**global_consts, **_collect_const_objects(file_root, src)}
+
+        def get(path):
+            node = exports.get(path[0])
+            for key in path[1:]:
+                node, _ = _resolve(node, src, consts)
+                if node is None or node.type != "object":
+                    return None
+                node = _object_pairs(node, src).get(key)
+            return node
+
+        for name_path, desc_path, schema_path in sigs:
+            name_node, desc_node = get(name_path), get(desc_path)
+            if name_node is None or desc_node is None:
+                continue
+            name_node, name_src = _resolve(name_node, src, consts)
+            name_val = _template_name(name_node, name_src, consts)
+            if not name_val or name_val in known_names:
+                continue
+            known_names.add(name_val)
+            line = name_node.start_point[0] + 1
+            schema_node = get(schema_path) if schema_path else None
+            schema, schema_src = _resolve(schema_node, src, consts) if schema_node is not None else (None, src)
+            if schema is not None and schema.type == "object" and "properties" in _object_pairs(schema, schema_src):
+                out.append(_analyze_json_schema_tool(name_val, desc_node, schema_node, src, consts, src, str(f.relative_to(root)), line))
+            else:
+                desc_resolved, desc_src = _resolve(desc_node, src, consts)
+                out.append(_analyze_ts_tool(name_val, desc_resolved, desc_src, schema, schema_src, None, consts,
+                                            str(f.relative_to(root)), line))
+            break
+    return out

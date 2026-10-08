@@ -1628,3 +1628,112 @@ def test_loop_registration_resolves_constant_prefixes_and_used_exports(tmp_path)
         """)
     findings, _ = find_ts_tools(tmp_path)
     assert sorted(f.name for f in findings) == ["AoT-fast", "aidex_init", "init_project"]
+
+
+def test_module_per_tool_loaded_at_runtime(tmp_path):
+    # Bug #87, from postmanlabs/postman-mcp-server (0 of 213 found): every
+    # src/tools/*.ts exports `method`, `description`, `parameters`; index.ts
+    # loads them with readdir + import() and registers
+    # `server.registerTool(tool.method, { description: tool.description,
+    # inputSchema: tool.parameters.shape }, ...)`. A top-level file that only
+    # re-exports a sub-folder's module counts; the sub-folder's modules that
+    # are imported by name (sub-tools, helpers) don't.
+    write(tmp_path, "src/tools/createCollection.ts", """
+        export const method = 'createCollection';
+        export const description = 'Create a collection in a workspace.';
+        export const parameters = z.object({ workspace: z.string().describe('Workspace id.') });
+        export async function handler() {}
+        """)
+    write(tmp_path, "src/tools/getCollection.ts", """
+        export { method, description, parameters, handler } from './getCollection/index.js';
+        """)
+    write(tmp_path, "src/tools/getCollection/index.ts", """
+        import { handler as mapHandler } from './getCollectionMap.js';
+        export const method = 'getCollection';
+        export const description = 'Get a collection, or its map.';
+        export const parameters = z.object({ id: z.string() });
+        """)
+    write(tmp_path, "src/tools/getCollection/getCollectionMap.ts", """
+        export const method = 'getCollectionMap';
+        export const description = 'Sub-tool: the map variant.';
+        export const parameters = z.object({});
+        export async function handler() {}
+        """)
+    write(tmp_path, "src/index.ts", """
+        const tools = await loadAllTools();
+        for (const tool of tools) {
+          server.registerTool(tool.method, { description: tool.description, inputSchema: tool.parameters.shape }, run);
+        }
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert sorted((f.name, f.file) for f in findings) == [
+        ("createCollection", "src/tools/createCollection.ts"),
+        ("getCollection", "src/tools/getCollection.ts"),
+    ]
+    create = next(f for f in findings if f.name == "createCollection")
+    assert create.param_count == 1 and create.has_docstring_params
+
+
+def test_module_per_tool_with_nested_metadata_and_namespace_imports(tmp_path):
+    # vercel/next-devtools-mcp: `import * as browserEval from "./tools/browser-eval.js"`
+    # and a ListTools handler mapping `tool.metadata.name` / `.description`.
+    write(tmp_path, "src/tools/browser-eval.ts", """
+        export const inputSchema = { action: z.string().describe('What to do.') };
+        export const metadata = { name: 'browser_eval', description: 'Drive a browser for this project.' };
+        """)
+    write(tmp_path, "src/index.ts", """
+        import * as browserEval from "./tools/browser-eval.js";
+        const tools = [browserEval];
+        server.setRequestHandler(ListToolsRequestSchema, async () => ({
+          tools: tools.map((tool) => ({
+            name: tool.metadata.name,
+            description: tool.metadata.description,
+            inputSchema: toolInputSchema(tool.inputSchema),
+          })),
+        }));
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert [f.name for f in findings] == ["browser_eval"]
+
+
+def test_module_per_tool_needs_a_runtime_registration(tmp_path):
+    # Without a registration reading `tool.method`, modules that happen to
+    # export `method` and `description` are not tools.
+    write(tmp_path, "src/http/routes.ts", """
+        export const method = 'GET';
+        export const description = 'List users.';
+        """)
+    write(tmp_path, "src/server.ts", """
+        server.registerTool("ping", { description: "Check the server is up.", inputSchema: {} }, async () => ({ content: [] }));
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert [f.name for f in findings] == ["ping"]
+
+
+def test_module_per_tool_ignores_namespace_roots_and_function_locals(tmp_path):
+    # Found by the 501-repo before/after for bug #87: Adyen/adyen-mcp's
+    # `{ name: constants.LIST_TERMINALS_NAME, description: constants.X }` reads
+    # a module, not a runtime tool object; 1mcp-app/agent's exported function
+    # holds a local `const name = arg.name || 'argument'`.
+    write(tmp_path, "src/constants.ts", """
+        export const LIST_TERMINALS_NAME = 'list_terminals';
+        export const LIST_TERMINALS_DESCRIPTION = 'List the payment terminals.';
+        """)
+    write(tmp_path, "src/tools.ts", """
+        import * as constants from './constants.js';
+        export const listTerminals = { name: constants.LIST_TERMINALS_NAME, description: constants.LIST_TERMINALS_DESCRIPTION };
+        """)
+    write(tmp_path, "src/prompt.ts", """
+        export function ask(arg) {
+          const name = arg.name || 'argument';
+          const description = 'Prompt text.';
+          return { name, description };
+        }
+        """)
+    write(tmp_path, "src/server.ts", """
+        for (const tool of tools) {
+          server.registerTool(tool.name, { description: tool.description }, run);
+        }
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert [f.name for f in findings] == []
