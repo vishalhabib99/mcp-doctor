@@ -1770,3 +1770,30 @@ def test_enum_member_tool_names_and_router_schema_objects(tmp_path):
         """)
     findings, _ = find_ts_tools(tmp_path)
     assert sorted(f.name for f in findings) == ["get-pointed-element", "list_projects"]
+
+
+def test_same_const_name_in_many_files_resolves_per_file(tmp_path):
+    # Bug #90, from cablate/mcp-google-map (1 of 18 found): every tool file
+    # declares `const NAME = "maps_..."` and exports `{ NAME, DESCRIPTION, SCHEMA }`;
+    # config.ts lists `{ name: AirQuality.NAME, ... }`. The repo-wide first
+    # `NAME` won, so all 18 resolved to one name and de-duplicated to 1.
+    for cls, tool in (("AirQuality", "maps_air_quality"), ("Geocode", "maps_geocode")):
+        write(tmp_path, f"src/tools/{cls}.ts", f"""
+            const NAME = "{tool}";
+            const DESCRIPTION = "Description of {tool}.";
+            const SCHEMA = {{ q: z.string().describe("Query.") }};
+            export const {cls} = {{ NAME, DESCRIPTION, SCHEMA }};
+            """)
+    write(tmp_path, "src/config.ts", """
+        import { AirQuality } from "./tools/AirQuality.js";
+        import { Geocode } from "./tools/Geocode.js";
+        export const tools = [
+          { name: AirQuality.NAME, description: AirQuality.DESCRIPTION, schema: AirQuality.SCHEMA },
+          { name: Geocode.NAME, description: Geocode.DESCRIPTION, schema: Geocode.SCHEMA },
+        ];
+        """)
+    write(tmp_path, "src/server.ts", """
+        tools.forEach((tool) => server.registerTool(tool.name, { description: tool.description, inputSchema: z.object(tool.schema) }, run));
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert sorted(f.name for f in findings) == ["maps_air_quality", "maps_geocode"]

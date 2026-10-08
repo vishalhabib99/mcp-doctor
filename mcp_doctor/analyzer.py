@@ -1465,6 +1465,7 @@ class _RepoFunctions:
         self.methods: dict[str, list[tuple[FuncDef, str]]] = {}
         self.class_methods: dict[str, list[tuple[dict[str, FuncDef], str]]] = {}
         self.string_tuples: dict[str, dict[str, list[str]]] = {}
+        self._bindings: dict[int, dict] = {}
         for rel, tree in trees:
             self.top_level[rel] = {
                 n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -1508,7 +1509,12 @@ class _RepoFunctions:
         own = self.string_tuples.get(importer, {}).get(name)
         if own is not None:
             return own
-        binding = _import_bindings(tree).get(name)
+        # Once per file: a loop-by-loop rescan made v1.15.4 walk aming-claw's
+        # files ~1,800 extra times (bug #91).
+        bindings = self._bindings.get(id(tree))
+        if bindings is None:
+            bindings = self._bindings[id(tree)] = _import_bindings(tree)
+        binding = bindings.get(name)
         if binding is None or binding[2] is None:
             return None
         target = self.module_file(importer, binding[0], binding[1])

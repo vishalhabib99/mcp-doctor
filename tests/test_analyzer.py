@@ -2724,3 +2724,18 @@ def test_plain_function_writing_a_read_dict_is_not_a_tool_decorator(tmp_path):
             return []
         """)
     assert [t.name for t in analyze_repo(tmp_path).tools] == []
+
+
+def test_import_bindings_parsed_once_per_file(tmp_path, monkeypatch):
+    # Bug #91: v1.15.4's getattr-loop support (#86) re-parsed a file's imports
+    # for every `for x in NAME` loop, ~12x slower on amingclawdev/aming-claw
+    # (691 files, ~1,900 loops: 29s on v1.15.3, ~355s on v1.15.4).
+    import mcp_doctor.analyzer as analyzer
+    loops = "\n".join(f"for x{i} in NAMES:\n    pass" for i in range(50))
+    write(tmp_path, "server.py", "from mcp.server import MCPServer\nfrom names import NAMES\n" + loops + "\n")
+    write(tmp_path, "names.py", "NAMES = ('a', 'b')\n")
+    calls = []
+    real = analyzer._import_bindings
+    monkeypatch.setattr(analyzer, "_import_bindings", lambda tree: calls.append(1) or real(tree))
+    analyze_repo(tmp_path)
+    assert len(calls) <= 5  # a handful of other callers, not one per loop
