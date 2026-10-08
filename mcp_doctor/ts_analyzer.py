@@ -479,6 +479,10 @@ def _module_exported_consts(module_root, module_src: bytes) -> dict[str, tuple["
     return out
 
 
+# id(src buffer) -> that file's own consts, set per `find_ts_tools` run.
+_FILE_CONSTS: dict[int, dict[str, tuple["Node", bytes]]] = {}
+
+
 def _resolve(node, src: bytes, consts: dict[str, tuple["Node", bytes]], depth: int = 0):
     """Resolve an identifier/member-expression/`||`-default down to a literal
     node, returning (resolved_node, its_src) since resolution can cross files."""
@@ -491,7 +495,13 @@ def _resolve(node, src: bytes, consts: dict[str, tuple["Node", bytes]], depth: i
         inner = node.children[0] if node.children else None
         return _resolve(inner, src, consts, depth + 1) if inner is not None else (node, src)
     if node.type in ("identifier", "shorthand_property_identifier"):
-        target = consts.get(node.text.decode("utf-8", errors="ignore"))
+        name = node.text.decode("utf-8", errors="ignore")
+        # Resolve against the file the identifier is in first: `AirQuality.NAME`
+        # leads into airQuality.ts, whose own `const NAME` is the one meant, not
+        # the repo-wide first `NAME` (cablate/mcp-google-map: every tool came
+        # out as maps_air_quality, bug #90).
+        own = _FILE_CONSTS.get(id(src))
+        target = own.get(name) if own is not None and name in own else consts.get(name)
         if target is not None:
             target_node, target_src = target
             return _resolve(target_node, target_src, consts, depth + 1)
@@ -998,8 +1008,11 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
     # Name-based, not full import-resolved — same simplification already used
     # for the Python side's cross-file Field-alias registry.
     global_consts: dict[str, tuple["Node", bytes]] = {}
+    _FILE_CONSTS.clear()
     for _f, file_root, file_src in parsed:
-        for const_name, entry in _collect_const_objects(file_root, file_src).items():
+        own = _collect_const_objects(file_root, file_src)
+        _FILE_CONSTS[id(file_src)] = own
+        for const_name, entry in own.items():
             global_consts.setdefault(const_name, entry)
 
     # Maps each file's src buffer (by identity — buffers are never copied, only
