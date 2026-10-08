@@ -1209,21 +1209,50 @@ def _collect_tool_decorator_names(trees: list[tuple[str, ast.Module]]) -> set[st
         )
         if adds_to_registry and any(_is_tool_registration_call(n) for n in ast.walk(tree)):
             names.add(fn.name)
+    # Methods of a registry class count too: haris-musa/excel-mcp-server's
+    # `@tools.reader("Read range")`, where `reader` returns
+    # `self._register(...)` and that returns a nested `decorate(fn)` that
+    # calls `self.server.tool(...)(fn)` (26 tools, 0 found before).
+    methods = [
+        n for _, tree in trees for cls in ast.walk(tree) if isinstance(cls, ast.ClassDef)
+        for n in cls.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    candidates = [fn for _, fn in top_level] + methods
+    for fn in candidates:
+        if fn.name not in FASTMCP_DECORATOR_NAMES and _returns_registering_closure(fn):
+            names.add(fn.name)
     changed = True
     while changed:
         changed = False
-        for _, fn in top_level:
+        for fn in candidates:
             if fn.name in names or fn.name in FASTMCP_DECORATOR_NAMES:
                 continue
             for n in ast.walk(fn):
                 if not (isinstance(n, ast.Return) and isinstance(n.value, ast.Call)):
                     continue
                 callee = n.value.func
-                if _is_tool_registration_call(n.value) or (isinstance(callee, ast.Name) and callee.id in names):
+                if (
+                    _is_tool_registration_call(n.value)
+                    or (isinstance(callee, ast.Name) and callee.id in names)
+                    or (isinstance(callee, ast.Attribute) and isinstance(callee.value, ast.Name)
+                        and callee.value.id == "self" and callee.attr in names)
+                ):
                     names.add(fn.name)
                     changed = True
                     break
     return names
+
+
+def _returns_registering_closure(fn: FuncDef) -> bool:
+    """`fn` returns a function it defines that registers a tool, the usual
+    decorator-factory shape: `def decorate(f): server.tool(...)(f); return f`
+    then `return decorate`."""
+    nested = {n.name: n for n in fn.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    return any(
+        isinstance(r, ast.Return) and isinstance(r.value, ast.Name) and r.value.id in nested
+        and any(_is_tool_registration_call(c) for c in ast.walk(nested[r.value.id]))
+        for r in fn.body
+    )
 
 
 def _find_fastmcp_tools(

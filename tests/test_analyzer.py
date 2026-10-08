@@ -2400,6 +2400,52 @@ def test_registry_decorator_registered_through_mcp_tool_counts(tmp_path):
     assert names == ["get_alert", "list_alerts"]
 
 
+def test_registry_class_method_decorators_count(tmp_path):
+    # Bug #82, from haris-musa/excel-mcp-server (0 of 37 found): methods of a
+    # registry class return `self._register(...)`, which returns a nested
+    # `decorate(fn)` that calls `self.server.tool(...)(fn)`.
+    write(tmp_path, "registry.py", """
+        class ToolRegistry:
+            def __init__(self, server):
+                self.server = server
+
+            def reader(self, title):
+                return self._register(title, True)
+
+            def writer(self, title):
+                return self._register(title, False)
+
+            def _register(self, title, read_only):
+                def decorate(function):
+                    self.server.tool(title=title)(function)
+                    return function
+                return decorate
+
+            def cached(self, ttl):
+                def decorate(function):
+                    return function
+                return decorate
+        """)
+    write(tmp_path, "data_tools.py", """
+        def register(tools, workspace):
+            @tools.reader("Read range")
+            def read_range(path: str) -> str:
+                \"\"\"Read cell values from a range in a workbook.\"\"\"
+                return path
+
+            @tools.writer("Write range")
+            def write_range(path: str, values: list) -> str:
+                \"\"\"Write values into a range, replacing what is there.\"\"\"
+                return path
+
+            @tools.cached(60)
+            def not_a_tool(path: str) -> str:
+                return path
+        """)
+    names = sorted(t.name for t in analyze_repo(tmp_path).tools)
+    assert names == ["read_range", "write_range"]
+
+
 def test_collecting_decorator_without_tool_registration_is_not_a_tool(tmp_path):
     # Same collect-into-a-set shape, but nothing registers the set as tools.
     write(tmp_path, "plugins.py", """
