@@ -1737,3 +1737,36 @@ def test_module_per_tool_ignores_namespace_roots_and_function_locals(tmp_path):
         """)
     findings, _ = find_ts_tools(tmp_path)
     assert [f.name for f in findings] == []
+
+
+def test_enum_member_tool_names_and_router_schema_objects(tmp_path):
+    # Bug #89, two 0-tool repos from the 2026-10 census: etsd-tech/mcp-pointer
+    # names its tool with a string enum member (`MCPToolName.GET_POINTED_ELEMENT`),
+    # and alioshr/memory-bank-mcp registers `router.setTool({ schema: { name,
+    # description, inputSchema }, handler })`, listed by a ListTools handler.
+    write(tmp_path, "src/mcp-service.ts", """
+        enum MCPToolName {
+          GET_POINTED_ELEMENT = 'get-pointed-element',
+        }
+        class Service {
+          start() { this.server.setRequestHandler(ListToolsRequestSchema, this.handleListTools.bind(this)); }
+          private async handleListTools() {
+            return { tools: [
+              { name: MCPToolName.GET_POINTED_ELEMENT, description: 'Get the element the user pointed at.',
+                inputSchema: { type: 'object', properties: {} } },
+            ] };
+          }
+        }
+        """)
+    write(tmp_path, "src/routes.ts", """
+        router.setTool({
+          schema: { name: "list_projects", description: "List all projects in the memory bank.",
+                    inputSchema: { type: "object", properties: {} } },
+          handler: listProjects,
+        });
+        router.setTool({
+          options: { name: "not_a_tool", description: "Router options.", inputSchema: {} },
+        });
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert sorted(f.name for f in findings) == ["get-pointed-element", "list_projects"]
