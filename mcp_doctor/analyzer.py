@@ -1169,23 +1169,81 @@ def _analyze_function_as_tool(
     return finding
 
 
+def _is_tool_registration_call(node: ast.AST) -> bool:
+    """`<x>.tool(...)`, e.g. `mcp.tool(meta=...)`."""
+    return (
+        isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        and node.func.attr in FASTMCP_DECORATOR_NAMES
+    )
+
+
+def _collect_tool_decorator_names(trees: list[tuple[str, ast.Module]]) -> set[str]:
+    """Names of a repo's own decorators that register a tool through
+    `mcp.tool`, so `@td_tool(scope=...)` counts like `@mcp.tool(...)`.
+    Two shapes, both from the 2026-10 census:
+    - a factory that returns `mcp.tool(...)` (twelvedata/mcp's
+      `td_tool`, 27 tools), or returns another such factory's call
+      (its `_local_only_tool` -> `td_tool(**kwargs)`);
+    - a decorator named like a tool that adds the function to a
+      module-level collection, in a module that also calls `.tool(` to
+      register that collection (panther-labs/mcp-panther's `mcp_tool`
+      plus `register_all_tools`, 36 tools).
+    Name-based like every other registry here."""
+    names: set[str] = set()
+    top_level = [
+        (tree, n) for _, tree in trees for n in tree.body
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    for tree, fn in top_level:
+        if "tool" not in fn.name.lower():
+            continue
+        module_names = {
+            t.id for n in tree.body if isinstance(n, (ast.Assign, ast.AnnAssign))
+            for t in (n.targets if isinstance(n, ast.Assign) else [n.target]) if isinstance(t, ast.Name)
+        }
+        adds_to_registry = any(
+            isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+            and n.func.attr in ("add", "append") and isinstance(n.func.value, ast.Name)
+            and n.func.value.id in module_names
+            for n in ast.walk(fn)
+        )
+        if adds_to_registry and any(_is_tool_registration_call(n) for n in ast.walk(tree)):
+            names.add(fn.name)
+    changed = True
+    while changed:
+        changed = False
+        for _, fn in top_level:
+            if fn.name in names or fn.name in FASTMCP_DECORATOR_NAMES:
+                continue
+            for n in ast.walk(fn):
+                if not (isinstance(n, ast.Return) and isinstance(n.value, ast.Call)):
+                    continue
+                callee = n.value.func
+                if _is_tool_registration_call(n.value) or (isinstance(callee, ast.Name) and callee.id in names):
+                    names.add(fn.name)
+                    changed = True
+                    break
+    return names
+
+
 def _find_fastmcp_tools(
     tree: ast.Module,
     file: str,
     alias_registry: dict[str, bool] | None = None,
     error_handling_registry: dict[str, bool] | None = None,
     plain_string_ok: bool = True,
+    decorator_names: set[str] = FASTMCP_DECORATOR_NAMES,
 ) -> list[ToolFinding]:
     findings = []
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         for dec in node.decorator_list:
-            call = _find_decorator_call(dec, FASTMCP_DECORATOR_NAMES)
+            call = _find_decorator_call(dec, decorator_names)
             if call is None:
                 # bare @mcp.tool with no parens still counts
                 attr = dec.attr if isinstance(dec, ast.Attribute) else (dec.id if isinstance(dec, ast.Name) else None)
-                if attr not in FASTMCP_DECORATOR_NAMES:
+                if attr not in decorator_names:
                     continue
                 findings.append(_analyze_function_as_tool(
                     node, file, alias_registry=alias_registry, error_handling_registry=error_handling_registry,
@@ -1326,10 +1384,16 @@ class _RepoFunctions:
     def __init__(self, trees: list[tuple[str, ast.Module]]):
         self.top_level: dict[str, dict[str, FuncDef]] = {}
         self.by_dotted: dict[str, list[str]] = {}
+        self.methods: dict[str, list[tuple[FuncDef, str]]] = {}
         for rel, tree in trees:
             self.top_level[rel] = {
                 n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
             }
+            for cls in ast.walk(tree):
+                if isinstance(cls, ast.ClassDef):
+                    for n in cls.body:
+                        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                            self.methods.setdefault(n.name, []).append((n, rel))
             parts = list(Path(rel).with_suffix("").parts)
             if parts and parts[-1] == "__init__":
                 parts = parts[:-1]
@@ -1353,6 +1417,14 @@ class _RepoFunctions:
             return None
         fn = self.top_level.get(target, {}).get(name)
         return (fn, target) if fn is not None else None
+
+    def unique_method(self, name: str) -> tuple[FuncDef, str] | None:
+        """The one method named `name` in the whole repo, if exactly one
+        class defines it: `self.mcp.tool(module.analyze_dns_packets)` in a
+        loop over plugin objects (mcpcap/mcpcap), where `module`'s class is
+        only known at runtime but the method name is unambiguous."""
+        defs = self.methods.get(name, [])
+        return defs[0] if len(defs) == 1 else None
 
 
 def _import_bindings(tree: ast.Module) -> dict[str, tuple[str | None, int, str | None]]:
@@ -1411,6 +1483,8 @@ def _resolve_function_ref(
             module, level, name = binding
             dotted = module if name is None else ".".join(p for p in (module, name) if p)
             return repo.function(file, dotted, level if name is not None else 0, ref.attr)
+        if repo is not None and not binding:
+            return repo.unique_method(ref.attr)
     return None
 
 
@@ -1424,6 +1498,43 @@ def _fastmcp_tool_classes(tree: ast.Module) -> set[str]:
             node.module == "fastmcp" or node.module.startswith(("fastmcp.", "mcp.server.fastmcp"))
         ):
             names.update(a.asname or a.name for a in node.names if a.name.endswith("Tool"))
+    return names
+
+
+def _repo_tool_subclasses(trees: list[tuple[str, ast.Module]]) -> set[str]:
+    """Names of a repo's own classes that subclass a FastMCP tool class,
+    directly or through each other, so `ToonFunctionTool.from_function(fn)`
+    counts like `FunctionTool.from_function(fn)` (keboola/mcp-server: every
+    tool goes through local `FunctionTool` subclasses)."""
+    classes = []
+    for _, tree in trees:
+        fastmcp_names = _fastmcp_tool_classes(tree)  # once per file: _models.py files hold thousands of classes
+        classes.extend((n, fastmcp_names) for n in ast.walk(tree) if isinstance(n, ast.ClassDef))
+    found: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for cls, fastmcp_names in classes:
+            if cls.name in found:
+                continue
+            if any(_class_bases_include(cls, b) for b in fastmcp_names | found):
+                found.add(cls.name)
+                changed = True
+    return found
+
+
+def _file_tool_classes(tree: ast.Module, custom_tool_classes: set[str]) -> set[str]:
+    """FastMCP tool class names usable in this file, including the repo's
+    own subclasses, defined here or imported (possibly under an alias:
+    keboola imports `PlainFunctionTool as FunctionTool`)."""
+    names = _fastmcp_tool_classes(tree)
+    if not custom_tool_classes:
+        return names
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name in custom_tool_classes:
+            names.add(node.name)
+        elif isinstance(node, ast.ImportFrom):
+            names.update(a.asname or a.name for a in node.names if a.name in custom_tool_classes)
     return names
 
 
@@ -1488,6 +1599,7 @@ def _find_direct_call_tools(
     repo: _RepoFunctions | None = None,
     imports_fastmcp: bool = True,
     repo_uses_fastmcp: bool = False,
+    custom_tool_classes: set[str] = frozenset(),
 ) -> list[ToolFinding]:
     """FastMCP's `.tool()` also supports a direct call form — the function
     passed as a positional argument rather than used as a decorator:
@@ -1503,7 +1615,7 @@ def _find_direct_call_tools(
     tool is only reported when its function resolves (the name is then the
     function's own, as FastMCP derives it); see `_resolve_function_ref`."""
     findings = []
-    tool_classes = _fastmcp_tool_classes(tree)
+    tool_classes = _file_tool_classes(tree, custom_tool_classes)
     # `for tool in (a, b, c): server.tool()(tool)` (tskovlund/mcp-score): a
     # loop variable over a literal tuple/list of function names stands for
     # each of them. Anything else a loop iterates is built at runtime, skipped.
@@ -1601,6 +1713,43 @@ def _property_has_desc(pv: ast.Dict) -> bool:
     return any(isinstance(k, ast.Constant) and k.value == "description" for k in pv.keys)
 
 
+def _self_attr_literal(tree: ast.Module, site: ast.AST, value: ast.expr | None) -> str | None:
+    """The string a `self.<attr>` at `site` holds, when its class fixes it:
+    a class attribute `attr = "x"`, an assignment `self.attr = "x"`, or a
+    handler class that passes its name up with `super().__init__("x")`
+    (the mcp-gsuite ToolHandler pattern, isdaniel/mcp_weather_server:
+    `Tool(name=self.name, ...)` in 8 handler classes, 0 found before).
+    Exactly one candidate, else None."""
+    if not (isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name) and value.value.id == "self"):
+        return None
+    cls = _enclosing_class(tree, site)
+    if cls is None:
+        return None
+    found: set[str] = set()
+    for n in cls.body:
+        if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == value.attr for t in n.targets):
+            if isinstance(n.value, ast.Constant) and isinstance(n.value.value, str):
+                found.add(n.value.value)
+    for n in ast.walk(cls):
+        if isinstance(n, ast.Assign) and isinstance(n.value, ast.Constant) and isinstance(n.value.value, str) and any(
+            isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name) and t.value.id == "self" and t.attr == value.attr
+            for t in n.targets
+        ):
+            found.add(n.value.value)
+        elif (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "__init__"
+              and isinstance(n.func.value, ast.Call) and isinstance(n.func.value.func, ast.Name)
+              and n.func.value.func.id == "super"):
+            # A positional first argument is the name (ToolHandler's only
+            # constructor argument); for any other attribute, a keyword only.
+            positional = n.args[0] if n.args and value.attr == "name" else None
+            first = positional or next(
+                (kw.value for kw in n.keywords if kw.arg in (value.attr, f"tool_{value.attr}")), None
+            )
+            if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                found.add(first.value)
+    return found.pop() if len(found) == 1 else None
+
+
 def _find_lowlevel_tools(tree: ast.Module, file: str) -> list[ToolFinding]:
     """Find Tool(name=..., description=..., inputSchema=...) constructor calls."""
     findings = []
@@ -1614,13 +1763,20 @@ def _find_lowlevel_tools(tree: ast.Module, file: str) -> list[ToolFinding]:
             continue
         name = _kwarg_str(node, "name")
         if name is None:
+            name = _self_attr_literal(tree, node, next((kw.value for kw in node.keywords if kw.arg == "name"), None))
+        if name is None:
             # A dynamic name (e.g. `Tool(name=tool.name, ...)` inside a loop over
             # a registry of tool objects — a real, common pattern for class-based
             # tool frameworks) can't be attributed to a single finding. Skip it
             # rather than emit a misleading "<unnamed>" report, matching the TS
             # analyzer's handling of an equally dynamic tool name.
             continue
-        description = _kwarg_str(node, "description") or ""
+        description = _kwarg_str(node, "description")
+        if description is None:
+            # pgtuner_mcp, SmartDB_MCP: `description=self.description`, a class attribute.
+            description = _self_attr_literal(
+                tree, node, next((kw.value for kw in node.keywords if kw.arg == "description"), None)
+            ) or ""
         schema_kw = next((kw for kw in node.keywords if kw.arg == "inputSchema"), None)
         param_count = 0
         typed_param_count = 0
@@ -1931,12 +2087,17 @@ def analyze_repo(root: Path) -> Report:
 
     repo_functions = _RepoFunctions(trees)
     repo_uses_fastmcp = any(_imports_fastmcp(tree) for _, tree in trees)
+    decorator_names = FASTMCP_DECORATOR_NAMES | _collect_tool_decorator_names(trees)
+    custom_tool_classes = _repo_tool_subclasses(trees)
     tools: list[ToolFinding] = []
     for rel, tree in trees:
-        tools.extend(_find_fastmcp_tools(tree, rel, alias_registry, error_handling_registry, plain_string_ok))
+        tools.extend(_find_fastmcp_tools(
+            tree, rel, alias_registry, error_handling_registry, plain_string_ok, decorator_names,
+        ))
         tools.extend(_find_direct_call_tools(
             tree, rel, alias_registry, error_handling_registry, plain_string_ok,
             repo=repo_functions, imports_fastmcp=_imports_fastmcp(tree), repo_uses_fastmcp=repo_uses_fastmcp,
+            custom_tool_classes=custom_tool_classes,
         ))
         tools.extend(_find_lowlevel_tools(tree, rel))
         tools.extend(_find_class_based_tools(tree, rel, alias_registry, error_handling_registry))

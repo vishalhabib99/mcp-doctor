@@ -2325,3 +2325,254 @@ def test_langchain_tool_runtime_param_is_injected_not_undocumented(tmp_path):
     tool = analyze_repo(tmp_path).tools[0]
     assert tool.param_count == 2
     assert not any(i.check == "param_docs" for i in tool.issues)
+
+
+def test_wrapper_decorator_returning_mcp_tool_counts(tmp_path):
+    # Bug #78, from twelvedata/mcp (0 of 27 tools found): a repo's own
+    # decorator factory that returns `mcp.tool(...)`, and a second one that
+    # returns the first.
+    write(tmp_path, "state.py", """
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        def td_tool(*, scope: str, **kwargs):
+            return mcp.tool(meta={"scope": scope}, **kwargs)
+
+        def _local_only_tool(**kwargs):
+            if not LOCAL:
+                return lambda fn: fn
+            return td_tool(**kwargs)
+        """)
+    write(tmp_path, "tools.py", """
+        from state import td_tool, _local_only_tool
+
+        @td_tool(scope="market")
+        def get_quote(symbol: str) -> str:
+            \"\"\"Get the latest quote for a ticker symbol.\"\"\"
+            return symbol
+
+        @_local_only_tool(name="login")
+        def oauth_login() -> str:
+            \"\"\"Start a browser login to the data API.\"\"\"
+            return "ok"
+
+        @some_other_decorator(scope="market")
+        def not_a_tool(x: str) -> str:
+            return x
+        """)
+    names = sorted(t.name for t in analyze_repo(tmp_path).tools)
+    assert names == ["get_quote", "login"]
+
+
+def test_registry_decorator_registered_through_mcp_tool_counts(tmp_path):
+    # Bug #78, from panther-labs/mcp-panther (0 of 36): `@mcp_tool` adds the
+    # function to a module-level set; `register_all_tools` passes each one to
+    # `mcp.tool(...)`.
+    write(tmp_path, "registry.py", """
+        _tool_registry = set()
+
+        def mcp_tool(func=None, *, name=None, description=None, annotations=None):
+            def decorator(func):
+                _tool_registry.add(func)
+                return func
+            if func is None:
+                return decorator
+            return decorator(func)
+
+        def register_all_tools(mcp_instance):
+            for tool in _tool_registry:
+                mcp_instance.tool(name=None)(tool)
+        """)
+    write(tmp_path, "alerts.py", """
+        from registry import mcp_tool
+
+        @mcp_tool
+        async def get_alert(alert_id: str) -> dict:
+            \"\"\"Get one alert by its ID.\"\"\"
+            return {}
+
+        @mcp_tool(annotations={"readOnlyHint": True})
+        async def list_alerts() -> list:
+            \"\"\"List open alerts, newest first.\"\"\"
+            return []
+        """)
+    names = sorted(t.name for t in analyze_repo(tmp_path).tools)
+    assert names == ["get_alert", "list_alerts"]
+
+
+def test_collecting_decorator_without_tool_registration_is_not_a_tool(tmp_path):
+    # Same collect-into-a-set shape, but nothing registers the set as tools.
+    write(tmp_path, "plugins.py", """
+        _hooks = []
+
+        def on_tool_event(func):
+            _hooks.append(func)
+            return func
+
+        @on_tool_event
+        def log_it(event: str) -> None:
+            \"\"\"Log a tool event.\"\"\"
+        """)
+    assert analyze_repo(tmp_path).tools == []
+
+
+def test_method_of_runtime_plugin_object_resolves_when_unique(tmp_path):
+    # Bug #79, from mcpcap/mcpcap (0 of 9): `self.mcp.tool(module.analyze_dns)`
+    # in a loop over plugin objects; the method name is defined once in the repo.
+    write(tmp_path, "modules/dns.py", """
+        class DNSModule:
+            def analyze_dns_packets(self, pcap_file: str) -> dict:
+                \"\"\"Analyze DNS packets in a PCAP file.
+
+                Args:
+                    pcap_file: Path or URL of the capture.
+                \"\"\"
+                try:
+                    return {}
+                except OSError as e:
+                    return {"error": str(e)}
+        """)
+    write(tmp_path, "server.py", """
+        from fastmcp import FastMCP
+
+        class Server:
+            def __init__(self, modules):
+                self.mcp = FastMCP("x")
+                self.modules = modules
+
+            def _register_tools(self):
+                for name, module in self.modules.items():
+                    if name == "dns":
+                        self.mcp.tool(module.analyze_dns_packets)
+        """)
+    tools = analyze_repo(tmp_path).tools
+    assert [t.name for t in tools] == ["analyze_dns_packets"]
+    assert tools[0].param_count == 1
+    assert tools[0].file == "modules/dns.py"
+
+
+def test_method_of_runtime_object_not_guessed_when_ambiguous(tmp_path):
+    write(tmp_path, "a.py", """
+        class A:
+            def run(self, x: str) -> str:
+                \"\"\"Run A.\"\"\"
+                return x
+
+        class B:
+            def run(self, x: str) -> str:
+                \"\"\"Run B.\"\"\"
+                return x
+        """)
+    write(tmp_path, "server.py", """
+        from fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        def register(obj):
+            mcp.tool(obj.run)
+        """)
+    assert analyze_repo(tmp_path).tools == []
+
+
+def test_lowlevel_tool_name_from_handler_class(tmp_path):
+    # Bug #80, from isdaniel/mcp_weather_server (0 of 8): the mcp-gsuite
+    # ToolHandler pattern, `Tool(name=self.name, ...)` where each handler
+    # passes its name up with `super().__init__("...")`.
+    write(tmp_path, "tools.py", """
+        from mcp.types import Tool
+
+        class ToolHandler:
+            def __init__(self, tool_name: str):
+                self.name = tool_name
+
+        class GetCurrentWeatherToolHandler(ToolHandler):
+            def __init__(self):
+                super().__init__("get_current_weather")
+
+            def get_tool_description(self) -> Tool:
+                return Tool(
+                    name=self.name,
+                    description="Get the current weather for a city.",
+                    inputSchema={"type": "object", "properties": {
+                        "city": {"type": "string", "description": "City name."},
+                    }},
+                )
+
+        class Ping:
+            name = "ping"
+
+            def describe(self) -> Tool:
+                return Tool(name=self.name, description="Check the server is up.", inputSchema={})
+        """)
+    names = sorted(t.name for t in analyze_repo(tmp_path).tools)
+    assert names == ["get_current_weather", "ping"]
+
+
+def test_lowlevel_tool_self_name_set_at_runtime_is_skipped(tmp_path):
+    write(tmp_path, "tools.py", """
+        from mcp.types import Tool
+
+        class Handler:
+            def __init__(self, name: str):
+                self.name = name
+
+            def describe(self) -> Tool:
+                return Tool(name=self.name, description="A tool built at runtime.", inputSchema={})
+        """)
+    assert analyze_repo(tmp_path).tools == []
+
+
+def test_tool_from_function_on_local_function_tool_subclass(tmp_path):
+    # Bug #81, from keboola/mcp-server (0 of 44): every tool is built with a
+    # local FunctionTool subclass, sometimes imported under the base's name.
+    write(tmp_path, "base.py", """
+        from fastmcp.tools import FunctionTool
+
+        class _Serializing(FunctionTool):
+            pass
+
+        class PlainFunctionTool(_Serializing):
+            pass
+
+        class ToonFunctionTool(_Serializing):
+            pass
+        """)
+    write(tmp_path, "storage.py", """
+        from base import ToonFunctionTool
+        from base import PlainFunctionTool as FunctionTool
+
+        def get_buckets() -> list:
+            \"\"\"List the storage buckets in the project.\"\"\"
+            return []
+
+        def get_tables(bucket_id: str) -> list:
+            \"\"\"List the tables in one bucket.\"\"\"
+            return []
+
+        def add_storage_tools(mcp):
+            mcp.add_tool(ToonFunctionTool.from_function(get_buckets))
+            mcp.add_tool(FunctionTool.from_function(get_tables))
+        """)
+    names = sorted(t.name for t in analyze_repo(tmp_path).tools)
+    assert names == ["get_buckets", "get_tables"]
+
+
+def test_lowlevel_tool_description_from_class_attribute(tmp_path):
+    # Bug #80 follow-on, from isdaniel/pgtuner_mcp: `description=self.description`
+    # read as "no description" once the tool was found.
+    write(tmp_path, "tools.py", """
+        from mcp.types import Tool
+
+        class AnalyzeBufferCache:
+            name = "analyze_buffer_cache"
+            description = (
+                "Analyze PostgreSQL buffer cache usage "
+                "and hit ratios per table."
+            )
+
+            def get_tool_definition(self) -> Tool:
+                return Tool(name=self.name, description=self.description, inputSchema={})
+        """)
+    tool = analyze_repo(tmp_path).tools[0]
+    assert tool.name == "analyze_buffer_cache"
+    assert tool.has_description
+    assert not any(i.check == "description" for i in tool.issues)
