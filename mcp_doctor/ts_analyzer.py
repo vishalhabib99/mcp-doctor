@@ -391,10 +391,15 @@ def _collect_const_objects(tree_root, src: bytes) -> dict[str, tuple["Node", byt
     registry: dict[str, tuple["Node", bytes]] = {}
     ambiguous: set[str] = set()
     for n in _walk(tree_root):
-        if n.type != "variable_declarator":
+        if n.type == "enum_declaration":
+            # `enum MCPToolName { GET_POINTED_ELEMENT = 'get-pointed-element' }`
+            # (etsd-tech/mcp-pointer): `MCPToolName.X` resolves through `_resolve`.
+            name_node, value_node = n.child_by_field_name("name"), n
+        elif n.type == "variable_declarator":
+            name_node = n.child_by_field_name("name")
+            value_node = n.child_by_field_name("value")
+        else:
             continue
-        name_node = n.child_by_field_name("name")
-        value_node = n.child_by_field_name("value")
         if name_node is None or name_node.type != "identifier" or value_node is None:
             continue
         name = _text(name_node, src)
@@ -509,6 +514,11 @@ def _resolve(node, src: bytes, consts: dict[str, tuple["Node", bytes]], depth: i
         obj_node = node.child_by_field_name("object")
         if prop_node is not None and prop_node.type == "property_identifier" and obj_node is not None:
             resolved_obj, resolved_src = _resolve(obj_node, src, consts, depth + 1)
+            if resolved_obj.type == "enum_declaration":
+                body = resolved_obj.child_by_field_name("body")
+                for member in (body.named_children if body is not None else []):
+                    if member.type == "enum_assignment" and _text(member.child_by_field_name("name"), resolved_src) == _text(prop_node, src):
+                        return _resolve(member.child_by_field_name("value"), resolved_src, consts, depth + 1)
             if resolved_obj.type == "object":
                 pairs = _object_pairs(resolved_obj, resolved_src)
                 prop_val = pairs.get(_text(prop_node, src))
@@ -1352,7 +1362,15 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
                 dynamic_registration and holder is not None and holder.type == "arguments"
                 and holder.parent is not None and holder.parent.type == "new_expression"
             )
-            if holder is None or (holder.type not in ("array", "variable_declarator") and not in_new):
+            # `router.setTool({ schema: { name, description, inputSchema }, handler })`
+            # (alioshr/memory-bank-mcp, 0 of 5 found before).
+            in_schema_pair = (
+                dynamic_registration and holder is not None and holder.type == "pair"
+                and _text(holder.child_by_field_name("key"), src).strip("'\"") in ("schema", "tool", "definition")
+                and holder.parent is not None and holder.parent.parent is not None
+                and holder.parent.parent.type == "arguments"
+            )
+            if holder is None or (holder.type not in ("array", "variable_declarator") and not in_new and not in_schema_pair):
                 continue
             pairs = _object_pairs(node, src)
             schema_keys = ("inputSchema", "schema", "parameters", "paramsSchema") if dynamic_registration else ("inputSchema",)
