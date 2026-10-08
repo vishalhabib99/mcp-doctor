@@ -1569,3 +1569,62 @@ def test_handlerless_definition_needs_dynamic_registration(tmp_path):
         """)
     findings, _ = find_ts_tools(tmp_path)
     assert [f.name for f in findings] == ["ping"]
+
+
+def test_loop_registration_keeps_out_template_names_and_unimported_exports(tmp_path):
+    # Bug #85, from fr0ster/mcp-abap-adt: v1.15.2 reported `GetVersions` for
+    # `name: \`Get${row.display}Versions\`` (one tool per object type, built at
+    # runtime) and counted exported TOOL_DEFINITIONs that nothing imports.
+    write(tmp_path, "src/versions.ts", """
+        export const versionTools = ROWS.map((row) => ({
+          name: `Get${row.display}Versions`,
+          description: "List the versions of an object.",
+          inputSchema: { type: "object", properties: {} },
+        }));
+        export const extra = [
+          { name: `GetVersionSource`, description: "Read one version's source.", inputSchema: { type: "object", properties: {} } },
+        ];
+        """)
+    write(tmp_path, "src/handlers/handleGetUnitTest.ts", """
+        export const TOOL_DEFINITION = {
+          name: "GetUnitTest",
+          description: "Read a unit test run.",
+          inputSchema: { type: "object", properties: {} },
+        };
+        """)
+    write(tmp_path, "src/server.ts", """
+        for (const tool of tools) server.registerTool(tool.name, { description: tool.description }, run);
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert [f.name for f in findings] == ["GetVersionSource"]
+
+
+def test_loop_registration_resolves_constant_prefixes_and_used_exports(tmp_path):
+    # Bug #85, the shapes that stay: a `${TOOL_PREFIX}init` name whose prefix
+    # is a constant (CSCSoftware/AiDex; v1.15.2 reported plain `init`), an
+    # exported definition its own file returns (mcp-atom-of-thoughts), and one
+    # another file loads with a dynamic import() (mcp-klever-vm).
+    write(tmp_path, "src/constants.ts", """
+        export const TOOL_PREFIX = 'aidex_';
+        """)
+    write(tmp_path, "src/tools.ts", """
+        import { TOOL_PREFIX } from './constants.js';
+        export function registerTools() {
+          return [
+            { name: `${TOOL_PREFIX}init`, description: "Index a project for search.", inputSchema: { type: "object", properties: {} } },
+          ];
+        }
+        export const AOT_FAST_TOOL = { name: "AoT-fast", description: "Fast atom-of-thoughts pass.", inputSchema: { type: "object", properties: {} } };
+        export function getTools() { return [AOT_FAST_TOOL]; }
+        """)
+    write(tmp_path, "src/utils/project-init.ts", """
+        export const projectInitToolDefinition = {
+          name: 'init_project', description: "Create a new project from the template.", inputSchema: { type: "object", properties: {} },
+        };
+        """)
+    write(tmp_path, "src/server.ts", """
+        const { projectInitToolDefinition } = await import('./utils/project-init.js');
+        server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [...registerTools(), projectInitToolDefinition] }));
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert sorted(f.name for f in findings) == ["AoT-fast", "aidex_init", "init_project"]

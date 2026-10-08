@@ -856,6 +856,37 @@ _DYNAMIC_REGISTRATION = re.compile(
 )
 
 
+def _template_name(node, src: bytes, consts) -> str | None:
+    """A tool name, with a template literal's `${X}` parts resolved when X is
+    a constant string (AiDex's `${TOOL_PREFIX}init` -> `aidex_init`). One
+    that can't be resolved makes the name dynamic: v1.15.2 dropped it and
+    reported `GetVersions` for mcp-abap-adt's `Get${row.display}Versions`
+    and `glpi_get_` for mcp-glpi's (bug #85)."""
+    if node is None or node.type != "template_string":
+        return _string_value(node, src)
+    parts = []
+    for c in node.children:
+        if c.type == "string_fragment":
+            parts.append(_text(c, src))
+        elif c.type == "template_substitution":
+            expr = next((x for x in c.named_children), None)
+            value = _resolve_str(expr, src, consts) if expr is not None else None
+            if value is None:
+                return None
+            parts.append(value)
+    return "".join(parts)
+
+
+def _export_used_elsewhere(f: Path, name: str, src: bytes, texts: dict) -> bool:
+    """`name` is used again in its own file, or another file loads its
+    module with a dynamic `import()` and mentions it."""
+    if len(re.findall(rf"\b{re.escape(name)}\b", texts.get(f, ""))) > 1:
+        return True
+    stem = re.escape(f.with_suffix("").name)
+    dyn = re.compile(rf"import\(\s*['\"][^'\"]*/{stem}(?:\.[cm]?[jt]sx?)?['\"]")
+    return any(other != f and name in t and dyn.search(t) for other, t in texts.items())
+
+
 def _off_product_path(f: Path, root: Path) -> bool:
     """Benchmark scripts, evals, examples, seed data and Storybook stories
     restate tool lists without serving them (2026-10 census: DollhouseMCP's
@@ -1304,7 +1335,8 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
     # (2026-10 census: postman, tableau, reddit-mcp-buddy, memory-bank-mcp
     # and others, 0 found before). Without that evidence the old, stricter
     # shape still applies, so a docs or OpenAI-function fixture can't match.
-    dynamic_registration = any(_DYNAMIC_REGISTRATION.search(src.decode("utf-8", errors="ignore")) for _, _, src in parsed)
+    texts = {f: src.decode("utf-8", errors="ignore") for f, _, src in parsed}
+    dynamic_registration = any(_DYNAMIC_REGISTRATION.search(t) for t in texts.values())
     imported = _imported_names(parsed)
     known_names = {fd.name for fd in findings}
     for f, file_root, src in parsed:
@@ -1329,17 +1361,27 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
                 continue
             if dynamic_registration and _not_a_tool_definition(node, pairs, src):
                 continue
-            used_export = (
+            exported = (
                 holder.type == "variable_declarator"
                 and holder.parent is not None
                 and holder.parent.parent is not None
                 and holder.parent.parent.type == "export_statement"
-                and (_module_key(f), _text(holder.child_by_field_name("name"), src)) in imported
             )
+            const_name = _text(holder.child_by_field_name("name"), src) if exported else ""
+            used_export = exported and (_module_key(f), const_name) in imported
             strict = used_export or bool(pairs.keys() & {"handler", "run", "execute"})
-            if not strict and not (dynamic_registration and not _off_product_path(f, root)):
+            # An exported definition stays out unless something uses it: its
+            # own file (`getTools()` returning it, mcp-atom-of-thoughts) or a
+            # dynamic `import()` of its module (mcp-klever-vm). Bug #85:
+            # v1.15.2 counted mcp-abap-adt's 5 unit-test TOOL_DEFINITIONs,
+            # which nothing uses.
+            if not strict and (
+                not dynamic_registration or _off_product_path(f, root)
+                or (exported and not _export_used_elsewhere(f, const_name, src, texts))
+            ):
                 continue  # hustcc/mcp-echarts names its handler `run`
-            name_val = _resolve_str(pairs["name"], src, consts)
+            name_node, name_src = _resolve(pairs["name"], src, consts)
+            name_val = _template_name(name_node, name_src, consts)
             if name_val is None or name_val in known_names:
                 continue  # dynamic name, or already reported by another style
             known_names.add(name_val)
