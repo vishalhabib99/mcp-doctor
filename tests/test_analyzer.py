@@ -2663,3 +2663,64 @@ def test_getattr_loop_over_imported_method_name_tuple_counts(tmp_path):
     names = sorted(t.name for t in analyze_repo(tmp_path).tools)
     # OTHER_NAMES has a name ToolSet doesn't define, so none of it counts.
     assert names == ["get_video", "pool_status"]
+
+
+def test_registry_dict_decorator_read_by_list_tools_counts(tmp_path):
+    # Bug #88, from chunkhound/chunkhound (0 of 5 found): `@register_tool(
+    # description=SEARCH_DESCRIPTION, name="search")` stores
+    # `TOOL_REGISTRY[name] = Tool(...)`, which a low-level list_tools handler
+    # reads with `TOOL_REGISTRY.items()`. The description is a module constant.
+    write(tmp_path, "mcp_server/tools.py", """
+        TOOL_REGISTRY: dict = {}
+        SEARCH_DESCRIPTION = \"\"\"Find code chunks that match a regex or a semantic query.\"\"\"
+
+        def register_tool(description: str, name: str | None = None):
+            def decorator(func):
+                TOOL_REGISTRY[name or func.__name__] = Tool(name=name, description=description, implementation=func)
+                return func
+            return decorator
+
+        def cache_result(ttl: int):
+            def decorator(func):
+                _CACHE[func.__name__] = ttl
+                return func
+            return decorator
+
+        @register_tool(description=SEARCH_DESCRIPTION, name="search")
+        async def search_impl(query: str) -> dict:
+            return {}
+
+        @cache_result(60)
+        async def not_a_tool(x: str) -> str:
+            return x
+        """)
+    write(tmp_path, "mcp_server/base.py", """
+        from .tools import TOOL_REGISTRY
+
+        def list_tools():
+            return [t for _, t in TOOL_REGISTRY.items()]
+        """)
+    tools = analyze_repo(tmp_path).tools
+    assert [t.name for t in tools] == ["search"]
+    assert tools[0].description_text.startswith("Find code chunks")
+
+
+def test_plain_function_writing_a_read_dict_is_not_a_tool_decorator(tmp_path):
+    # Found by the before/after for bug #88: MikeRecognex/mcp-codebase-index's
+    # low-level `async def call_tool(name, arguments)` writes a module dict that
+    # is read elsewhere; it is not a decorator factory, so `@server.call_tool()`
+    # must stay the SDK's dispatcher, not a tool.
+    write(tmp_path, "server.py", """
+        from mcp.server import Server
+        server = Server("x")
+        _STATS = {}
+
+        def report():
+            return list(_STATS.items())
+
+        @server.call_tool()
+        async def call_tool(name: str, arguments: dict) -> list:
+            _STATS[name] = 1
+            return []
+        """)
+    assert [t.name for t in analyze_repo(tmp_path).tools] == []

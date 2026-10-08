@@ -1194,6 +1194,7 @@ def _collect_tool_decorator_names(trees: list[tuple[str, ast.Module]]) -> set[st
         (tree, n) for _, tree in trees for n in tree.body
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
     ]
+    read_registries: set[str] | None = None  # computed once: a per-function rescan was quadratic (aming-claw, 691 files)
     for tree, fn in top_level:
         if "tool" not in fn.name.lower():
             continue
@@ -1209,6 +1210,26 @@ def _collect_tool_decorator_names(trees: list[tuple[str, ast.Module]]) -> set[st
         )
         if adds_to_registry and any(_is_tool_registration_call(n) for n in ast.walk(tree)):
             names.add(fn.name)
+        # chunkhound/chunkhound's `@register_tool(description=..., name=...)`:
+        # the inner decorator stores `TOOL_REGISTRY[name] = Tool(...)` in a
+        # module-level dict that a low-level `list_tools` handler reads
+        # (`TOOL_REGISTRY.items()`), no `.tool(` anywhere (0 of 5 found before).
+        # Only the decorator-factory shape: the store happens in a nested
+        # function that the factory returns. A plain function that writes a
+        # dict (mcp-codebase-index's low-level `call_tool` handler) isn't one.
+        nested = {n.name: n for n in fn.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        returned = [nested[r.value.id] for r in fn.body
+                    if isinstance(r, ast.Return) and isinstance(r.value, ast.Name) and r.value.id in nested]
+        stored = {
+            t.value.id for inner in returned for n in ast.walk(inner) if isinstance(n, ast.Assign)
+            for t in n.targets if isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name)
+            and t.value.id in module_names
+        }
+        if stored:
+            if read_registries is None:
+                read_registries = _registry_reads(trees)
+            if stored & read_registries:
+                names.add(fn.name)
     # Methods of a registry class count too: haris-musa/excel-mcp-server's
     # `@tools.reader("Read range")`, where `reader` returns
     # `self._register(...)` and that returns a nested `decorate(fn)` that
@@ -1241,6 +1262,30 @@ def _collect_tool_decorator_names(trees: list[tuple[str, ast.Module]]) -> set[st
                     changed = True
                     break
     return names
+
+
+def _registry_reads(trees: list[tuple[str, ast.Module]]) -> set[str]:
+    """Names read as a registry anywhere in the repo: `REG.items()` /
+    `.values()` / `.keys()`, or `for x in REG`."""
+    out: set[str] = set()
+    for _, tree in trees:
+        for n in ast.walk(tree):
+            if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in ("items", "values", "keys")
+                    and isinstance(n.func.value, ast.Name)):
+                out.add(n.func.value.id)
+            elif isinstance(n, (ast.For, ast.AsyncFor, ast.comprehension)) and isinstance(n.iter, ast.Name):
+                out.add(n.iter.id)
+    return out
+
+
+def _module_str_constant(tree: ast.Module, name: str) -> str | None:
+    """`NAME = "..."` (or a triple-quoted string) at module level, exactly once."""
+    found = [
+        n.value.value for n in tree.body
+        if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)
+        and n.targets[0].id == name and isinstance(n.value, ast.Constant) and isinstance(n.value.value, str)
+    ]
+    return found[0] if len(found) == 1 else None
 
 
 def _returns_registering_closure(fn: FuncDef) -> bool:
@@ -1280,6 +1325,10 @@ def _find_fastmcp_tools(
                 ))
                 break
             description_override = _kwarg_str(call, "description")
+            if description_override is None:
+                desc_kw = next((kw.value for kw in call.keywords if kw.arg == "description"), None)
+                if isinstance(desc_kw, ast.Name):
+                    description_override = _module_str_constant(tree, desc_kw.id)
             name_override = _kwarg_str(call, "name")
             excluded_args = _kwarg_str_list(call, "exclude_args")
             annotations_call = _kwarg_call(call, "annotations")
