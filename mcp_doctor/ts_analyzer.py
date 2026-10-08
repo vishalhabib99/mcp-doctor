@@ -881,7 +881,7 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
     skip_dirs = {"node_modules", "dist", "build", ".next", "out"}
     files = []
     for p in sorted(root.rglob("*")):  # same order on every Python version
-        if p.suffix not in (".ts", ".tsx", ".js", ".jsx"):
+        if p.suffix not in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"):
             continue
         rel_parts = p.relative_to(root).parts
         if any(part in skip_dirs or part.startswith(".") for part in rel_parts):
@@ -893,7 +893,9 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
         # ... for agent integration tests") whose filename stem alone
         # (`simple_server`) and directory (`tests`, not Jest's `__tests__`)
         # both slipped past the old check.
-        if _is_test_file(p) or any(part in ("test", "tests", "__tests__") for part in rel_parts):
+        # Fixture folders too (swarmclaw's `__fixtures__/fake-mcp-stdio-server.mjs`,
+        # peta-core's `scripts/compat-smoke/fixtures/`): test servers, not the product.
+        if _is_test_file(p) or any(part in ("test", "tests", "__tests__", "fixtures", "__fixtures__") for part in rel_parts):
             continue
         files.append(p)
 

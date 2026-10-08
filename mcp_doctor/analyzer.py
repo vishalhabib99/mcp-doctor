@@ -1952,7 +1952,7 @@ def _find_class_based_tools(
     return findings
 
 
-_JS_TEST_SUFFIXES = (".test.ts", ".test.tsx", ".test.js", ".test.jsx", ".spec.ts", ".spec.tsx", ".spec.js", ".spec.jsx")
+_JS_TEST_SUFFIXES = tuple(f".{kind}.{ext}" for kind in ("test", "spec") for ext in ("ts", "tsx", "js", "jsx", "mjs", "cjs"))
 
 
 # Excludes files that can never be part of a tool's reachable execution

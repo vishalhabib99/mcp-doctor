@@ -1461,3 +1461,30 @@ def test_list_tools_map_that_does_not_project_tools_is_not_read_as_a_registry(tm
         """)
     findings, _ = find_ts_tools(tmp_path)
     assert findings == []
+
+
+def test_mjs_and_cjs_servers_are_scanned(tmp_path):
+    # Bug #83, from xixihhhh/clipforge (0 of 30 found): the whole server is
+    # one .mjs file, which the file filter skipped. Test and fixture files stay out.
+    write(tmp_path, "mcp/server.mjs", """
+        server.registerTool("make_clip", { description: "Render a short clip from a prompt.", inputSchema: {} }, async () => {
+          return { content: [] };
+        });
+        """)
+    write(tmp_path, "legacy/server.cjs", """
+        server.registerTool("list_clips", { description: "List rendered clips, newest first.", inputSchema: {} }, async () => {
+          return { content: [] };
+        });
+        """)
+    write(tmp_path, "src/__fixtures__/fake-server.mjs", """
+        server.registerTool("echo", { description: "Echo for the client tests.", inputSchema: {} }, async () => {
+          return { content: [] };
+        });
+        """)
+    write(tmp_path, "mcp/server.test.mjs", """
+        server.registerTool("fixture_tool", { description: "Only for tests.", inputSchema: {} }, async () => {
+          return { content: [] };
+        });
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert sorted(f.name for f in findings) == ["list_clips", "make_clip"]
