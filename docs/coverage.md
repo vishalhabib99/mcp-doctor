@@ -28,4 +28,8 @@ Every check mcp-doctor runs depends on first finding a server's tools. A tool it
 - **mcp-framework:** class-based tools (`class FooTool extends MCPTool`), auto-discovered with no registration call, weren't recognized at all; tools extending a repo-local base class are followed too.
 - **mcp-go:** a tool built by `mcp.NewTool(...)` in a helper function, another file or a registry was only counted when its `AddTool` call could be traced back to it. Every `mcp.NewTool(...)` (and bare `mcp.Tool{...}` literal) from the mcp-go package is now a definition site on its own.
 
+## Not reflected in these numbers
+
+The October 2026 census of public MCP servers led to fourteen more fixes (v1.15.1–v1.15.6, bugs #78–#91; see the [build log](BUILD_LOG.md)). Most target registration styles this literal-name count can't see: loops over runtime values, one tool per module loaded with `import()`, registry decorators, enum and constant names. They aren't reflected in the table above, which still describes the 2026-09-30 sweeps. On the census's own 501-repo before/after set v1.15.2–v1.15.5 took 80 repos from 0 tools found to a real count; that set has no independent count, so it isn't a recall figure.
+
 Next frameworks to sweep: the official SDKs' loop/registry registration styles.
