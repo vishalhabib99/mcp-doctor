@@ -1414,15 +1414,21 @@ class _RepoFunctions:
         self.top_level: dict[str, dict[str, FuncDef]] = {}
         self.by_dotted: dict[str, list[str]] = {}
         self.methods: dict[str, list[tuple[FuncDef, str]]] = {}
+        self.class_methods: dict[str, list[tuple[dict[str, FuncDef], str]]] = {}
+        self.string_tuples: dict[str, dict[str, list[str]]] = {}
         for rel, tree in trees:
             self.top_level[rel] = {
                 n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
             }
+            self.string_tuples[rel] = _module_string_tuples(tree)
             for cls in ast.walk(tree):
                 if isinstance(cls, ast.ClassDef):
+                    own = {}
                     for n in cls.body:
                         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
                             self.methods.setdefault(n.name, []).append((n, rel))
+                            own[n.name] = n
+                    self.class_methods.setdefault(cls.name, []).append((own, rel))
             parts = list(Path(rel).with_suffix("").parts)
             if parts and parts[-1] == "__init__":
                 parts = parts[:-1]
@@ -1447,6 +1453,26 @@ class _RepoFunctions:
         fn = self.top_level.get(target, {}).get(name)
         return (fn, target) if fn is not None else None
 
+    def string_tuple(self, importer: str, name: str, tree: ast.Module) -> list[str] | None:
+        """A module-level tuple/list of string literals named `name`, defined
+        in `importer` or imported into it from one of the repo's modules."""
+        own = self.string_tuples.get(importer, {}).get(name)
+        if own is not None:
+            return own
+        binding = _import_bindings(tree).get(name)
+        if binding is None or binding[2] is None:
+            return None
+        target = self.module_file(importer, binding[0], binding[1])
+        return self.string_tuples.get(target, {}).get(binding[2]) if target else None
+
+    def method_of(self, class_name: str, name: str) -> tuple[FuncDef, str] | None:
+        """`name` on the one class called `class_name` in the repo."""
+        defs = self.class_methods.get(class_name, [])
+        if len(defs) != 1:
+            return None
+        own, rel = defs[0]
+        return (own[name], rel) if name in own else None
+
     def unique_method(self, name: str) -> tuple[FuncDef, str] | None:
         """The one method named `name` in the whole repo, if exactly one
         class defines it: `self.mcp.tool(module.analyze_dns_packets)` in a
@@ -1454,6 +1480,38 @@ class _RepoFunctions:
         only known at runtime but the method name is unambiguous."""
         defs = self.methods.get(name, [])
         return defs[0] if len(defs) == 1 else None
+
+
+def _module_string_tuples(tree: ast.Module) -> dict[str, list[str]]:
+    """`NAMES = ("a", "b")` / `NAMES: Final[tuple[str, ...]] = (...)` at
+    module level: name -> the strings."""
+    out: dict[str, list[str]] = {}
+    for n in tree.body:
+        target = n.targets[0] if isinstance(n, ast.Assign) and len(n.targets) == 1 else (
+            n.target if isinstance(n, ast.AnnAssign) else None)
+        value = n.value if isinstance(n, (ast.Assign, ast.AnnAssign)) else None
+        if (isinstance(target, ast.Name) and isinstance(value, (ast.Tuple, ast.List)) and value.elts
+                and all(isinstance(e, ast.Constant) and isinstance(e.value, str) for e in value.elts)):
+            out[target.id] = [e.value for e in value.elts]
+    return out
+
+
+def _getattr_method_site(ref: ast.expr, loop_var: str, tree: ast.Module, call: ast.Call, repo: "_RepoFunctions"):
+    """`getattr(obj, loop_var)` where `obj = SomeClass(...)` in the same
+    function: the class name, else None."""
+    if not (isinstance(ref, ast.Call) and isinstance(ref.func, ast.Name) and ref.func.id == "getattr"
+            and len(ref.args) == 2 and isinstance(ref.args[0], ast.Name)
+            and isinstance(ref.args[1], ast.Name) and ref.args[1].id == loop_var):
+        return None
+    obj = ref.args[0].id
+    scope = next((f for f in ast.walk(tree) if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))
+                  and any(n is call for n in ast.walk(f))), tree)
+    classes = {
+        n.value.func.id for n in ast.walk(scope)
+        if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == obj for t in n.targets)
+        and isinstance(n.value, ast.Call) and isinstance(n.value.func, ast.Name)
+    }
+    return classes.pop() if len(classes) == 1 else None
 
 
 def _import_bindings(tree: ast.Module) -> dict[str, tuple[str | None, int, str | None]]:
@@ -1657,6 +1715,21 @@ def _find_direct_call_tools(
                 for inner in ast.walk(stmt):
                     if isinstance(inner, ast.Call):
                         loop_refs[id(inner)] = (loop.target.id, list(loop.iter.elts))
+    # `for method in TOOL_METHODS: server.add_tool(getattr(tools, method), name=method)`
+    # over a module-level tuple of method names, `tools = ToolSet(...)`
+    # (Evil0ctal/Douyin_TikTok_Download_API, 8 tools, 0 found before).
+    loop_names: dict[int, tuple[str, list[str]]] = {}
+    if repo is not None:
+        for loop in ast.walk(tree):
+            if (isinstance(loop, (ast.For, ast.AsyncFor)) and isinstance(loop.target, ast.Name)
+                    and isinstance(loop.iter, ast.Name)):
+                names = repo.string_tuple(file, loop.iter.id, tree)
+                if not names:
+                    continue
+                for stmt in loop.body:
+                    for inner in ast.walk(stmt):
+                        if isinstance(inner, ast.Call):
+                            loop_names[id(inner)] = (loop.target.id, names)
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -1678,6 +1751,19 @@ def _find_direct_call_tools(
         if not (legacy or _is_tool_from_function(kw_call, tool_classes)
                 or imports_fastmcp or receiver_ok):
             continue
+        by_name = loop_names.get(id(node))
+        if by_name is not None and name_override is None:
+            cls = _getattr_method_site(ref, by_name[0], tree, node, repo)
+            if cls is not None:
+                resolved = [repo.method_of(cls, n) for n in by_name[1]]
+                if all(resolved):  # every name a method of that class, else skip them all
+                    for fn_node, fn_file in resolved:
+                        findings.append(_analyze_function_as_tool(
+                            fn_node, fn_file, _kwarg_str(kw_call, "description"), alias_registry, None,
+                            _kwarg_str_list(kw_call, "exclude_args"), error_handling_registry,
+                            plain_string_ok=plain_string_ok,
+                        ))
+                continue
         if not isinstance(ref, (ast.Name, ast.Attribute)):
             continue
         description_override = _kwarg_str(kw_call, "description") or ""

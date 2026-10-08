@@ -2622,3 +2622,44 @@ def test_lowlevel_tool_description_from_class_attribute(tmp_path):
     assert tool.name == "analyze_buffer_cache"
     assert tool.has_description
     assert not any(i.check == "description" for i in tool.issues)
+
+
+def test_getattr_loop_over_imported_method_name_tuple_counts(tmp_path):
+    # Bug #86, from Evil0ctal/Douyin_TikTok_Download_API (0 of 8 found):
+    # `for method in TOOL_METHODS: server.add_tool(getattr(tools, method), name=method)`
+    # with `tools = ToolSet(context)` and TOOL_METHODS a tuple imported from
+    # the module that defines ToolSet.
+    write(tmp_path, "dtk/tools.py", """
+        from typing import Final
+
+        class ToolSet:
+            async def get_video(self, video_id: str) -> dict:
+                \"\"\"Get one video's metadata by its id.\"\"\"
+                return {}
+
+            async def pool_status(self) -> dict:
+                \"\"\"Report why the identity pool is degraded, if it is.\"\"\"
+                return {}
+
+            def _helper(self) -> None:
+                pass
+
+        TOOL_METHODS: Final[tuple[str, ...]] = ("get_video", "pool_status")
+        OTHER_NAMES = ("get_video", "not_a_method")
+        """)
+    write(tmp_path, "dtk/server.py", """
+        from mcp.server import MCPServer
+        from dtk.tools import TOOL_METHODS, OTHER_NAMES, ToolSet
+
+        def build_server(context):
+            server = MCPServer(name="dtk")
+            tools = ToolSet(context)
+            for method in TOOL_METHODS:
+                server.add_tool(getattr(tools, method), name=method)
+            for method in OTHER_NAMES:
+                server.add_tool(getattr(tools, method), name=method)
+            return server
+        """)
+    names = sorted(t.name for t in analyze_repo(tmp_path).tools)
+    # OTHER_NAMES has a name ToolSet doesn't define, so none of it counts.
+    assert names == ["get_video", "pool_status"]
