@@ -1,6 +1,6 @@
 # MCP server census, October 2026
 
-Scripts and aggregate numbers behind the report "I scanned 3,923 MCP servers. 1 in 4 tools leaves the model guessing."
+Scripts and aggregate numbers behind the report ["I scanned 3,923 MCP servers. 1 in 4 tools leaves the model guessing."](https://dev.to/vishalhabib99/i-scanned-3923-mcp-servers-1-in-4-tools-leaves-the-model-guessing-1n99)
 
 **What it is:** one static mcp-doctor pass over every public MCP server repo that GitHub search could find: Python, TypeScript, JavaScript and Go; 20+ stars; no forks or archived repos. 6,054 repos discovered on 2026-10-08, of which 3,923 have at least one tool (147,646 tools). Scanned 2026-10-08 and 2026-10-09 (ET); every row comes from mcp-doctor 0.15.6 (v1.15.6).
 
