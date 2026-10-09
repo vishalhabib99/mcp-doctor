@@ -133,9 +133,13 @@ def _text(node, src: bytes) -> str:
 
 
 def _walk(node):
-    yield node
-    for child in node.children:
-        yield from _walk(child)
+    """Pre-order walk without recursion: deeply nested files (thousands of
+    levels in generated or minified code) overflowed Python's recursion limit."""
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        yield n
+        stack.extend(reversed(n.children))
 
 
 def _string_value(node, src: bytes) -> str | None:
@@ -153,12 +157,24 @@ def _string_value(node, src: bytes) -> str | None:
         frag = next((c for c in node.children if c.type == "raw_string_literal_content"), None)
         return _text(frag, src) if frag is not None else ""
     if node.type == "binary_expression":
-        operator = node.child_by_field_name("operator")
-        if operator is not None and _text(operator, src) == "+":
-            left = _string_value(node.child_by_field_name("left"), src)
-            right = _string_value(node.child_by_field_name("right"), src)
-            if left is not None and right is not None:
-                return left + right
+        # Flatten the `+` chain iteratively: a chain of a few thousand literals
+        # (embedded data, generated code) overflowed the recursion limit.
+        parts, stack = [], [node]
+        while stack:
+            n = stack.pop()
+            if n is None:
+                return None
+            if n.type == "binary_expression":
+                operator = n.child_by_field_name("operator")
+                if operator is None or _text(operator, src) != "+":
+                    return None
+                stack.append(n.child_by_field_name("right"))
+                stack.append(n.child_by_field_name("left"))
+                continue
+            if n.type not in ("interpreted_string_literal", "raw_string_literal"):
+                return None
+            parts.append(_string_value(n, src))
+        return "".join(parts)
     return None
 
 

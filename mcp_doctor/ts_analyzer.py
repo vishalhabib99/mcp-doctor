@@ -69,9 +69,13 @@ def _text(node, src: bytes) -> str:
 
 
 def _walk(node):
-    yield node
-    for child in node.children:
-        yield from _walk(child)
+    """Pre-order walk without recursion: deeply nested files (thousands of
+    levels in generated or minified code) overflowed Python's recursion limit."""
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        yield n
+        stack.extend(reversed(n.children))
 
 
 def _callee_name(node) -> str | None:
@@ -109,12 +113,25 @@ def _string_value(node, src: bytes) -> str | None:
         # multiple lines. Only resolves if both sides are themselves literal;
         # a concatenation involving a variable is left unresolved rather than
         # guessed at (better to under-count than to fabricate content).
-        operator = node.child_by_field_name("operator")
-        if operator is not None and operator.text == b"+":
-            left_val = _string_value(node.child_by_field_name("left"), src)
-            right_val = _string_value(node.child_by_field_name("right"), src)
-            if left_val is not None and right_val is not None:
-                return left_val + right_val
+        # Flattened iteratively, same as the Go side: a long enough chain
+        # would otherwise overflow the recursion limit.
+        parts, stack = [], [node]
+        while stack:
+            n = stack.pop()
+            if n is None:
+                return None
+            if n.type == "binary_expression":
+                operator = n.child_by_field_name("operator")
+                if operator is None or operator.text != b"+":
+                    return None
+                stack.append(n.child_by_field_name("right"))
+                stack.append(n.child_by_field_name("left"))
+                continue
+            val = _string_value(n, src)
+            if val is None:
+                return None
+            parts.append(val)
+        return "".join(parts)
     return None
 
 
@@ -874,6 +891,12 @@ _DYNAMIC_REGISTRATION = re.compile(
     r"\.(?:registerTool|tool)\(\s*[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+\s*[,)]"
     r"|setRequestHandler\(\s*(?:[\w$]+\.)?ListToolsRequestSchema\b"
 )
+# The property a runtime loop passes as the tool name: `server.tool(tool.method, ...)`.
+# Bug #93: PaddleHQ/paddle-mcp-server's definitions are
+# `{ method: "activate_subscription", name: "Activate a trialing subscription", ... }`
+# registered as `this.tool(tool.method, ...)`, so `name` is a human title and
+# 90 valid tool names were reported as spec violations.
+_DYNAMIC_NAME_KEY = re.compile(r"\.(?:registerTool|tool)\(\s*[A-Za-z_$][\w$]*\.([A-Za-z_$][\w$]*)\s*[,)]")
 
 
 def _template_name(node, src: bytes, consts) -> str | None:
@@ -1360,6 +1383,10 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
     # shape still applies, so a docs or OpenAI-function fixture can't match.
     texts = {f: src.decode("utf-8", errors="ignore") for f, _, src in parsed}
     dynamic_registration = any(_DYNAMIC_REGISTRATION.search(t) for t in texts.values())
+    # Use another key as the name only when every traceable loop registration
+    # passes that key; any `x.name` registration keeps the default.
+    registered_keys = {k for t in texts.values() for k in _DYNAMIC_NAME_KEY.findall(t)}
+    name_keys = sorted(registered_keys) if registered_keys and "name" not in registered_keys else ["name"]
     imported = _imported_names(parsed)
     known_names = {fd.name for fd in findings}
     for f, file_root, src in parsed:
@@ -1388,7 +1415,8 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
             pairs = _object_pairs(node, src)
             schema_keys = ("inputSchema", "schema", "parameters", "paramsSchema") if dynamic_registration else ("inputSchema",)
             schema_key = next((k for k in schema_keys if k in pairs), None)
-            if not {"name", "description"} <= pairs.keys() or schema_key is None:
+            name_key = next((k for k in name_keys if k in pairs), "name" if "name" in pairs else None)
+            if name_key is None or "description" not in pairs or schema_key is None:
                 continue
             if dynamic_registration and _not_a_tool_definition(node, pairs, src):
                 continue
@@ -1411,7 +1439,7 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
                 or (exported and not _export_used_elsewhere(f, const_name, src, texts))
             ):
                 continue  # hustcc/mcp-echarts names its handler `run`
-            name_node, name_src = _resolve(pairs["name"], src, consts)
+            name_node, name_src = _resolve(pairs[name_key], src, consts)
             name_val = _template_name(name_node, name_src, consts)
             if name_val is None or name_val in known_names:
                 continue  # dynamic name, or already reported by another style

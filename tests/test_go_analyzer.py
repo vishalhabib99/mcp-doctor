@@ -1012,3 +1012,22 @@ def test_new_tool_also_registered_directly_is_counted_once(tmp_path):
         """)
     findings, _ = find_go_tools(tmp_path)
     assert [f.name for f in findings] == ["echo"]
+
+
+def test_very_long_string_concat_chain_does_not_crash(tmp_path):
+    # Bug #92: a `"a" + "b" + ...` chain of a few thousand literals overflowed
+    # the recursion limit (JustVugg/tools-factory, kris-hansen/comanda).
+    chain = " + ".join(['"x"'] * 5000)
+    write(tmp_path, "server.go", f"""
+        package main
+
+        func main() {{
+            mcp.AddTool(server, &mcp.Tool{{
+                Name:        "big",
+                Description: {chain},
+            }}, handler)
+        }}
+        """)
+    findings, _ = find_go_tools(tmp_path)
+    assert [t.name for t in findings] == ["big"]
+    assert "description" not in {i.check for i in findings[0].issues}

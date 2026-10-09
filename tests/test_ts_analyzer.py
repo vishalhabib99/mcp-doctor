@@ -1797,3 +1797,74 @@ def test_same_const_name_in_many_files_resolves_per_file(tmp_path):
         """)
     findings, _ = find_ts_tools(tmp_path)
     assert sorted(f.name for f in findings) == ["maps_air_quality", "maps_geocode"]
+
+
+def test_deeply_nested_file_does_not_crash(tmp_path):
+    # Bug #92: the tree walk was recursive, so a deeply nested file (generated
+    # data, opentabs-dev/opentabs) overflowed the recursion limit.
+    nested = "[" * 3000 + "]" * 3000
+    write(tmp_path, "server.ts", f"""
+        const data = {nested};
+        server.tool("ping", "Checks the server is up", {{}}, async () => ({{ content: [] }}));
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert [t.name for t in findings] == ["ping"]
+
+
+def test_very_long_string_concat_chain_does_not_crash(tmp_path):
+    chain = " + ".join(['"x"'] * 5000)
+    write(tmp_path, "server.ts", f"""
+        server.tool("big", {chain}, {{}}, async () => ({{ content: [] }}));
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert [t.name for t in findings] == ["big"]
+    assert "description" not in {i.check for i in findings[0].issues}
+
+
+def test_loop_registered_definitions_use_the_key_the_loop_passes(tmp_path):
+    # Bug #93: PaddleHQ/paddle-mcp-server registers `this.tool(tool.method, ...)`
+    # and keeps a human title in `name`. The title was reported as the tool name,
+    # so 90 valid names became "invalid".
+    write(tmp_path, "tools.ts", """
+        export const tools = [
+          {
+            method: "activate_subscription",
+            name: "Activate a trialing subscription",
+            description: "Activates a trialing subscription now.",
+            parameters: z.object({ id: z.string().describe("Subscription ID") }),
+          },
+        ];
+        """)
+    write(tmp_path, "toolkit.ts", """
+        import { tools } from "./tools";
+        export class Toolkit {
+          register(server) {
+            tools.forEach((tool) => {
+              server.tool(tool.method, tool.description, tool.parameters.shape, async (arg) => run(tool.method, arg));
+            });
+          }
+        }
+        """)
+    result = analyze_repo(tmp_path)
+    assert [t.name for t in result.tools] == ["activate_subscription"]
+    assert not [i for i in result.repo_issues if i.check == "tool_name"]
+
+
+def test_loop_registered_definitions_still_use_name_by_default(tmp_path):
+    write(tmp_path, "tools.ts", """
+        export const tools = [
+          {
+            method: "unused_method_key",
+            name: "get_thing",
+            description: "Gets a thing by ID.",
+            inputSchema: { type: "object", properties: { id: { type: "string", description: "Thing ID" } } },
+            handler: async () => ({ content: [] }),
+          },
+        ];
+        """)
+    write(tmp_path, "server.ts", """
+        import { tools } from "./tools";
+        for (const tool of tools) server.registerTool(tool.name, { description: tool.description }, tool.handler);
+        """)
+    result = analyze_repo(tmp_path)
+    assert [t.name for t in result.tools] == ["get_thing"]
