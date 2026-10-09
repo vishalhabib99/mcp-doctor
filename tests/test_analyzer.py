@@ -2739,3 +2739,51 @@ def test_import_bindings_parsed_once_per_file(tmp_path, monkeypatch):
     monkeypatch.setattr(analyzer, "_import_bindings", lambda tree: calls.append(1) or real(tree))
     analyze_repo(tmp_path)
     assert len(calls) <= 5  # a handful of other callers, not one per loop
+
+
+def test_none_default_on_runtime_typed_factory_closure_not_flagged(tmp_path):
+    # cuga-project/cuga-agent adapter.py: one generic handler per OpenAPI
+    # operation, typed by a model built at runtime and registered in a loop.
+    # The caller fills `headers` itself; the model never sees it, so the
+    # static schema read doesn't describe what clients get (census FP,
+    # 2026-10-09).
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+
+        def create_handler(api, model):
+            def handler(params: model, headers: dict = None):
+                \"\"\"Call the API.\"\"\"
+                try:
+                    return str(params)
+                except ValueError as e:
+                    return str(e)
+            return handler
+
+        def build(apis):
+            mcp = FastMCP("x")
+            for api in apis:
+                handler = create_handler(api, api.model)
+                mcp.tool(name=api.name, description=api.description)(handler)
+            return mcp
+        """)
+    report = analyze_repo(tmp_path)
+    assert report.tools
+    assert not any(i.check == "none_default_type" for t in report.tools for i in t.issues)
+
+
+def test_none_default_on_plain_nested_closure_still_flagged(tmp_path):
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+
+        def register(mcp: FastMCP):
+            @mcp.tool()
+            def search(query: str, limit: int = None) -> str:
+                \"\"\"Search.\"\"\"
+                try:
+                    return query
+                except ValueError as e:
+                    return str(e)
+        """)
+    report = analyze_repo(tmp_path)
+    tool = next(t for t in report.tools if t.name == "search")
+    assert any(i.check == "none_default_type" for i in tool.issues)

@@ -1125,3 +1125,48 @@ def test_repo_under_a_folder_named_venv_is_still_scanned(tmp_path):
 
     report = analyze_repo(root)
     assert "dangerous_exec" in {i.check for i in report.repo_issues}
+
+
+def test_read_only_tool_posting_to_a_suggest_endpoint_is_not_flagged(tmp_path):
+    # awslabs/mcp aws-api-mcp-server suggest_aws_commands: readOnlyHint true,
+    # POSTs a query to a suggestion service. Nothing is mutated, so the
+    # read-only hint is correct (census FP, 2026-10-09).
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        from mcp.types import ToolAnnotations
+        mcp = FastMCP("x")
+
+        @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+        def suggest_commands(query: str) -> str:
+            \"\"\"Args:
+                query: what to do.
+            \"\"\"
+            with get_requests_session() as session:
+                response = session.post(ENDPOINT_SUGGEST_AWS_COMMANDS, json={'query': query}, timeout=30)
+            return response.text
+        """)
+    make_clean_repo(tmp_path)
+
+    report = analyze_repo(tmp_path)
+    tool = next(t for t in report.tools if t.name == "suggest_commands")
+    assert not any(i.check == "annotation_mismatch" for i in tool.issues)
+
+
+def test_read_only_tool_posting_to_a_write_endpoint_still_flagged(tmp_path):
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        from mcp.types import ToolAnnotations
+        mcp = FastMCP("x")
+
+        @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+        def create_ticket(title: str) -> str:
+            \"\"\"Args:
+                title: ticket title.
+            \"\"\"
+            return requests.post(f"{BASE}/tickets", json={'title': title}).text
+        """)
+    make_clean_repo(tmp_path)
+
+    report = analyze_repo(tmp_path)
+    tool = next(t for t in report.tools if t.name == "create_ticket")
+    assert any(i.check == "annotation_mismatch" for i in tool.issues)

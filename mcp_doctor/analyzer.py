@@ -950,8 +950,17 @@ _MUTATION_SIGNALS: list[tuple[re.Pattern, str]] = [
     (re.compile(r'\b(INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM|DROP\s+TABLE|ALTER\s+TABLE)\b', re.IGNORECASE), "a raw SQL mutation statement"),
     (re.compile(r'open\([^)]*[\'"](w|a|wb|ab|w\+|a\+)[\'"]'), "a file opened in a write/append mode"),
     (re.compile(r'\b(os\.remove|os\.unlink|os\.rmdir|shutil\.rmtree)\('), "a filesystem deletion call"),
-    (re.compile(r'\b(requests|httpx|client|session)\.(post|put|delete|patch)\('), "a mutating HTTP client call"),
+    (re.compile(r'\b(requests|httpx|client|session)\.(put|delete|patch)\('), "a mutating HTTP client call"),
 ]
+
+# `.post(` is also how plenty of read-only RPCs are called: a search,
+# suggestion or query service takes its input as a POST body. Verified FP:
+# awslabs/mcp aws-api-mcp-server `suggest_aws_commands` (readOnlyHint true,
+# `session.post(ENDPOINT_SUGGEST_AWS_COMMANDS, json={'query': ...})`). A POST
+# counts as a mutation signal only when its URL argument doesn't name one of
+# those read-style endpoints.
+_HTTP_POST_CALL = re.compile(r'\b(requests|httpx|client|session)\.post\(\s*([^,)]*)')
+_READ_STYLE_ENDPOINT = re.compile(r'suggest|search|query|lookup', re.IGNORECASE)
 
 
 def _scan_for_mutation_signal(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> str | None:
@@ -962,6 +971,9 @@ def _scan_for_mutation_signal(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> str
     for pattern, label in _MUTATION_SIGNALS:
         if pattern.search(body_text):
             return label
+    for m in _HTTP_POST_CALL.finditer(body_text):
+        if not _READ_STYLE_ENDPOINT.search(m.group(2)):
+            return "a mutating HTTP client call"
     return None
 
 
@@ -1593,6 +1605,28 @@ def _enclosing_class(tree: ast.Module, node: ast.AST) -> ast.ClassDef | None:
     return best
 
 
+def _is_runtime_typed_closure(fn: FuncDef, tree: ast.Module) -> bool:
+    """A tool function nested in a factory whose parameter types are the
+    factory's own arguments (`def handler(params: model, headers: dict = None)`
+    inside `create_handler(api, model, ...)`): one generic handler per
+    generated operation, typed by a model built at runtime. The schema clients
+    see comes from that runtime model, not from this signature, so a static
+    read of the other params' defaults isn't evidence of what's advertised.
+    Verified FP: cuga-project/cuga-agent adapter.py, where the server's own
+    caller always fills `headers` and the model never sees it."""
+    for outer in ast.walk(tree):
+        if not isinstance(outer, (ast.FunctionDef, ast.AsyncFunctionDef)) or outer is fn:
+            continue
+        if not any(n is fn for n in outer.body):
+            continue
+        outer_params = {a.arg for a in outer.args.args + outer.args.kwonlyargs}
+        return any(
+            isinstance(a.annotation, ast.Name) and a.annotation.id in outer_params
+            for a in fn.args.args + fn.args.kwonlyargs
+        )
+    return False
+
+
 def _resolve_function_ref(
     ref: ast.expr, site: ast.AST, tree: ast.Module, file: str, repo: _RepoFunctions | None,
 ) -> tuple[FuncDef, str] | None:
@@ -1833,10 +1867,13 @@ def _find_direct_call_tools(
             if resolved is not None:
                 fn_node, fn_file = resolved
                 excluded_args = _kwarg_str_list(kw_call, "exclude_args")
-                findings.append(_analyze_function_as_tool(
+                finding = _analyze_function_as_tool(
                     fn_node, fn_file, description_override or None, alias_registry, name_override,
                     excluded_args, error_handling_registry, plain_string_ok=plain_string_ok,
-                ))
+                )
+                if fn_file == file and _is_runtime_typed_closure(fn_node, tree):
+                    finding.issues = [i for i in finding.issues if i.check != "none_default_type"]
+                findings.append(finding)
             elif name_override is not None:
                 findings.append(_bare_direct_call_finding(name_override, description_override, file, node.lineno))
     return findings
