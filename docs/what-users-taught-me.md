@@ -6,7 +6,7 @@
 
 - **Two outside people have used mcp-doctor directly.** One tested it with an AI agent and found two real bugs. The other suggested a new check, then sent three of their own servers through the no-install scan.
 - **The first real scan exposed the worst bug the tool has had:** it found 0 of 165 tools on a server and still gave it a grade. I had measured false alarms carefully, but never whether the tool could *see* a server at all.
-- **That one report changed the roadmap.** I stopped adding checks and started measuring recall, framework by framework: from 0% on some frameworks to [11,228 of 11,411 tools across 603 servers](coverage.md).
+- **That one report changed the roadmap.** I stopped adding checks and started measuring recall, framework by framework: from 0% on some frameworks to [15,755 of 15,977 tools across 805 servers](coverage.md) (5 frameworks, as of 2026-10-09).
 - **Maintainers acted on findings when the evidence was specific:** the exact tool, what an agent would do wrong, and the fix. Five outside repos changed their code after a report.
 - **Still unproven:** whether maintainers will come on their own. All three scan requests so far came from one person I invited. The [pre-registered bar](experiments/2026-09-scan-by-issue.md) is 10 outside requests by 2026-10-27.
 
