@@ -12,6 +12,7 @@ Every check mcp-doctor runs depends on first finding a server's tools. A tool it
 | [`mcp-framework`](https://github.com/QuantGeekDev/mcp-framework) | TS | 55 with tools, of 82 that list it | **366 / 369** | 0 (style not supported) | v1.12.7 | 2026-09-30 |
 | [`mark3labs/mcp-go`](https://github.com/mark3labs/mcp-go) | Go | 127 with tools, of a 175-repo sample (~5,900 dependents) | **1,748 / 1,765** | 954 / 1,765 (54%) | v1.12.8 | 2026-09-30 |
 | [`fastmcp`](https://github.com/PrefectHQ/fastmcp) + the official SDK's `FastMCP` | Python | 386 with tools, of 447 cloned from a 607-repo search sample | **8,853 / 9,016** | 8,241 / 9,016 (91.4%) on 3.12; 8,223 (91.2%) on the Action's old 3.11 | v1.12.9 | 2026-09-30 |
+| [`@modelcontextprotocol/sdk`](https://github.com/modelcontextprotocol/typescript-sdk) (repos that depend on the official TS SDK; counted: literal `.tool("name", …)` / `.registerTool("name", …)`) | TS | 202 with a counted tool, of a 703-repo sample (all 303 census repos that list it with 0 tools found, plus 400 random with tools) | **4,527 / 4,566** | 3,665 / 4,566 (80.3%) | v1.15.8 | 2026-10-09 |
 
 ## Known misses, all out of scope
 
@@ -19,6 +20,7 @@ Every check mcp-doctor runs depends on first finding a server's tools. A tool it
 
 - **mcp-framework (3):** template strings in the framework's own project generator (`${toolName}`, `example_tool`), not tools.
 - **mcp-go (17):** 16 are in two repos that define a package also named `mcp` (`github-mcp-server`'s `pkg/mcp` in a fork, and a repo-local `internal/mcp`), which mcp-doctor correctly doesn't read as mcp-go. 1 is a name built at runtime (`"postgres-" + ...`), which the regex miscounted.
+- **official TS SDK (39):** 13 are arguments built at runtime by a spread (`registerTool('x', ...bridgeToolInput(...))`, Orkas); 9 are short imported config names (`server.tool('list', list)`) that collide with another same-named constant in the repo, since imports aren't followed exactly (teros); 3 are usage examples in an SDK's doc comments (teros); 7 are test servers and fixtures (`__fixtures__/`, `testfiles/`, `test-stateless.mjs`); 6 aren't tools (a generator template `{{name}}`, and `.tool(name, …)` text in scripts the count picks up). 1 is a real miss, to be fixed: the SDK's `server.tool(name, callback)` form with no description or schema (web-mcp `get-tabs`). One repo, `teros-hq/teros` (876 counted), is about a fifth of the count; without it recall is 3,663 / 3,690 (99.3%).
 
 ## What each sweep fixed
 

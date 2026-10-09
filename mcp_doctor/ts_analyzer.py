@@ -959,9 +959,15 @@ def _not_a_tool_definition(node, pairs: dict, src: bytes) -> bool:
     return False
 
 
+# TypeScript's ESM/CJS extensions too. Bug #94: BigSweetPotatoStudio/HyperChat
+# registers 12 tools with plain `server.tool("fetch", ...)` in a `.mts` file,
+# and the file was never read (0 tools found).
+TS_SUFFIXES = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts")
+
+
 def _module_key(path: Path) -> str:
     """A module's identity for import matching: no extension, `/index` dropped."""
-    p = path.with_suffix("") if path.suffix in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs") else path
+    p = path.with_suffix("") if path.suffix in TS_SUFFIXES else path
     return str(p.parent if p.name == "index" else p)
 
 
@@ -993,7 +999,7 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
     skip_dirs = {"node_modules", "dist", "build", ".next", "out"}
     files = []
     for p in sorted(root.rglob("*")):  # same order on every Python version
-        if p.suffix not in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"):
+        if p.suffix not in TS_SUFFIXES:
             continue
         rel_parts = p.relative_to(root).parts
         if any(part in skip_dirs or part.startswith(".") for part in rel_parts):
@@ -1265,12 +1271,34 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
                 if config.type != "object":
                     continue
                 pairs = _object_pairs(config, config_src)
-                if "description" not in pairs or "input" not in pairs:
+                # Bug #95: the same two-arg shape with raw JSON Schema under
+                # `parameters` and the handler inline, as teros-hq/teros's own
+                # SDK uses (`server.tool('perplexity-search', { description,
+                # parameters: { type: 'object', properties }, handler })`, 862
+                # of 876 tools missed). `handler` is required for this variant.
+                if "input" in pairs:
+                    schema_key = "input"
+                elif "parameters" in pairs and "handler" in pairs:
+                    schema_key = "parameters"
+                else:
+                    continue
+                if "description" not in pairs:
                     continue
                 name_val = _resolve_str(arg_nodes[0], src, consts)
                 if name_val is None:
                     continue  # dynamic tool name — can't attribute a finding to it
-                schema_arg, schema_src = _resolve(pairs["input"], config_src, consts)
+                schema_arg, schema_src = _resolve(pairs[schema_key], config_src, consts)
+                if (
+                    schema_key == "parameters" and schema_arg is not None and schema_arg.type == "object"
+                    and "properties" in _object_pairs(schema_arg, schema_src)
+                ):
+                    findings.append(
+                        _analyze_json_schema_tool(
+                            name_val, pairs["description"], pairs["parameters"], config_src, consts, config_src,
+                            rel, node.start_point[0] + 1,
+                        )
+                    )
+                    continue
                 findings.append(
                     _analyze_ts_tool(
                         name_val, config, config_src, schema_arg, schema_src, None, consts,
@@ -1729,7 +1757,7 @@ def _module_per_tool_findings(parsed, root: Path, global_consts: dict, known_nam
         # Exact path, not `_module_key`: `getCollection.ts` and
         # `getCollection/index.ts` must stay two modules here.
         p = (importer.parent / spec).resolve()
-        p = p.with_suffix("") if p.suffix in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs") else p
+        p = p.with_suffix("") if p.suffix in TS_SUFFIXES else p
         return str(p) if str(p) in files_by_key else str(p / "index")
 
     named_imported = {

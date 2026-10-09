@@ -1868,3 +1868,46 @@ def test_loop_registered_definitions_still_use_name_by_default(tmp_path):
         """)
     result = analyze_repo(tmp_path)
     assert [t.name for t in result.tools] == ["get_thing"]
+
+
+def test_mts_and_cts_files_are_scanned(tmp_path):
+    # Bug #94: BigSweetPotatoStudio/HyperChat registers its tools in a `.mts`
+    # file, which was never read (0 tools found).
+    write(tmp_path, "tools.mts", """
+        server.tool("fetch", "Fetches a URL", { url: z.string().describe("URL to fetch") }, async () => ({ content: [] }));
+        """)
+    write(tmp_path, "legacy.cts", """
+        server.tool("search", "Searches the web", { q: z.string().describe("Query") }, async () => ({ content: [] }));
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert sorted(t.name for t in findings) == ["fetch", "search"]
+
+
+def test_two_arg_tool_with_json_schema_parameters_and_inline_handler(tmp_path):
+    # Bug #95: teros-hq/teros's own SDK registers `server.tool(name, { description,
+    # parameters: <JSON Schema>, handler })`; 862 of 876 tools were missed.
+    write(tmp_path, "index.ts", """
+        server.tool('perplexity-search', {
+          description: 'Search the web using Perplexity AI.',
+          parameters: {
+            type: 'object',
+            properties: {
+              query: { type: 'string', description: 'The search query' },
+              model: { type: 'string' },
+            },
+            required: ['query'],
+          },
+          handler: async (args) => ({ content: [] }),
+        });
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert [t.name for t in findings] == ["perplexity-search"]
+    assert "param_docs" in {i.check for i in findings[0].issues}  # `model` has no description
+
+
+def test_two_arg_tool_with_parameters_but_no_handler_is_not_a_tool(tmp_path):
+    write(tmp_path, "index.ts", """
+        registry.tool('not-a-tool', { description: 'x', parameters: { type: 'object', properties: {} } });
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert findings == []
