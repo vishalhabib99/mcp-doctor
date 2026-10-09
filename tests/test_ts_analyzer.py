@@ -1025,12 +1025,16 @@ def test_mcp_ts_core_tool_definitions_are_recognized(tmp_path):
 
 
 def test_sdk_two_arg_tool_call_is_not_mistaken_for_mcp_ts_core(tmp_path):
-    # The official SDK's `server.tool(name, callback)` also takes two args.
+    # The official SDK's `server.tool(name, callback)` also takes two args. It
+    # isn't an mcp-ts-core definition, but it is a real tool with no
+    # description (bug #97: it used to be skipped entirely).
     write(tmp_path, "server.ts", """
         server.tool('ping', async () => ({ content: [{ type: 'text', text: 'pong' }] }));
         """)
     findings, _ = find_ts_tools(tmp_path)
-    assert findings == []
+    assert [t.name for t in findings] == ["ping"]
+    assert findings[0].param_count == 0
+    assert "description" in {i.check for i in findings[0].issues}
 
 
 def test_description_built_at_runtime_is_not_reported_missing(tmp_path):
@@ -1911,3 +1915,49 @@ def test_two_arg_tool_with_parameters_but_no_handler_is_not_a_tool(tmp_path):
         """)
     findings, _ = find_ts_tools(tmp_path)
     assert findings == []
+
+
+def test_security_scan_reads_mjs_cjs_mts_cts(tmp_path):
+    # Bug #96: the repo-level secrets/dangerous-exec scan skipped these
+    # extensions, so a server written as ESM `.mjs` got no security checks.
+    for name in ("server.mjs", "legacy.cjs", "mod.mts", "old.cts"):
+        # distinct contents: identical files are de-duplicated before scanning
+        write(tmp_path, name, f"""
+            // {name}
+            const {{ exec }} = require("child_process");
+            exec(userInput);
+            """)
+    write(tmp_path, "types.d.mts", "export declare function exec(x: string): void;")
+    result = analyze_repo(tmp_path)
+    flagged = [i for i in result.repo_issues if i.check == "dangerous_exec"]
+    assert flagged, "no dangerous_exec finding from .mjs/.cjs/.mts/.cts files"
+    text = " ".join(i.message for i in flagged)
+    for name in ("server.mjs", "legacy.cjs", "mod.mts", "old.cts"):
+        assert name in text
+    assert "types.d.mts" not in text
+
+
+def test_local_function_named_exec_is_not_the_shell_primitive(tmp_path):
+    # Bug #98: Bitget-AI/agent_hub's installer defines `function exec(cmd, args)`
+    # around spawn(shell: false) and was flagged for every call to it.
+    write(tmp_path, "cli.js", """
+        function exec(cmd, args) {
+          return new Promise((resolve) => nodeSpawn(cmd, args, { shell: false }).on("close", resolve));
+        }
+        await exec("npm", ["install", "-g", pkg]);
+        """)
+    result = analyze_repo(tmp_path)
+    assert not [i for i in result.repo_issues if i.check == "dangerous_exec"]
+
+
+def test_security_scan_skips_build_output_and_hidden_folders(tmp_path):
+    # Bug #99: chenlinyang/mcp-server-mysql was graded on a 138k-line
+    # `.smithery/index.cjs` bundle. Tool discovery already skipped these folders.
+    for folder in (".smithery", "dist", "build", "out"):
+        write(tmp_path, f"{folder}/index.js", f"""
+            // {folder}
+            const {{ exec }} = require("child_process");
+            exec(userInput);
+            """)
+    result = analyze_repo(tmp_path)
+    assert not [i for i in result.repo_issues if i.check == "dangerous_exec"]

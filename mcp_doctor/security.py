@@ -128,13 +128,16 @@ _BARE_EXEC_RE = _DANGEROUS_EXEC_PATTERNS[2]
 # type this way — confirmed not a one-off naming coincidence via the same
 # `const exec = executor ?? ...` idiom recurring independently in
 # Seitrace/seitrace-mcp (another real MCP server) and several unrelated repos.
+# Bug #98: a local `function exec(cmd, args) {...}` helper is a rebinding too.
+# Bitget-AI/agent_hub's installer defines one (it wraps spawn with shell:false)
+# and was flagged 8 times for calling its own function.
 _LOCAL_EXEC_OR_EVAL_BINDING_RE = re.compile(
-    r"\b(?:const|let|var)\s+(exec|eval)\s*="
+    r"\b(?:(?:const|let|var)\s+(exec|eval)\s*=|(?:async\s+)?function\s*\*?\s*(exec|eval)\s*\()"
 )
 
 
 def _locally_rebound_names(text: str) -> set[str]:
-    return {m.group(1) for m in _LOCAL_EXEC_OR_EVAL_BINDING_RE.finditer(text)}
+    return {m.group(1) or m.group(2) for m in _LOCAL_EXEC_OR_EVAL_BINDING_RE.finditer(text)}
 
 # A line like `exec(sql: string): void {` or `exec(sql: string): void;` is
 # declaring a method/function literally *named* exec/eval (e.g. implementing

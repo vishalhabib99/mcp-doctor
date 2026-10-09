@@ -1258,6 +1258,24 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
                 )
                 continue
 
+            if (
+                method == "tool" and len(arg_nodes) == 2
+                and arg_nodes[1].type in ("arrow_function", "function_expression")
+            ):
+                # Bug #97: the SDK's `server.tool(name, callback)` overload, a
+                # tool with no description and no schema (web-mcp/web-mcp's
+                # `get-tabs`). It was skipped, so the missing description,
+                # which is the point of the check, was never reported.
+                name_val = _resolve_str(arg_nodes[0], src, consts)
+                if name_val is not None:
+                    findings.append(
+                        _analyze_ts_tool(
+                            name_val, None, src, None, src, arg_nodes[1], consts,
+                            rel, node.start_point[0] + 1,
+                        )
+                    )
+                continue
+
             if method == "tool" and len(arg_nodes) == 2:
                 # `@cyanheads/mcp-ts-core`'s definition style (30+ public
                 # servers): `tool('name', { description, input: z.object(...),

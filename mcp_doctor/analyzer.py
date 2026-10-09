@@ -2200,6 +2200,7 @@ def _scan_secrets(py_files: list[Path]) -> list[RepoIssue]:
 # Scanning them reports third-party code (pip, typing_extensions, ...) as the
 # server's own findings, and can hide a missing-tests warning.
 _NON_REPO_DIRS = {".git", "venv", ".venv", "node_modules", "site-packages", ".tox", ".nox", "__pycache__"}
+_JS_BUILD_DIRS = {"dist", "build", "out"}  # same as ts_analyzer's skip list (plus any dot-folder)
 
 
 def analyze_repo(root: Path) -> Report:
@@ -2377,9 +2378,15 @@ def analyze_repo(root: Path) -> Report:
 
     ts_js_files = _dedupe_by_content(sorted(
         p for p in root.rglob("*")
-        if p.suffix in (".ts", ".tsx", ".js", ".jsx")
-        and not p.name.endswith(".d.ts")  # ambient type declarations — no executable code, ever
+        # Bug #96: .mjs/.cjs/.mts/.cts were left out, so a server written as
+        # ESM `.mjs` got no secrets or dangerous-exec checks at all.
+        if p.suffix in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts")
+        and not p.name.endswith((".d.ts", ".d.mts", ".d.cts"))  # ambient type declarations — no executable code, ever
         and in_repo(p)
+        # Bug #99: build output and hidden folders aren't the repo's source.
+        # Tool discovery already skipped them; the security scan graded
+        # chenlinyang/mcp-server-mysql on a 138k-line `.smithery/index.cjs` bundle.
+        and not any(part in _JS_BUILD_DIRS or part.startswith(".") for part in p.relative_to(root).parts[:-1])
         and not _is_auxiliary_file(p)
     ))
     go_files = _dedupe_by_content(sorted(
