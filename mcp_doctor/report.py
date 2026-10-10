@@ -32,11 +32,14 @@ def render_text(
     lines: list[str] = []
     lines.append(c(BOLD, "mcp-doctor report"))
     grade_color = _color_for_grade(report.grade) if use_color else ""
-    lines.append(
-        f"Quality:  {c(BOLD, str(report.percent) + '%')}  "
-        f"Grade: {grade_color}{report.grade}{RESET if use_color else ''}  "
-        f"({len(report.tools)} tool(s) found)"
-    )
+    if report.graded:
+        lines.append(
+            f"Quality:  {c(BOLD, str(report.percent) + '%')}  "
+            f"Grade: {grade_color}{report.grade}{RESET if use_color else ''}  "
+            f"({len(report.tools)} tool(s) found)"
+        )
+    else:
+        lines.append(f"Quality:  {c(YELLOW, 'Not graded')}  (0 tools found)")
     security_color = _color_for_grade(report.security_grade) if use_color else ""
     lines.append(
         f"Security: {c(BOLD, str(report.security_percent) + '%')}  "
@@ -46,6 +49,7 @@ def render_text(
 
     if not report.tools:
         lines.append(c(YELLOW, "No MCP tools detected. Looked for @mcp.tool()-style decorators and Tool(...) constructors."))
+        lines.append(c(YELLOW, "If this server does have tools, they may be named at runtime (a static scan can't read those), or this is a mcp-doctor miss worth reporting."))
 
     for t in report.tools:
         header_color = GREEN if not any(i.severity == "error" for i in t.issues) and not t.issues else (RED if any(i.severity == "error" for i in t.issues) else YELLOW)
@@ -82,6 +86,7 @@ def render_json(report: Report, schema_changes: list[SchemaChange] | None = None
         "max_score": report.max_score,
         "percent": report.percent,
         "grade": report.grade,
+        "graded": report.graded,
         "security_score": report.security_score,
         "security_max_score": report.security_max_score,
         "security_percent": report.security_percent,

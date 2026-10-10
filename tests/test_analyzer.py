@@ -1513,6 +1513,58 @@ def test_cli_fail_under_exits_nonzero_on_bad_example():
     assert result.returncode == 1
 
 
+def _runtime_named_server(tmp_path):
+    # bytebase/dbhub's shape: each tool's name comes from a function call at
+    # startup (one set per configured database), so a static scan finds 0 tools.
+    (tmp_path / "README.md").write_text("# db server\n")
+    (tmp_path / "index.ts").write_text(dedent("""
+        import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+        export function registerExecuteSql(server: McpServer, sourceId: string) {
+          const metadata = getExecuteSqlMetadata(sourceId);
+          server.registerTool(
+            metadata.name,
+            { description: metadata.description, inputSchema: schema },
+            handler(sourceId)
+          );
+        }
+    """))
+    return tmp_path
+
+
+def test_zero_tools_is_not_graded(tmp_path):
+    # Bug #102: 0 tools printed "Quality 100% Grade: A" and passed --fail-under.
+    from mcp_doctor.report import render_json, render_text
+    import json
+    report = analyze_repo(_runtime_named_server(tmp_path))
+    assert report.tools == []
+    assert report.graded is False
+    assert report.grade == "N/A"
+    text = render_text(report, use_color=False)
+    quality_line = next(l for l in text.splitlines() if l.startswith("Quality:"))
+    assert "Not graded" in quality_line
+    assert "Grade" not in quality_line
+    payload = json.loads(render_json(report))
+    assert payload["graded"] is False
+    assert payload["grade"] == "N/A"
+
+
+def test_cli_fail_under_warns_instead_of_passing_silently_on_zero_tools(tmp_path):
+    result = subprocess.run(
+        [sys.executable, "-m", "mcp_doctor.cli", str(_runtime_named_server(tmp_path)), "--fail-under", "90"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "not applied: 0 tools found" in result.stderr
+
+
+def test_graded_report_keeps_its_grade():
+    report = analyze_repo(REPO_ROOT / "examples" / "good_server")
+    assert report.graded is True
+    assert report.grade in ("A", "B", "C", "D", "F")
+
+
 def test_cli_good_example_scores_well():
     example = REPO_ROOT / "examples" / "good_server"
     result = subprocess.run(

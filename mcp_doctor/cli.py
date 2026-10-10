@@ -102,7 +102,11 @@ def main(argv: list[str] | None = None) -> int:
             **diff_kwargs,
         ))
 
-    if args.fail_under and report.percent < args.fail_under:
+    if args.fail_under and not report.graded:
+        # Warn, don't fail: 0 tools is the honest answer for servers that name
+        # tools at runtime (git-mcp, dbhub), but a silent pass is not (bug #102).
+        print(f"warning: --fail-under {args.fail_under} not applied: 0 tools found, so there's no quality score to gate on", file=sys.stderr)
+    elif args.fail_under and report.percent < args.fail_under:
         return 1
     if args.fail_on_breaking_change and schema_changes:
         return 1

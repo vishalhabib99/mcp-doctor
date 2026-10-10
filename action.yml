@@ -32,8 +32,11 @@ outputs:
     description: "Score percent (0-100)."
     value: ${{ steps.audit.outputs.score }}
   grade:
-    description: "Letter grade (A-F)."
+    description: "Letter grade (A-F), or N/A when no tools were found."
     value: ${{ steps.audit.outputs.grade }}
+  graded:
+    description: "'false' when no tools were found: the score is then not a grade, and fail-under is not applied (a warning is shown instead)."
+    value: ${{ steps.audit.outputs.graded }}
 
 runs:
   using: "composite"
@@ -59,8 +62,10 @@ runs:
 
         score=$(python -c "import json;print(json.load(open('mcp-doctor-report.json'))['percent'])")
         grade=$(python -c "import json;print(json.load(open('mcp-doctor-report.json'))['grade'])")
+        graded=$(python -c "import json;print(str(json.load(open('mcp-doctor-report.json')).get('graded', True)).lower())")
         echo "score=$score" >> "$GITHUB_OUTPUT"
         echo "grade=$grade" >> "$GITHUB_OUTPUT"
+        echo "graded=$graded" >> "$GITHUB_OUTPUT"
 
         {
           echo "## mcp-doctor report"
@@ -70,7 +75,13 @@ runs:
         } >> "$GITHUB_STEP_SUMMARY"
 
         fail_under="${{ inputs.fail-under }}"
-        if [ "$fail_under" != "0" ] && [ "$score" -lt "$fail_under" ]; then
+        if [ "$graded" != "true" ]; then
+          # 0 tools: no quality score to gate on. Warn instead of a silent pass (bug #102).
+          if [ "$fail_under" != "0" ]; then
+            echo "::warning::mcp-doctor found 0 tools, so the fail-under $fail_under% gate was not applied. If this server has tools, they may be named at runtime, or it's a mcp-doctor miss."
+          fi
+          echo "gate_failed=0" >> "$GITHUB_OUTPUT"
+        elif [ "$fail_under" != "0" ] && [ "$score" -lt "$fail_under" ]; then
           echo "::error::mcp-doctor score $score% is below the required $fail_under%"
           echo "gate_failed=1" >> "$GITHUB_OUTPUT"
         else
@@ -111,7 +122,11 @@ runs:
         GH_TOKEN: ${{ github.token }}
       run: |
         {
-          echo "### mcp-doctor report — Score: ${{ steps.audit.outputs.score }}% (${{ steps.audit.outputs.grade }})"
+          if [ "${{ steps.audit.outputs.graded }}" = "true" ]; then
+            echo "### mcp-doctor report — Score: ${{ steps.audit.outputs.score }}% (${{ steps.audit.outputs.grade }})"
+          else
+            echo "### mcp-doctor report — Not graded (0 tools found)"
+          fi
           echo
           echo '```'
           cat mcp-doctor-report.txt

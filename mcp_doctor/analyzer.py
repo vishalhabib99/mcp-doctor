@@ -186,8 +186,16 @@ class Report:
     security_max_score: int = 1
 
     @property
+    def graded(self) -> bool:
+        """False when no tools were found. The quality score is then only the
+        repo-level checks, so a 100%/A would read as a verdict on tools nobody
+        saw (bug #102: bytebase/dbhub names its tools at runtime, scanned as
+        0 tools, and printed 100%/A and passed --fail-under)."""
+        return bool(self.tools)
+
+    @property
     def grade(self) -> str:
-        if self.max_score == 0:
+        if self.max_score == 0 or not self.graded:
             return "N/A"
         return _grade_for_percent(self.score / self.max_score * 100)
 

@@ -108,7 +108,7 @@ def scan_one(entry: dict, tmp_root: Path, previous_by_repo: dict[str, dict]) -> 
     stars = fetch_star_count(owner, repo)
 
     BADGES_DIR.mkdir(exist_ok=True)
-    badge_svg = render_badge_svg("mcp-doctor", f"{report['grade']} {report['percent']}%", report["grade"])
+    badge_svg = render_badge_svg("mcp-doctor", (f"{report['grade']} {report['percent']}%" if report.get("graded", True) else "not graded"), report["grade"])
     (BADGES_DIR / badge_filename(owner, repo)).write_text(badge_svg)
 
     previous = previous_by_repo.get(f"{owner}/{repo}")
