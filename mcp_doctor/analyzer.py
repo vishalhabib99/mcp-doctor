@@ -1207,8 +1207,10 @@ def _analyze_function_as_tool(
             tool_name, file, stdout_line, "stdout_write",
             "Writes to stdout (print() without file=, or sys.stdout.write) inside the tool. Over "
             "stdio, stdout is the JSON-RPC stream and the spec says a server MUST NOT write "
-            "anything there that isn't an MCP message. The Python and TypeScript SDK clients log "
-            "and skip the stray line, but a stricter client can treat it as a broken stream. "
+            "anything there that isn't an MCP message. Python buffers stdout on a pipe, so the text "
+            "goes out in ~8 KB bursts, and a burst that ends mid-line gets glued to the front of the "
+            "next JSON-RPC response; the official Python SDK client then drops that response and "
+            "the call times out (measured: 1 of 200 calls). "
             "Send it to stderr (print(..., file=sys.stderr)) or use logging / ctx.info().",
             "warning",
         ))
