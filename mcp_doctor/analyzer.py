@@ -687,6 +687,42 @@ def _build_mount_namespace_map(trees: list[tuple[str, ast.Module]]) -> dict[str,
 _SERVER_START_METHODS = {"run", "serve", "stdio"}
 
 
+def _if_branch_paths(tree: ast.Module) -> dict[int, tuple[tuple[int, str], ...]]:
+    """Line -> the `if` arms enclosing it, outermost first, as (if-node id, "body"/"orelse").
+
+    Two registrations of one name in opposite arms of the same `if` never both run:
+    awslabs/cli-agent-orchestrator registers `handoff` under `if ENABLE_WORKING_DIRECTORY:`
+    and again under `else:`, dealfluence/adeu registers `read_docx` per `sys.platform`.
+    Neither is a duplicate within a running server. `elif` is an `If` inside `orelse`."""
+    paths: dict[int, tuple[tuple[int, str], ...]] = {}
+
+    def visit(node: ast.AST, path: tuple[tuple[int, str], ...]) -> None:
+        line = getattr(node, "lineno", None)
+        if line is not None:
+            paths.setdefault(line, path)
+        if isinstance(node, ast.If):
+            visit(node.test, path)
+            for child in node.body:
+                visit(child, path + ((id(node), "body"),))
+            for child in node.orelse:
+                visit(child, path + ((id(node), "orelse"),))
+            return
+        for child in ast.iter_child_nodes(node):
+            visit(child, path)
+
+    visit(tree, ())
+    return paths
+
+
+def _mutually_exclusive(a: tuple[tuple[int, str], ...], b: tuple[tuple[int, str], ...]) -> bool:
+    for (node_a, arm_a), (node_b, arm_b) in zip(a, b):
+        if node_a != node_b:
+            return False
+        if arm_a != arm_b:
+            return True
+    return False
+
+
 def _find_standalone_entrypoint_files(
     trees: list[tuple[str, ast.Module]], mounted_files: set[str]
 ) -> set[str]:
@@ -2348,11 +2384,27 @@ def analyze_repo(root: Path) -> Report:
             "warning",
         ))
     standalone_files = _find_standalone_entrypoint_files(trees, set(mount_namespace_map))
-    seen_by_group: dict[str, dict[str, int]] = {}
+    branch_paths = {rel: _if_branch_paths(tree) for rel, tree in trees}
+    seen_by_group: dict[str, dict[str, list[ToolFinding]]] = {}
     for t in tools:
-        group = t.file if t.file in standalone_files else "__default__"
-        bucket = seen_by_group.setdefault(group, {})
-        bucket[t.name] = bucket.get(t.name, 0) + 1
+        # A Python tool and a TS/Go tool of the same name are two servers, not one
+        # (dealfluence/adeu ships a Python and a Node server with the same tools).
+        lang = Path(t.file).suffix.lstrip(".")
+        lang = "py" if lang == "py" else "go" if lang == "go" else "ts"
+        group = t.file if t.file in standalone_files else f"__default__:{lang}"
+        seen_by_group.setdefault(group, {}).setdefault(t.name, []).append(t)
+
+    def _is_duplicate(same_name: list[ToolFinding]) -> bool:
+        # Duplicate if any two of them can be registered together: different
+        # files, or the same file outside opposite arms of one `if`.
+        for i, a in enumerate(same_name):
+            for b in same_name[i + 1:]:
+                paths = branch_paths.get(a.file)
+                if a.file != b.file or paths is None or not _mutually_exclusive(
+                    paths.get(a.line, ()), paths.get(b.line, ())
+                ):
+                    return True
+        return False
     # Tools an agent can't tell apart by description (see lookalike.py for why this is narrow).
     from .lookalike import find_indistinguishable_tools, message as lookalike_message
     by_name = {t.name: t for t in tools}
@@ -2363,7 +2415,8 @@ def analyze_repo(root: Path) -> Report:
                                       lookalike_message(other), "warning"))
 
     duplicate_names = sorted({
-        n for bucket in seen_by_group.values() for n, count in bucket.items() if count > 1
+        n for bucket in seen_by_group.values() for n, same_name in bucket.items()
+        if len(same_name) > 1 and _is_duplicate(same_name)
     })
     if duplicate_names:
         repo_issues.append(RepoIssue(

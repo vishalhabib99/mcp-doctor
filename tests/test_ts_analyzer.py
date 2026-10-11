@@ -1700,6 +1700,30 @@ def test_module_per_tool_with_nested_metadata_and_namespace_imports(tmp_path):
     assert [f.name for f in findings] == ["browser_eval"]
 
 
+def test_module_per_tool_ignores_seo_structured_data(tmp_path):
+    # openstatusHQ/openstatus: schema.org JSON-LD built with
+    # `items.map((item) => ({ name: item.metadata.title, description: ... }))`
+    # turned every Next.js page exporting `metadata` into a "tool" named after
+    # its page title. No schema key, so it isn't a tools/list projection.
+    write(tmp_path, "app/blog/page.tsx", """
+        export const metadata = { title: "Blog Categories", description: "Browse all blog categories." };
+        """)
+    write(tmp_path, "lib/structured-data.ts", """
+        export function itemList(items) {
+          return items.map((item) => ({
+            name: item.metadata.title,
+            url: `/blog/${item.slug}`,
+            description: item.metadata.description,
+          }));
+        }
+        """)
+    write(tmp_path, "src/server.ts", """
+        server.registerTool("ping", { description: "Check the server is up.", inputSchema: {} }, async () => ({ content: [] }));
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert [f.name for f in findings] == ["ping"]
+
+
 def test_module_per_tool_needs_a_runtime_registration(tmp_path):
     # Without a registration reading `tool.method`, modules that happen to
     # export `method` and `description` are not tools.

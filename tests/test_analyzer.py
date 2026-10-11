@@ -893,6 +893,65 @@ def test_duplicate_tool_names_flagged(tmp_path):
     assert "dupe" in issue.message
 
 
+def test_same_name_in_opposite_if_arms_not_flagged_as_duplicate(tmp_path):
+    # awslabs/cli-agent-orchestrator (env flag) and dealfluence/adeu (sys.platform):
+    # one registration per arm, so only one ever runs. A name repeated inside
+    # one arm, or outside the `if`, is still a duplicate.
+    write(tmp_path, "server.py", """
+        import os, sys
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        if os.getenv("ENABLE_WORKING_DIRECTORY"):
+            @mcp.tool()
+            def handoff(agent: str, working_directory: str) -> str:
+                \"\"\"Hand off to an agent in a directory.\"\"\"
+                return agent
+        elif sys.platform == "win32":
+            @mcp.tool()
+            def handoff(agent: str) -> str:
+                \"\"\"Hand off to an agent on Windows.\"\"\"
+                return agent
+        else:
+            @mcp.tool()
+            def handoff(agent: str) -> str:
+                \"\"\"Hand off to an agent.\"\"\"
+                return agent
+
+            @mcp.tool(name="assign")
+            def assign_a(agent: str) -> str:
+                \"\"\"Assign a task.\"\"\"
+                return agent
+
+            @mcp.tool(name="assign")
+            def assign_b(agent: str) -> str:
+                \"\"\"Assign a task again.\"\"\"
+                return agent
+        """)
+    report = analyze_repo(tmp_path)
+    issue = next(i for i in report.repo_issues if i.check == "tool_name" and "unique" in i.message)
+    assert "assign" in issue.message
+    assert "handoff" not in issue.message
+
+
+def test_same_name_in_python_and_ts_servers_not_flagged_as_duplicate(tmp_path):
+    # dealfluence/adeu ships a Python server and a Node server with the same tools.
+    write(tmp_path, "python/server.py", """
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        @mcp.tool()
+        def diff_docx_files(a: str, b: str) -> str:
+            \"\"\"Diff two documents.\"\"\"
+            return a
+        """)
+    write(tmp_path, "node/src/index.ts", """
+        server.registerTool("diff_docx_files", { description: "Diff two documents.", inputSchema: {} }, async () => ({ content: [] }));
+        """)
+    report = analyze_repo(tmp_path)
+    assert not any(i.check == "tool_name" and "unique" in i.message for i in report.repo_issues)
+
+
 def test_mounted_namespace_tools_not_flagged_as_duplicate(tmp_path):
     write(tmp_path, "jira.py", """
         from mcp.server.fastmcp import FastMCP

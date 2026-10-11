@@ -1736,6 +1736,11 @@ def _module_per_tool_signatures(parsed) -> set[tuple[tuple[str, ...], tuple[str,
                 pairs = _object_pairs(node, src)
                 if "name" not in pairs or "description" not in pairs:
                     continue
+                # A tools/list projection always carries a schema. Without one, a
+                # `{ name: item.metadata.title, description: ... }` object is SEO
+                # structured data (openstatusHQ/openstatus), not a tool registration.
+                if not any(k in pairs for k in ("inputSchema", "parameters", "schema")):
+                    continue
                 name_node, config, desc_node = pairs["name"], node, pairs["description"]
             else:
                 continue
