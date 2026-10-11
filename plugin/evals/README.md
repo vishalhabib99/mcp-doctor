@@ -12,10 +12,9 @@ Eval suite for the Claude Code plugin (`skills/mcp-doctor`), run with `claude pl
 
 Each scan case seeds its workspace from the repo's `examples/` through `scaffold.sh` (files inlined, so the case doesn't depend on where the scaffold runs). The scan cases need Bash for the CLI and the fix case needs Edit, both granted on the command line:
 
-The eval sandbox blocks network access and, in our runs, executing the installed CLI, so the report graders accept either the real grades or a plain "scanner didn't run" with no invented grade (the skill's rule for that case). The real-grade path is covered end to end in a normal session (see below). To give the CLI its best chance, install it so the skill finds it on PATH:
+The eval sandbox blocks network access and, in our runs, executing the installed CLI, so the report graders accept either the real grades or a plain "scanner didn't run" with no invented grade (the skill's rule for that case). The real-grade path is covered end to end in a normal session (see below). To give the CLI its best chance, have the `mcp-server-lint` package from PyPI installed so the skill finds `mcp-doctor` on PATH, then from this repo:
 
 ```
-pip install mcp-server-lint
 cd plugin
 claude plugin eval . --scaffold \
   --allow-tools "Bash(mcp-doctor *)" Edit
