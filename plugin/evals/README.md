@@ -20,6 +20,8 @@ claude plugin eval . --scaffold \
   --allow-tools "Bash(mcp-doctor *)" Edit
 ```
 
+Last full run (2026-10-11, 3 runs per case, with and without the plugin): the skill fired in 9 of 9 MCP runs and 0 of 6 unrelated ones; 13 of 15 MCP runs passed every grader (overall score 0.94 with the plugin, +0.31 over the no-plugin baseline). Both misses were judge votes on runs where the sandbox blocked the CLI and the skill said so without inventing a grade.
+
 Every run is a full Claude session on your own account. The default is 3 runs per case with and without the plugin, so about 30 sessions; add `--runs 1` for a quick smoke test.
 
 ## End-to-end check (real session, real grades)
