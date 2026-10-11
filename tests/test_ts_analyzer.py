@@ -1985,3 +1985,40 @@ def test_security_scan_skips_build_output_and_hidden_folders(tmp_path):
             """)
     result = analyze_repo(tmp_path)
     assert not [i for i in result.repo_issues if i.check == "dangerous_exec"]
+
+
+def test_stdout_write_in_handler_flagged_over_stdio(tmp_path):
+    # MCP docs: never use console.log() in a stdio server; stdout is the JSON-RPC stream.
+    write(tmp_path, "src/index.ts", """
+        const server = new McpServer({ name: "x", version: "1.0.0" });
+        server.registerTool("search", { description: "Search the index.", inputSchema: { q: z.string().describe("Query.") } }, async ({ q }) => {
+          console.log(`searching ${q}`);
+          return { content: [] };
+        });
+        server.registerTool("quiet", { description: "Quiet tool.", inputSchema: { q: z.string().describe("Query.") } }, async ({ q }) => {
+          console.error(`to stderr ${q}`);
+          return { content: [] };
+        });
+        server.registerTool("raw", { description: "Raw tool.", inputSchema: { q: z.string().describe("Query.") } }, async ({ q }) => {
+          process.stdout.write("done\\n");
+          return { content: [] };
+        });
+        await server.connect(new StdioServerTransport());
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    flagged = {f.name: [i.line for i in f.issues if i.check == "stdout_write"] for f in findings}
+    assert flagged == {"search": [4], "quiet": [], "raw": [12]}
+
+
+def test_stdout_write_not_flagged_for_http_only_ts_server(tmp_path):
+    write(tmp_path, "src/index.ts", """
+        const server = new McpServer({ name: "x", version: "1.0.0" });
+        server.registerTool("search", { description: "Search the index.", inputSchema: { q: z.string().describe("Query.") } }, async ({ q }) => {
+          console.log(`searching ${q}`);
+          return { content: [] };
+        });
+        const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+        await server.connect(transport);
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert not any(i.check == "stdout_write" for f in findings for i in f.issues)

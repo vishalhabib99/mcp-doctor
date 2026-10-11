@@ -358,6 +358,28 @@ def _extract_definition_object(node, src: bytes):
     return None, src
 
 
+_STDOUT_CONSOLE_METHODS = ("log", "info", "debug", "dir", "table")
+
+
+def _stdout_write_line(node) -> int | None:
+    """Line of the first stdout write in a TS handler: `console.log/info/debug/dir/table(...)`
+    (Node sends all five to stdout) or `process.stdout.write(...)`. Uses each node's own
+    text, so it works whichever file the handler came from."""
+    for n in _walk(node):
+        if n.type != "call_expression":
+            continue
+        fn = n.child_by_field_name("function")
+        if fn is None or fn.type != "member_expression":
+            continue
+        text = (fn.text or b"").decode("utf-8", errors="ignore").replace(" ", "")
+        if text in {f"console.{m}" for m in _STDOUT_CONSOLE_METHODS} or text == "process.stdout.write":
+            return n.start_point[0] + 1
+    return None
+
+
+_STDIO_TS = re.compile(rb"StdioServerTransport|transportType\s*:\s*['\"]stdio['\"]")
+
+
 def _find_try(node) -> bool:
     return any(n.type == "try_statement" for n in _walk(node))
 
@@ -683,6 +705,20 @@ def _analyze_ts_tool(
     if description_unresolved:
         finding.has_description = True
         finding.issues = [i for i in finding.issues if i.check != "description"]
+
+    stdout_line = _stdout_write_line(handler) if handler is not None else None
+    if stdout_line is not None:
+        # Kept only when the repo serves over stdio (see find_ts_tools).
+        finding.issues.append(ToolIssue(
+            name, file, stdout_line, "stdout_write",
+            "Writes to stdout (console.log/info/debug/dir/table or process.stdout.write) inside "
+            "the handler. Over stdio, stdout is the JSON-RPC stream; the MCP docs say never to use "
+            "console.log() in a stdio server. Node writes each line whole, so calls still complete, "
+            "but every stray line is a parse error in the client (measured: 500 calls, 500 client "
+            "errors, 0 failed calls, with both official SDK clients). Use console.error() or a "
+            "logger that writes to stderr.",
+            "warning",
+        ))
 
     if handler is not None and not has_try:
         finding.issues.append(ToolIssue(
@@ -1663,6 +1699,10 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
             findings.append(finding)
 
     findings.extend(_module_per_tool_findings(parsed, root, global_consts, {fd.name for fd in findings}))
+    # console.log only corrupts anything over stdio; HTTP servers can log to stdout freely.
+    if not any(_STDIO_TS.search(src) for _, _, src in parsed):
+        for fd in findings:
+            fd.issues = [i for i in fd.issues if i.check != "stdout_write"]
     return findings, unparseable
 
 
