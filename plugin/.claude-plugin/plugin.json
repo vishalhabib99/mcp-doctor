@@ -1,6 +1,6 @@
 {
   "name": "mcp-doctor",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Lint the MCP server you're building for what breaks the agent calling it: missing tool descriptions, undocumented parameters, swallowed errors, stdout writes that corrupt stdio, plus a separate security grade. Scans Python, TypeScript and Go source without running it, then fixes what it finds.",
   "author": {
     "name": "Vishal Habib"
@@ -14,5 +14,10 @@
     "linter",
     "static-analysis",
     "agents"
-  ]
+  ],
+  "displayName": "mcp-doctor",
+  "documentationUrl": "https://github.com/vishalhabib99/mcp-doctor/tree/main/plugin#readme",
+  "supportUrl": "https://github.com/vishalhabib99/mcp-doctor/issues",
+  "privacyPolicyUrl": "https://github.com/vishalhabib99/mcp-doctor/blob/main/plugin/PRIVACY.md",
+  "termsOfServiceUrl": "https://github.com/vishalhabib99/mcp-doctor/blob/main/LICENSE"
 }
