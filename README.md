@@ -168,7 +168,7 @@ Then ask "check my MCP server", or run `/mcp-doctor:mcp-doctor path/to/server`. 
 3. writes the judgment fixes the CLI can't (tool and parameter descriptions, actionable error messages, stdout writes on a stdio server) after reading what each tool actually does, never inventing behavior;
 4. re-scans and shows before → after, then offers `init-action` to keep it checked on every PR.
 
-Security findings are explained, not silently rewritten. The plugin ships with an eval suite in [`evals/`](evals/): it checks when the skill should and shouldn't fire, that it reports the real grades, and that it doesn't "fix" a clean server or write tool descriptions the code doesn't back up.
+Security findings are explained, not silently rewritten. The plugin lives in [`plugin/`](plugin/) and ships with an eval suite in [`plugin/evals/`](plugin/evals/): it checks when the skill should and shouldn't fire, that it reports the real grades, and that it doesn't "fix" a clean server or write tool descriptions the code doesn't back up.
 
 ## Runtime gate — the same two checks, applied to live `tools/list` metadata
 

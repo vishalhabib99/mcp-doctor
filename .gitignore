@@ -11,4 +11,4 @@ leaderboard/data.json
 leaderboard/badges/
 
 # claude plugin eval output
-evals/results/
+plugin/evals/results/

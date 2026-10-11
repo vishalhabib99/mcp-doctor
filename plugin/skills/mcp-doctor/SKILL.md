@@ -2,7 +2,7 @@
 name: mcp-doctor
 description: Lint and fix an MCP (Model Context Protocol) server's source for what breaks the agent calling it — missing or vague tool descriptions, undocumented or untyped parameters, swallowed errors, stdout writes that corrupt a stdio transport — plus a separate security grade (tool poisoning, dynamic exec, SSRF, secrets). Use when the user asks to check, lint, audit, grade, review or fix their MCP server or its tools, asks whether their MCP server is "ready" or "good", or has just written or changed MCP tool definitions (FastMCP @mcp.tool, server.tool(...)/registerTool in TypeScript, mcp.NewTool in Go) and wants them checked. Not for using or connecting to someone else's MCP server, and not for general code review of code that isn't an MCP server.
 argument-hint: "[path to the server, default: current directory]"
-allowed-tools: Bash(mcp-doctor:*), Bash(uvx --from mcp-server-lint mcp-doctor:*), Bash(pipx run --spec mcp-server-lint mcp-doctor:*), Read, Grep, Glob, Edit
+allowed-tools: Bash(mcp-doctor *), Read, Grep, Glob
 ---
 
 # mcp-doctor
@@ -21,7 +21,7 @@ Use the first that works, and keep using it for the rest of the session:
 
 Below, `MCPD` means the runner you picked.
 
-Run every CLI call as one plain command — e.g. `mcp-doctor --json path/to/server` — with no `&&`, `;`, pipes, redirects or `cd` around it. The skill pre-approves only those plain forms; a chained command falls outside them and gets a permission prompt or a denial. To look around the repo, use Read/Glob/Grep, not Bash.
+Run every CLI call as one plain command — e.g. `mcp-doctor --json path/to/server` — with no `&&`, `;`, pipes, redirects or `cd` around it. The skill pre-approves only plain `mcp-doctor` calls; a chained command, or the `uvx`/`pipx` fallbacks, will ask the user first, which is expected. To look around the repo, use Read/Glob/Grep, not Bash.
 
 If none works (not installed, no network, or Bash not allowed), say so in your first line and give the user one install line — `pip install mcp-server-lint` — instead of installing anything yourself. You may then read the code and point out problems, but label it plainly as your own reading, not an mcp-doctor score, and never state a grade or percentage you didn't get from the CLI.
 
