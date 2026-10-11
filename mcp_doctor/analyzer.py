@@ -1200,6 +1200,18 @@ def _analyze_function_as_tool(
             "Bare 'except:' swallows all errors including cancellation — catch specific exceptions.",
             "error",
         ))
+    stdout_line = _stdout_write_line(fn)
+    if stdout_line is not None:
+        # Kept only when the repo runs over stdio (see analyze_repo); harmless over HTTP.
+        finding.issues.append(ToolIssue(
+            tool_name, file, stdout_line, "stdout_write",
+            "Writes to stdout (print() without file=, or sys.stdout.write) inside the tool. Over "
+            "stdio, stdout is the JSON-RPC stream and the spec says a server MUST NOT write "
+            "anything there that isn't an MCP message. The Python and TypeScript SDK clients log "
+            "and skip the stray line, but a stricter client can treat it as a broken stream. "
+            "Send it to stderr (print(..., file=sys.stderr)) or use logging / ctx.info().",
+            "warning",
+        ))
 
     if declared_read_only:
         mutation_signal = _scan_for_mutation_signal(fn)
@@ -1491,6 +1503,71 @@ def _enclosing_scope(tree: ast.Module, node: ast.AST) -> ast.AST:
 
 
 FuncDef = Union[ast.FunctionDef, ast.AsyncFunctionDef]
+
+
+def _stdout_write_line(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> int | None:
+    """Line of the first stdout write in a tool's own body: `print(...)` with no
+    `file=` (or `file=sys.stdout`), or `sys.stdout.write(...)`. Helpers it calls
+    aren't followed, same as error_handling's own-body rule."""
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Call):
+            continue
+        f = node.func
+        if isinstance(f, ast.Name) and f.id == "print":
+            target = next((k.value for k in node.keywords if k.arg == "file"), None)
+            if target is None or (
+                isinstance(target, ast.Attribute) and target.attr == "stdout"
+                and isinstance(target.value, ast.Name) and target.value.id == "sys"
+            ):
+                return node.lineno
+        if (isinstance(f, ast.Attribute) and f.attr == "write" and isinstance(f.value, ast.Attribute)
+                and f.value.attr == "stdout" and isinstance(f.value.value, ast.Name) and f.value.value.id == "sys"):
+            return node.lineno
+    return None
+
+
+def _runs_over_stdio(trees: list[tuple[str, ast.Module]]) -> bool:
+    """Evidence a Python server in this repo serves over stdio: `X.run()` with no
+    transport (FastMCP's default is stdio), a `"stdio"` literal among `run()`'s
+    arguments (`transport=os.getenv("TRANSPORT", "stdio")` counts), `run_stdio_async()`,
+    or the low-level SDK's `stdio_server()`."""
+    for _, tree in trees:
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            f = node.func
+            name = f.attr if isinstance(f, ast.Attribute) else f.id if isinstance(f, ast.Name) else None
+            if name in ("run_stdio_async", "stdio_server"):
+                return True
+            if name == "run" and isinstance(f, ast.Attribute):
+                if not node.args and not node.keywords:
+                    return True
+                if any(isinstance(c, ast.Constant) and c.value == "stdio"
+                       for a in [*node.args, *(k.value for k in node.keywords)] for c in ast.walk(a)):
+                    return True
+    return False
+
+
+_AGENT_FRAMEWORKS = ("langchain", "langchain_core", "langgraph", "strands", "pydantic_ai", "crewai",
+                     "llama_index", "autogen", "smolagents", "agents")
+_EXAMPLE_DIR = re.compile(r"(^|/)(examples?|samples?|docs?|site)/")
+
+
+def _agent_framework_file(rel: str, tree: ast.Module) -> bool:
+    """A file whose `@tool` functions belong to an agent framework, not an MCP server:
+    it imports LangChain/Strands/pydantic-ai/... and nothing MCP, or sits under
+    examples/ or docs/. Printing there is the agent's own console output, not a
+    write into a stdio JSON-RPC stream (found running stdout_write over 427 repos:
+    strands-agents/samples, Arize-ai/openinference examples, LangChain tutorials)."""
+    if _EXAMPLE_DIR.search(rel):
+        return True
+    roots = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            roots.add(node.module.split(".")[0])
+        elif isinstance(node, ast.Import):
+            roots.update(a.name.split(".")[0] for a in node.names)
+    return bool(roots & set(_AGENT_FRAMEWORKS)) and not roots & {"mcp", "fastmcp"}
 
 
 def _imports_fastmcp(tree: ast.Module) -> bool:
@@ -2371,6 +2448,12 @@ def analyze_repo(root: Path) -> Report:
     unparseable.extend(go_unparseable)
 
     scan_prompt_injection(tools)
+
+    stdio = _runs_over_stdio(trees)
+    agent_files = {rel for rel, tree in trees if _agent_framework_file(rel, tree)}
+    for t in tools:
+        if not stdio or t.file in agent_files:
+            t.issues = [i for i in t.issues if i.check != "stdout_write"]
 
     repo_issues: list[RepoIssue] = []
 

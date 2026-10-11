@@ -2898,3 +2898,86 @@ def test_none_default_on_plain_nested_closure_still_flagged(tmp_path):
     report = analyze_repo(tmp_path)
     tool = next(t for t in report.tools if t.name == "search")
     assert any(i.check == "none_default_type" for i in tool.issues)
+
+
+def test_stdout_write_in_tool_flagged_over_stdio(tmp_path):
+    # Over stdio, stdout is the JSON-RPC stream (atomicstrata/llm-wiki-compiler#270).
+    write(tmp_path, "server.py", """
+        import sys
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        @mcp.tool()
+        def search(q: str) -> str:
+            \"\"\"Search.\"\"\"
+            print(f"searching {q}")
+            return q
+
+        @mcp.tool()
+        def fetch(q: str) -> str:
+            \"\"\"Fetch.\"\"\"
+            print("fetching", file=sys.stderr)
+            sys.stdout.write("done\\n")
+            return q
+
+        @mcp.tool()
+        def quiet(q: str) -> str:
+            \"\"\"Quiet.\"\"\"
+            print("to stderr", file=sys.stderr)
+            return q
+
+        if __name__ == "__main__":
+            mcp.run(transport=os.getenv("TRANSPORT", "stdio"))
+        """)
+    report = analyze_repo(tmp_path)
+    flagged = {t.name: [i.line for i in t.issues if i.check == "stdout_write"] for t in report.tools}
+    assert flagged == {"search": [9], "fetch": [16], "quiet": []}
+
+
+def test_stdout_write_not_flagged_for_http_only_server(tmp_path):
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        @mcp.tool()
+        def search(q: str) -> str:
+            \"\"\"Search.\"\"\"
+            print(f"searching {q}")
+            return q
+
+        if __name__ == "__main__":
+            mcp.run(transport="streamable-http")
+        """)
+    report = analyze_repo(tmp_path)
+    assert not any(i.check == "stdout_write" for t in report.tools for i in t.issues)
+
+
+def test_stdout_write_not_flagged_in_agent_framework_or_example_files(tmp_path):
+    # strands-agents/samples, Arize-ai/openinference: agent tools print to their own console.
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+        if __name__ == "__main__":
+            mcp.run()
+        """)
+    write(tmp_path, "agent.py", """
+        from strands import Agent, tool
+
+        @tool
+        def browse(url: str) -> str:
+            \"\"\"Browse.\"\"\"
+            print(url)
+            return url
+        """)
+    write(tmp_path, "examples/demo_server.py", """
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("demo")
+
+        @mcp.tool()
+        def echo(q: str) -> str:
+            \"\"\"Echo.\"\"\"
+            print(q)
+            return q
+        """)
+    report = analyze_repo(tmp_path)
+    assert not any(i.check == "stdout_write" for t in report.tools for i in t.issues)
