@@ -182,9 +182,26 @@ def render_comment(req: dict, summary: dict) -> str:
         f"git clone --depth 1 https://github.com/{req['owner']}/{req['repo']}.git",
         f"mcp-doctor {local_path}",
         "```",
+    ]
+    if summary["tool_count"]:
+        # One command instead of a marketplace link: requesters are the people
+        # most likely to want this on every PR, and copying YAML was the step
+        # nobody took (0 outside repos ran the Action through v1.16.0).
+        init = "mcp-doctor init-action" + (f" {req['subdir']}" if req["subdir"] else "")
+        lines += [
+            "",
+            "**Check every pull request:** from your repo's root, run this once and commit the file it writes:",
+            "",
+            "```bash",
+            init,
+            "```",
+            "",
+            "It adds the [mcp-doctor GitHub Action](https://github.com/vishalhabib99/mcp-doctor#github-action), "
+            "which comments on each PR and suggests fixes on the lines it changes. It runs in report-only mode, "
+            "so it never fails your CI.",
+        ]
+    lines += [
         "",
-        "To check every pull request automatically, add the "
-        "[mcp-doctor GitHub Action](https://github.com/marketplace/actions/mcp-doctor). "
         "This report reads code only. To also test how the running server behaves (crashes on bad input, "
         "\"successful\" responses that aren't), run [mcp-trust-check](https://github.com/vishalhabib99/mcp-trust-check) "
         "against your own server.",

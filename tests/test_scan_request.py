@@ -150,3 +150,17 @@ def test_zero_tool_scan_is_flagged_for_a_look(monkeypatch, tools, flagged):
     monkeypatch.setattr(scan_request, "_scan", lambda target: {**_report(), "tools": tools})
     _, outcome = scan_request.handle(_body())
     assert outcome["needs_look"] is flagged
+
+
+def test_action_setup_command_shown_when_tools_found():
+    comment = render_comment(parse_request(_body()), summarize(_report()))
+    assert "```bash\nmcp-doctor init-action\n```" in comment
+    sub = render_comment(parse_request(_body(subdir="servers/weather")), summarize(_report()))
+    assert "```bash\nmcp-doctor init-action servers/weather\n```" in sub
+
+
+def test_no_action_setup_for_a_zero_tool_scan():
+    report = {**_report(), "tools": [], "percent": 100, "grade": "A"}
+    comment = render_comment(parse_request(_body()), summarize(report))
+    assert "init-action" not in comment
+    assert "mcp-trust-check" in comment
