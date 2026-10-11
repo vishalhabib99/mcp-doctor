@@ -15,6 +15,7 @@
 
 - **No install:** [open a scan request](https://github.com/vishalhabib99/mcp-doctor/issues/new?template=scan-request.yml) with your server's GitHub URL. A bot replies with the report in a few minutes. It reads the code only and never runs it. Security findings are posted as counts only, since the issue is public.
 - **CLI:** `pip install mcp-server-lint`, then `mcp-doctor path/to/your/server`
+- **Claude Code:** `/plugin install mcp-doctor --marketplace vishalhabib99/mcp-doctor`, then ask "check my MCP server". Claude scans, explains each finding, and fixes what it can with your OK ([details](#claude-code-plugin))
 - **CI:** `uses: vishalhabib99/mcp-doctor@v1` comments on each PR, suggests one-click fixes on the lines it changes, and can fail a PR that drops below your score ([details](#github-action))
 
 ## Why trust the grade
@@ -149,6 +150,25 @@ jobs:
 The report also gets written to the job summary either way. `@v1` tracks the latest `v1.x` release; pin an exact tag or commit SHA instead if you need stricter reproducibility.
 
 Want mcp-fuzz's runtime resilience checks and mcp-reality-check's output-fidelity checks in the same PR check, not just this one? [`mcp-trust-check`](https://github.com/vishalhabib99/mcp-trust-check) wraps all three behind a single Action and one combined score.
+
+## Claude Code plugin
+
+Run the same scan without leaving Claude Code, and let Claude fix what it finds:
+
+```
+/plugin install mcp-doctor --marketplace vishalhabib99/mcp-doctor
+```
+
+(On Claude Code before 2.1.275: `/plugin marketplace add vishalhabib99/mcp-doctor`, then `/plugin install mcp-doctor@mcp-doctor`.)
+
+Then ask "check my MCP server", or run `/mcp-doctor:mcp-doctor path/to/server`. The skill also kicks in when you've just written or changed tool definitions and ask for a check. It:
+
+1. runs the CLI (via `uvx`, so nothing to install if you have [uv](https://docs.astral.sh/uv/)) and reports both grades plus the top five findings, in terms of what breaks for the agent;
+2. shows the `--diff` for the mechanical fixes and applies them on your yes;
+3. writes the judgment fixes the CLI can't (tool and parameter descriptions, actionable error messages, stdout writes on a stdio server) after reading what each tool actually does, never inventing behavior;
+4. re-scans and shows before → after, then offers `init-action` to keep it checked on every PR.
+
+Security findings are explained, not silently rewritten. The plugin ships with an eval suite in [`evals/`](evals/): it checks when the skill should and shouldn't fire, that it reports the real grades, and that it doesn't "fix" a clean server or write tool descriptions the code doesn't back up.
 
 ## Runtime gate — the same two checks, applied to live `tools/list` metadata
 
@@ -381,6 +401,7 @@ A thirtieth pass closed an already-documented, real known limitation rather than
 - [x] GitHub Action for one-line CI integration
 - [x] `--fix` for the genuinely mechanical stuff (bare `except:`, fully-undocumented `Args:` stubs) — deliberately does *not* auto-wrap function bodies in try/except; generating a correct wrapper for arbitrary code (preserving return semantics, control flow) needs more judgment than a mechanical pass should take on
 - [x] Go server support — the official `modelcontextprotocol/go-sdk`'s `AddTool` style (explicit and struct-tag-inferred schemas) and `mark3labs/mcp-go`'s older fluent-builder style
+- [x] Claude Code plugin — scan and fix from inside the editor, with an eval suite
 
 ## Contributing
 

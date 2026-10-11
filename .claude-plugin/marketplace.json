@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "mcp-doctor",
+  "description": "mcp-doctor: lint and fix MCP servers from inside Claude Code",
+  "owner": {
+    "name": "Vishal Habib"
+  },
+  "plugins": [
+    {
+      "name": "mcp-doctor",
+      "description": "Lint the MCP server you're building for what breaks the agent calling it, then fix what it finds. Python, TypeScript and Go.",
+      "source": "./",
+      "category": "development",
+      "homepage": "https://github.com/vishalhabib99/mcp-doctor"
+    }
+  ]
+}
