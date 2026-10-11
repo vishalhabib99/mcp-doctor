@@ -124,6 +124,8 @@ Deliberately doesn't touch the quality/security scores — those are properties 
 
 Gate PRs on server quality without installing anything yourself:
 
+Fastest way: run `mcp-doctor init-action` in your repo (or `mcp-doctor init-action path/to/server` for a server in a subdirectory). It writes `.github/workflows/mcp-doctor.yml` in report-only mode and shows the grade your PRs will start from. `--fail-under 70` turns on the gate; `--print` shows the file without writing it. Or copy it by hand:
+
 ```yaml
 on: pull_request
 permissions:

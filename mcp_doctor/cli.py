@@ -11,6 +11,12 @@ from .schema_diff import compute_schema_diff
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["init-action"]:
+        from .init_action import main as init_action_main
+
+        return init_action_main(argv[1:])
+
     parser = argparse.ArgumentParser(
         prog="mcp-doctor",
         description="Audit an MCP server implementation for spec conformance and quality issues.",
