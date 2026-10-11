@@ -2,7 +2,13 @@
 
 Lint the MCP server you're building for what breaks the agent calling it, then fix what it finds. Works on Python, TypeScript and Go servers.
 
-Ask "check my MCP server", or run `/mcp-doctor:mcp-doctor path/to/server`. The skill:
+Install:
+
+```
+/plugin install mcp-doctor --marketplace vishalhabib99/mcp-doctor
+```
+
+Then ask "check my MCP server", or run `/mcp-doctor:mcp-doctor path/to/server`. The skill:
 
 1. runs the `mcp-doctor` CLI on your server's source (it reads code, never starts the server) and reports a quality grade and a separate security grade, plus the top five findings in terms of what goes wrong for the agent;
 2. shows the mechanical fixes as a diff and applies them when you say yes;
