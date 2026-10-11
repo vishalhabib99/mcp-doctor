@@ -144,7 +144,7 @@ jobs:
           suggest-fixes: true    # default: true — one-click fix suggestions on the PR's lines
 ```
 
-**Fix suggestions:** on a pull request, the safe fixes from `--fix` (a `None` default typed as nullable, missing `Args:` entries, a bare `except:`) are posted as GitHub suggestion blocks on the lines the PR changes, so accepting one is a click. GitHub only allows suggestions inside the PR's diff, so fixes on other lines are counted in the report comment with the full patch, ready for `git apply`. A re-run never posts the same suggestion twice. On a PR from a fork, GitHub's token is read-only, so the suggestions and comment are skipped with a warning instead of failing the check.
+**Fix suggestions:** on a pull request, the safe fixes from `--fix` (a `None` default typed as nullable, a bare `except:`) are posted as GitHub suggestion blocks on the lines the PR changes, so accepting one is a click. Missing `Args:` entries aren't suggested by default, because `--fix` can only add a `TODO: describe this parameter.` placeholder; the report counts those tools instead. Set `suggest-doc-stubs: true` to get the placeholders as suggestions too. GitHub only allows suggestions inside the PR's diff, so fixes on other lines are counted in the report comment with the full patch, ready for `git apply`. A re-run never posts the same suggestion twice. On a PR from a fork, GitHub's token is read-only, so the suggestions and comment are skipped with a warning instead of failing the check.
 
 The report also gets written to the job summary either way. `@v1` tracks the latest `v1.x` release; pin an exact tag or commit SHA instead if you need stricter reproducibility.
 

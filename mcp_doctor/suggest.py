@@ -88,13 +88,20 @@ def file_suggestions(path: str, original: str, fixed: str, allowed: set[int]) ->
     return suggestions, skipped
 
 
-def build(root: Path, pr_files: list[dict], repo_root: Path | None = None) -> dict:
+def build(root: Path, pr_files: list[dict], repo_root: Path | None = None, doc_stubs: bool = False) -> dict:
     """``pr_files`` is GitHub's ``GET /pulls/{n}/files`` response, whose
     paths are relative to ``repo_root``; ``root`` is the scanned path, which
-    can be a subdirectory of it."""
+    can be a subdirectory of it. Missing ``Args:`` entries are only suggested
+    with ``doc_stubs``: the fix is a TODO placeholder, not a description, so
+    by default those tools are counted instead."""
     repo_root = (repo_root or root).resolve()
     root = root.resolve()
-    planned = plan_fixes(root, analyze_repo(root))
+    report = analyze_repo(root)
+    planned = plan_fixes(root, report, doc_stubs=doc_stubs)
+    stubs_left = 0 if doc_stubs else sum(
+        1 for t in report.tools
+        if t.file.endswith(".py") and t.param_count > 0 and not t.has_docstring_params
+    )
     allowed_by_path = {f["filename"]: commentable_lines(f.get("patch", "")) for f in pr_files}
     suggestions: list[Suggestion] = []
     outside = 0
@@ -112,6 +119,7 @@ def build(root: Path, pr_files: list[dict], repo_root: Path | None = None) -> di
         "suggestions": [asdict(s) for s in suggestions],
         "outside_diff": outside,
         "files": len(planned),
+        "undocumented_tools": stubs_left,
         "patch": "".join(patch),
     }
 
@@ -152,8 +160,13 @@ _PATCH_LIMIT = 40_000  # a PR comment holds 65,536 characters, and the report go
 
 
 def summary_markdown(result: dict) -> str:
+    undocumented = result.get("undocumented_tools", 0)
+    docs_note = (
+        f"{undocumented} tool(s) have undocumented parameters. Those aren't suggested here: they need "
+        "a real description, so write the `Args:` lines by hand (`mcp-doctor . --fix` adds TODO placeholders)."
+    )
     if not result["files"]:
-        return ""
+        return f"\n{docs_note}\n" if undocumented else ""
     inline = len(result["suggestions"])
     lines = [
         "",
@@ -165,6 +178,8 @@ def summary_markdown(result: dict) -> str:
         "Apply them all locally: `pip install mcp-server-lint && mcp-doctor . --fix` "
         "(or preview with `--diff`).",
     ]
+    if undocumented:
+        lines += ["", docs_note]
     patch = result["patch"]
     if patch:
         if len(patch) > _PATCH_LIMIT:
@@ -186,9 +201,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--commit", default="", help="PR head SHA, for the review payload")
     parser.add_argument("--review-out", help="Write the review payload here (deleted if there's nothing new)")
     parser.add_argument("--summary-out", help="Write the summary comment section here")
+    parser.add_argument("--doc-stubs", action="store_true",
+                        help="Also suggest missing Args: entries (as TODO placeholders)")
     args = parser.parse_args(argv)
 
-    result = build(Path(args.path), _read_json_or_ndjson(Path(args.pr_files)), repo_root=Path.cwd())
+    result = build(Path(args.path), _read_json_or_ndjson(Path(args.pr_files)), repo_root=Path.cwd(),
+                   doc_stubs=args.doc_stubs)
     if args.review_out:
         existing = _read_json_or_ndjson(Path(args.existing)) if args.existing else []
         payload = review_payload(result, existing, args.commit)

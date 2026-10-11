@@ -93,7 +93,7 @@ def test_cli_prints_json(tmp_path):
         capture_output=True, text=True, cwd=tmp_path,
     )
     assert out.returncode == 0
-    assert json.loads(out.stdout) == {"suggestions": 0, "outside_diff": 0, "files": 0}
+    assert json.loads(out.stdout) == {"suggestions": 0, "outside_diff": 0, "files": 0, "undocumented_tools": 0}
 
 
 def test_review_payload_skips_suggestions_already_posted():
@@ -147,3 +147,41 @@ def test_cli_writes_review_and_summary(tmp_path):
     review = json.loads((tmp_path / "review.json").read_text())
     assert [c["line"] for c in review["comments"]] == [5]
     assert "1 suggested inline" in (tmp_path / "summary.md").read_text()
+
+
+_UNDOCUMENTED = dedent("""\
+    from mcp.server.fastmcp import FastMCP
+    mcp = FastMCP("x")
+
+    @mcp.tool()
+    def run(name: str = None) -> str:
+        \"\"\"Run the thing.\"\"\"
+        try:
+            return name or ""
+        except ValueError as e:
+            return str(e)
+    """)
+
+
+def test_doc_stubs_are_not_suggested_by_default(tmp_path):
+    (tmp_path / "app.py").write_text(_UNDOCUMENTED)
+    pr_files = [{"filename": "app.py", "patch": "@@ -0,0 +1,10 @@\n" + "".join(f"+{l}\n" for l in range(10))}]
+
+    result = build(tmp_path, pr_files)
+
+    # The null-default fix is still suggested; the TODO Args: stub is not.
+    [s] = result["suggestions"]
+    assert "name: str | None = None" in s["body"]
+    assert "TODO" not in s["body"] and "TODO" not in result["patch"]
+    assert result["undocumented_tools"] == 1
+    md = summary_markdown(result)
+    assert "1 tool(s) have undocumented parameters" in md
+
+    with_stubs = build(tmp_path, pr_files, doc_stubs=True)
+    assert any("TODO: describe this parameter." in s["body"] for s in with_stubs["suggestions"])
+    assert with_stubs["undocumented_tools"] == 0
+
+
+def test_summary_notes_undocumented_tools_even_with_nothing_to_fix():
+    md = summary_markdown({"files": 0, "suggestions": [], "outside_diff": 0, "patch": "", "undocumented_tools": 3})
+    assert "3 tool(s) have undocumented parameters" in md

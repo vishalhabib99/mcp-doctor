@@ -243,10 +243,11 @@ def _append_to_args_section(lines: list[str], fn: ast.FunctionDef | ast.AsyncFun
     return True
 
 
-def plan_fixes(root: Path, report: Report) -> dict[str, tuple[str, str]]:
+def plan_fixes(root: Path, report: Report, doc_stubs: bool = True) -> dict[str, tuple[str, str]]:
     """Compute the safe subset of fixes without writing anything. Returns
     {relative path: (original source, fixed source)} for each file that
-    would change."""
+    would change. ``doc_stubs=False`` leaves out the ``Args:`` entries, which
+    are TODO placeholders a person still has to write."""
     planned: dict[str, tuple[str, str]] = {}
 
     by_file: dict[str, list[ToolFinding]] = {}
@@ -274,7 +275,7 @@ def plan_fixes(root: Path, report: Report) -> dict[str, tuple[str, str]]:
             (t for t in findings if t.param_count > 0 and not t.has_docstring_params),
             key=lambda t: t.line,
             reverse=True,  # bottom-up, so inserting lines never shifts a function not yet fixed
-        )
+        ) if doc_stubs else []
         if needs_docs:
             lines = source.splitlines(keepends=True)
             tree2 = ast.parse(source, filename=str(path))
