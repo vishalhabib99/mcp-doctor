@@ -158,7 +158,7 @@ Catch it before the push. Add to `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/vishalhabib99/mcp-doctor
-    rev: v1.18.1
+    rev: v1.18.2
     hooks:
       - id: mcp-doctor
         # args: ["--fail-under", "80", "path/to/server"]   # default: --fail-under 70 on the repo root
