@@ -508,6 +508,50 @@ def test_class_based_tool_with_no_docstring_anywhere_flags_missing_description(t
     assert any(i.check == "description" for i in tool.issues)
 
 
+def test_class_based_tool_through_intermediate_base_class_detected(tmp_path):
+    # oraios/serena v1.3.0: 8 editing tools moved under a shared
+    # `EditingToolWithDiagnostics(Tool, ...)` base defined in another file and
+    # disappeared from the scan. The base itself has no apply() and isn't a tool.
+    write(tmp_path, "tools_base.py", """
+        class EditingToolWithDiagnostics(Tool, ToolMarkerCanEdit):
+            \"\"\"Base class for editing tools.\"\"\"
+        """)
+    write(tmp_path, "file_tools.py", """
+        class DeleteLinesTool(EditingToolWithDiagnostics, ToolMarkerOptional):
+            def apply(self, relative_path: str, start_line: int) -> str:
+                \"\"\"Deletes lines.\"\"\"
+                return relative_path
+        """)
+    report = analyze_repo(tmp_path)
+    assert [t.name for t in report.tools] == ["delete_lines"]
+
+
+def test_class_based_tool_honors_func_metadata_skip_names(tmp_path):
+    # oraios/serena builds every tool schema with the MCP SDK's
+    # func_metadata(apply_fn, skip_names=[..., cls.SESSION_ID_PARAM_NAME]),
+    # so an injected session_id never reaches the schema.
+    write(tmp_path, "tools_base.py", """
+        from mcp.server.fastmcp.utilities.func_metadata import func_metadata
+
+        class Tool:
+            SESSION_ID_PARAM_NAME = "session_id"
+
+            @classmethod
+            def get_apply_fn_metadata_from_cls(cls):
+                return func_metadata(cls.apply, skip_names=["self", "cls", cls.SESSION_ID_PARAM_NAME])
+        """)
+    write(tmp_path, "config_tools.py", """
+        class ActivateProjectTool(Tool):
+            def apply(self, project: str, session_id: str) -> str:
+                \"\"\"Activates a project.\"\"\"
+                return project
+        """)
+    report = analyze_repo(tmp_path)
+    tool = next(t for t in report.tools if t.name == "activate_project")
+    assert tool.param_names == ["project"]
+    assert tool.required_param_names == ["project"]
+
+
 def test_sphinx_style_param_docs_recognized_for_decorator_tool(tmp_path):
     # :param name: ... (reST/Sphinx style) is a distinct, real convention from
     # the Google-style `Args:` section already supported — no heading needed.

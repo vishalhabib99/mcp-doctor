@@ -21,7 +21,7 @@
 ## Why trust the grade
 
 - **Recall is measured in the open:** 15,755 of 15,977 tools found across 805 real servers on 5 frameworks. Every miss is listed in [docs/coverage.md](docs/coverage.md).
-- **105 bugs found and fixed after release** by running it on 40+ real servers, up to the 91.0k★ official `modelcontextprotocol/servers` monorepo. [How 69 of them got through](docs/postmortem-69-bugs.md).
+- **106 bugs found and fixed after release** by running it on 40+ real servers, up to the 91.0k★ official `modelcontextprotocol/servers` monorepo. [How 69 of them got through](docs/postmortem-69-bugs.md).
 - **Maintainers act on the reports:** fixes merged upstream, e.g. [ha-mcp (4.9k★)](https://github.com/homeassistant-ai/ha-mcp/pull/2327). Every audited repo is ranked on the [leaderboard](https://vishalhabib99.github.io/mcp-doctor/), with a dated grade badge you can add to your README.
 
 ## What it is
@@ -158,7 +158,7 @@ Catch it before the push. Add to `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/vishalhabib99/mcp-doctor
-    rev: v1.18.2
+    rev: v1.18.3
     hooks:
       - id: mcp-doctor
         # args: ["--fail-under", "80", "path/to/server"]   # default: --fail-under 70 on the repo root

@@ -2209,11 +2209,66 @@ def _tool_name_from_class_name(class_name: str) -> str:
     return "".join("_" + c.lower() if c.isupper() else c for c in name).lstrip("_")
 
 
+def _repo_class_tool_bases(trees: list[tuple[str, ast.Module]]) -> set[str]:
+    """`Tool` plus every repo class derived from it, directly or through each
+    other. Found on `oraios/serena` v1.3.0: 8 real tools moved under a shared
+    `EditingToolWithDiagnostics(Tool, ...)` base and vanished from the scan,
+    which `--diff-against` then reported as 8 removed tools."""
+    classes = [n for _, tree in trees for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]
+    found = {"Tool"}
+    changed = True
+    while changed:
+        changed = False
+        for cls in classes:
+            if cls.name not in found and any(_class_bases_include(cls, b) for b in found):
+                found.add(cls.name)
+                changed = True
+    return found
+
+
+def _func_metadata_skip_names(trees: list[tuple[str, ast.Module]]) -> set[str]:
+    """Parameter names a repo hides from its tool schemas via the MCP SDK's
+    `func_metadata(fn, skip_names=[...])` — serena builds every class-based
+    tool's schema this way and skips an injected `session_id` (named through a
+    class constant, `cls.SESSION_ID_PARAM_NAME`), which was otherwise reported
+    as a newly required parameter. Constants are resolved by name from any
+    module- or class-level `NAME = "..."` assignment in the repo; anything
+    unresolvable is ignored, never guessed."""
+    constants: dict[str, str] = {}
+    for _, tree in trees:
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+                    and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)):
+                constants.setdefault(node.targets[0].id, node.value.value)
+    names: set[str] = set()
+    for _, tree in trees:
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            func_name = func.attr if isinstance(func, ast.Attribute) else (func.id if isinstance(func, ast.Name) else None)
+            if func_name != "func_metadata":
+                continue
+            for kw in node.keywords:
+                if kw.arg != "skip_names" or not isinstance(kw.value, (ast.List, ast.Tuple)):
+                    continue
+                for elt in kw.value.elts:
+                    if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                        names.add(elt.value)
+                    else:
+                        ref = elt.attr if isinstance(elt, ast.Attribute) else (elt.id if isinstance(elt, ast.Name) else None)
+                        if ref in constants:
+                            names.add(constants[ref])
+    return names - {"self", "cls"}
+
+
 def _find_class_based_tools(
     tree: ast.Module,
     file: str,
     alias_registry: dict[str, bool] | None = None,
     error_handling_registry: dict[str, bool] | None = None,
+    tool_bases: set[str] | None = None,
+    skip_names: set[str] | None = None,
 ) -> list[ToolFinding]:
     """A class-based tool registry: `class XyzTool(Tool):` with an `apply()`
     method as the handler — no decorator, no `Tool(...)` constructor call
@@ -2226,8 +2281,9 @@ def _find_class_based_tools(
     this module — doesn't verify the ancestor actually resolves to a real
     "Tool" base class."""
     findings = []
+    bases = tool_bases or {"Tool"}
     for node in ast.walk(tree):
-        if not isinstance(node, ast.ClassDef) or not _class_bases_include(node, "Tool"):
+        if not isinstance(node, ast.ClassDef) or not any(_class_bases_include(node, b) for b in bases):
             continue
         apply_fn = next(
             (n for n in node.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "apply"),
@@ -2248,6 +2304,7 @@ def _find_class_based_tools(
             description_override=class_doc.strip() if class_doc else None,
             alias_registry=alias_registry,
             name_override=_tool_name_from_class_name(node.name),
+            excluded_arg_names=skip_names,
             error_handling_registry=error_handling_registry,
         ))
     return findings
@@ -2420,6 +2477,8 @@ def analyze_repo(root: Path) -> Report:
     repo_uses_fastmcp = any(_imports_fastmcp(tree) for _, tree in trees)
     decorator_names = FASTMCP_DECORATOR_NAMES | _collect_tool_decorator_names(trees)
     custom_tool_classes = _repo_tool_subclasses(trees)
+    class_tool_bases = _repo_class_tool_bases(trees)
+    class_tool_skip_names = _func_metadata_skip_names(trees)
     tools: list[ToolFinding] = []
     for rel, tree in trees:
         tools.extend(_find_fastmcp_tools(
@@ -2431,7 +2490,10 @@ def analyze_repo(root: Path) -> Report:
             custom_tool_classes=custom_tool_classes,
         ))
         tools.extend(_find_lowlevel_tools(tree, rel))
-        tools.extend(_find_class_based_tools(tree, rel, alias_registry, error_handling_registry))
+        tools.extend(_find_class_based_tools(
+            tree, rel, alias_registry, error_handling_registry,
+            tool_bases=class_tool_bases, skip_names=class_tool_skip_names,
+        ))
 
     mount_namespace_map = _build_mount_namespace_map(trees)
     for t in tools:
