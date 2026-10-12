@@ -1,0 +1,8 @@
+- id: mcp-doctor
+  name: mcp-doctor
+  description: Grade your MCP server's tool definitions and fail the commit if the quality score drops below the threshold.
+  entry: mcp-doctor
+  language: python
+  args: ["--fail-under", "70"]
+  pass_filenames: false
+  files: \.(py|ts|tsx|js|mjs|cjs|go)$

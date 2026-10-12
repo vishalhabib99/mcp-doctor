@@ -151,6 +151,21 @@ The report also gets written to the job summary either way. `@v1` tracks the lat
 
 Want mcp-fuzz's runtime resilience checks and mcp-reality-check's output-fidelity checks in the same PR check, not just this one? [`mcp-trust-check`](https://github.com/vishalhabib99/mcp-trust-check) wraps all three behind a single Action and one combined score.
 
+## pre-commit hook
+
+Catch it before the push. Add to `.pre-commit-config.yaml`:
+
+```yaml
+repos:
+  - repo: https://github.com/vishalhabib99/mcp-doctor
+    rev: v1.18.1
+    hooks:
+      - id: mcp-doctor
+        # args: ["--fail-under", "80", "path/to/server"]   # default: --fail-under 70 on the repo root
+```
+
+It runs when a commit touches `.py`, `.ts`/`.tsx`, `.js`/`.mjs`/`.cjs` or `.go` files and fails the commit if the quality score is under the threshold. A repo where no tools are found gets a warning and passes, same as `--fail-under` on the CLI.
+
 ## Claude Code plugin
 
 Run the same scan without leaving Claude Code, and let Claude fix what it finds:
