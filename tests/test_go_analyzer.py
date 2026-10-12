@@ -862,10 +862,9 @@ def test_mark3labs_new_tool_var_resolved_at_add_tool_site(tmp_path):
     assert not any(i.check == "description" for i in tool.issues)
 
 
-def test_mark3labs_new_tool_var_with_ambiguous_name_not_resolved(tmp_path):
-    # Same local variable name bound to two different NewTool calls in the
-    # same file — same "don't guess on an ambiguous name" rule used by the
-    # const/struct registries elsewhere in this module.
+def test_mark3labs_new_tool_var_same_name_in_two_functions_resolved_per_function(tmp_path):
+    # The same local name bound to a different NewTool call in each of two
+    # functions — each AddTool resolves to its own function's binding.
     write(tmp_path, "server.go", """
         package main
 
@@ -877,6 +876,44 @@ def test_mark3labs_new_tool_var_with_ambiguous_name_not_resolved(tmp_path):
         func registerB() {
             t := mcp.NewTool("tool_b", mcp.WithDescription("B"))
             s.AddTool(t, handlerB)
+        }
+        """)
+    findings, _ = find_go_tools(tmp_path)
+    assert [(f.name, f.description_text) for f in findings] == [("tool_a", "A"), ("tool_b", "B")]
+
+
+def test_mark3labs_new_tool_var_reassigned_resolves_each_add_tool(tmp_path):
+    # `tool := mcp.NewTool(...)`, then `tool = mcp.NewTool(...)` for the next
+    # one (achetronic/mcp-forge). Before, the second AddTool resolved to the
+    # first binding: the first tool was reported twice, with a false
+    # duplicate-name warning.
+    write(tmp_path, "server.go", """
+        package main
+
+        func addTools() {
+            tool := mcp.NewTool("hello_world", mcp.WithDescription("Say hello"))
+            s.AddTool(tool, handleHello)
+
+            tool = mcp.NewTool("whoami", mcp.WithDescription("Who am I"))
+            s.AddTool(tool, handleWhoami)
+        }
+        """)
+    findings, _ = find_go_tools(tmp_path)
+    assert [(f.name, f.line) for f in findings] == [("hello_world", 6), ("whoami", 9)]
+
+
+def test_mark3labs_new_tool_var_bound_in_branch_not_resolved(tmp_path):
+    # The binding that reaches AddTool depends on a branch — left unresolved
+    # rather than guessed at.
+    write(tmp_path, "server.go", """
+        package main
+
+        func addTools(admin bool) {
+            t := mcp.NewTool("basic", mcp.WithDescription("Basic"))
+            if admin {
+                t = mcp.NewTool("admin", mcp.WithDescription("Admin"))
+            }
+            s.AddTool(t, handler)
         }
         """)
     findings, _ = find_go_tools(tmp_path)

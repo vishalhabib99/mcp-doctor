@@ -347,39 +347,67 @@ def _collect_struct_types(tree_root, src: bytes) -> dict[str, tuple["Node", byte
     return registry
 
 
-def _collect_local_new_tool_vars(tree_root, src: bytes) -> dict[str, "Node"]:
-    """Same-file registry of `name := mcp.NewTool(...)` local variables, for
-    resolving `s.AddTool(name, handler)` where the tool is built one
-    statement earlier rather than inline at the call site — verified against
-    `isaacphi/mcp-language-server`, where every one of its tools is
-    registered this way. Same ambiguous-name safety rule as
-    `_collect_struct_types`: a name bound to more than one NewTool call in
-    the file is left unresolved rather than guessed at."""
-    registry: dict[str, "Node"] = {}
-    ambiguous: set[str] = set()
+def _collect_local_new_tool_vars(tree_root, src: bytes) -> dict[str, list[tuple["Node", "Node | None"]]]:
+    """Same-file record of every single-variable binding (`name := ...` or
+    `name = ...`) of each local name, in source order, with the
+    `mcp.NewTool(...)` call it binds (None for any other value). Used by
+    `_resolve_local_new_tool_var` to resolve `s.AddTool(name, handler)` where
+    the tool is built one statement earlier rather than inline at the call
+    site — verified against `isaacphi/mcp-language-server`, where every one of
+    its tools is registered this way. Plain `=` reassignment is recorded too:
+    `tool := mcp.NewTool("a", ...); s.AddTool(tool, h); tool = mcp.NewTool("b",
+    ...); s.AddTool(tool, h)` registers two tools (achetronic/mcp-forge), and
+    resolving the second call by name alone reported "a" twice and a false
+    duplicate-name warning."""
+    registry: dict[str, list[tuple["Node", "Node | None"]]] = {}
     for node in _walk(tree_root):
-        if node.type != "short_var_declaration":
+        if node.type not in ("short_var_declaration", "assignment_statement"):
             continue
         left = node.child_by_field_name("left")
         right = node.child_by_field_name("right")
         if left is None or right is None:
             continue
         left_ids = [c for c in left.children if c.type == "identifier"]
-        right_vals = [c for c in right.children if c.type == "call_expression"]
+        right_vals = [c for c in right.children if c.is_named]
         if len(left_ids) != 1 or len(right_vals) != 1:
             continue
         call = right_vals[0]
-        if _selector_field(call.child_by_field_name("function")) != "NewTool":
-            continue
-        name = _text(left_ids[0], src)
-        if name in ambiguous:
-            continue
-        if name in registry and registry[name] is not call:
-            ambiguous.add(name)
-            del registry[name]
-            continue
-        registry[name] = call
+        if call.type != "call_expression" or _selector_field(call.child_by_field_name("function")) != "NewTool":
+            call = None
+        registry.setdefault(_text(left_ids[0], src), []).append((node, call))
     return registry
+
+
+def _enclosing_function(node):
+    n = node.parent
+    while n is not None and n.type not in ("function_declaration", "method_declaration", "func_literal"):
+        n = n.parent
+    return n
+
+
+def _contains(outer, inner) -> bool:
+    return outer.start_byte <= inner.start_byte and inner.end_byte <= outer.end_byte
+
+
+def _resolve_local_new_tool_var(name: str, use_site, bindings: dict) -> "Node | None":
+    """The `mcp.NewTool(...)` call that `name` holds at `use_site`: the last
+    binding of `name` before it in the same function. Left unresolved rather
+    than guessed at when that binding isn't a NewTool call, or sits in a
+    block that doesn't enclose the use site (an `if`/`else` choosing between
+    two tools)."""
+    func = _enclosing_function(use_site)
+    if func is None:
+        return None
+    prior = [
+        (stmt, call) for stmt, call in bindings.get(name, [])
+        if stmt.end_byte <= use_site.start_byte and _contains(func, stmt)
+    ]
+    if not prior:
+        return None
+    stmt, call = prior[-1]
+    if stmt.parent is None or not _contains(stmt.parent, use_site):
+        return None
+    return call
 
 
 def _collect_function_decls(tree_root, src: bytes) -> dict[str, tuple["Node", bytes]]:
@@ -1074,11 +1102,11 @@ def find_go_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
             if is_add_tool and len(arg_nodes) == 2:
                 # mark3labs/mcp-go's fluent-builder style: `s.AddTool(mcp.NewTool(...), handler)`,
                 # or the tool built one statement earlier and referenced by
-                # name — `t := mcp.NewTool(...); s.AddTool(t, handler)`
+                # name — `t := mcp.NewTool(...); s.AddTool(t, handler)`, `t = ...` reassignments included
                 # (verified against isaacphi/mcp-language-server).
                 new_tool_call = arg_nodes[0]
                 if new_tool_call.type == "identifier":
-                    new_tool_call = local_new_tool_vars.get(_text(new_tool_call, src))
+                    new_tool_call = _resolve_local_new_tool_var(_text(new_tool_call, src), node, local_new_tool_vars)
                 if (
                     new_tool_call is None
                     or new_tool_call.type != "call_expression"
