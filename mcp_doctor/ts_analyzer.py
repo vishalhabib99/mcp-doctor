@@ -295,6 +295,44 @@ def _map_projection_receiver(node, src: bytes):
     return func.child_by_field_name("object")
 
 
+def _map_member_projection(node, src: bytes):
+    """For `tools: TOOLS.map((t) => t.schema)`, return (`TOOLS`, "schema"):
+    each registry entry holds its `Tool` under one property, so the tool is
+    that property of each element. Bug #107: ZenNotes/zennotes serves 34
+    tools this way (`const TOOLS: ToolDef[] = [{ schema: {...}, handler }]`)
+    and 0 were found. Only a one-parameter arrow whose body is exactly
+    `param.key` counts; anything else is left to the other shapes."""
+    if node is None or node.type != "call_expression":
+        return None
+    func = node.child_by_field_name("function")
+    if func is None or func.type != "member_expression":
+        return None
+    prop = func.child_by_field_name("property")
+    if prop is None or _text(prop, src) != "map":
+        return None
+    args_node = node.child_by_field_name("arguments")
+    call_args = [c for c in args_node.children if c.type not in ("(", ")", ",")] if args_node else []
+    if len(call_args) != 1 or call_args[0].type != "arrow_function":
+        return None
+    arrow = call_args[0]
+    param = arrow.child_by_field_name("parameter")
+    if param is None:
+        params = arrow.child_by_field_name("parameters")
+        names = [c for c in _walk(params) if c.type == "identifier"] if params is not None else []
+        if len(names) != 1:
+            return None
+        param = names[0]
+    body = arrow.child_by_field_name("body")
+    while body is not None and body.type == "parenthesized_expression":
+        body = next((c for c in body.children if c.type not in ("(", ")")), None)
+    if body is None or body.type != "member_expression":
+        return None
+    obj, key = body.child_by_field_name("object"), body.child_by_field_name("property")
+    if obj is None or key is None or obj.type != "identifier" or _text(obj, src) != _text(param, src):
+        return None
+    return func.child_by_field_name("object"), _text(key, src)
+
+
 def _collect_tool_array_elements(array_node, src: bytes, consts: dict, depth: int = 0):
     """Return [(tool_object_node, its_src), ...] for every literal `Tool` object
     a `tools` array directly contains, following `...someConstArray` spreads
@@ -1130,10 +1168,24 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
             # `tools: registry.map(t => ({ name: t.name, ... }))`: each
             # registry entry is one tool, so read the entries themselves.
             mapped = _map_projection_receiver(tools_array_raw, src)
+            member = _map_member_projection(tools_array_raw, src) if mapped is None else None
+            if member is not None:
+                mapped = member[0]
             tools_array, tools_array_src = _resolve(
                 mapped if mapped is not None else tools_array_raw, src, consts
             )
             tool_elements = _collect_tool_array_elements(tools_array, tools_array_src, consts)
+            if member is not None:
+                # `TOOLS.map((t) => t.schema)`: the tool is each entry's `schema`.
+                projected = []
+                for entry, entry_src in tool_elements:
+                    inner = _object_pairs(entry, entry_src).get(member[1])
+                    if inner is None:
+                        continue
+                    inner, inner_src = _resolve(inner, entry_src, consts)
+                    if inner is not None and inner.type == "object":
+                        projected.append((inner, inner_src))
+                tool_elements = projected
 
         for tool_obj, tool_src in tool_elements:
             pairs = _object_pairs(tool_obj, tool_src)

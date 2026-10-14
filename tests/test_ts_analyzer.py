@@ -1470,6 +1470,46 @@ def test_list_tools_map_that_does_not_project_tools_is_not_read_as_a_registry(tm
     assert findings == []
 
 
+def test_list_tools_map_reading_one_property_of_each_registry_entry(tmp_path):
+    # Bug #107, from ZenNotes/zennotes (0 of 34 found): each registry entry
+    # holds its Tool under `schema`, and the handler returns `TOOLS.map((t) => t.schema)`.
+    write(tmp_path, "src/mcp/server.ts", """
+        import { ListToolsRequestSchema, type Tool } from "@modelcontextprotocol/sdk/types.js";
+        interface ToolDef { schema: Tool; handler: (args: unknown) => Promise<unknown> }
+        const TOOLS: ToolDef[] = [
+          {
+            schema: { name: "vault_info", description: "Return where the vault lives and its layout.", inputSchema: { type: "object", properties: {} } },
+            handler: async () => ({}),
+          },
+          {
+            schema: { name: "read_note", description: "Read a note by its path.", inputSchema: { type: "object", properties: { path: { type: "string" } } } },
+            handler: async (args) => args,
+          },
+        ];
+        server.setRequestHandler(ListToolsRequestSchema, async () => ({
+          tools: TOOLS.map((t) => t.schema)
+        }));
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    by_name = {f.name: f for f in findings}
+    assert set(by_name) == {"vault_info", "read_note"}
+    assert by_name["read_note"].line == 10
+    assert any("have no description" in i.message for i in by_name["read_note"].issues)
+    assert by_name["vault_info"].issues == []
+
+
+def test_list_tools_map_reading_a_property_that_is_not_a_tool_finds_nothing(tmp_path):
+    # `.map((l) => l.config)` over entries whose `config` isn't a `{ name, ... }`
+    # object literal: nothing to report, and nothing guessed.
+    write(tmp_path, "server.ts", """
+        import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+        const loaders = [{ name: "not_a_tool", config: buildConfig() }];
+        server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: loaders.map((l) => l.config) }));
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert findings == []
+
+
 def test_mjs_and_cjs_servers_are_scanned(tmp_path):
     # Bug #83, from xixihhhh/clipforge (0 of 30 found): the whole server is
     # one .mjs file, which the file filter skipped. Test and fixture files stay out.
