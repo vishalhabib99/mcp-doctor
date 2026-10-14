@@ -3025,3 +3025,20 @@ def test_stdout_write_not_flagged_in_agent_framework_or_example_files(tmp_path):
         """)
     report = analyze_repo(tmp_path)
     assert not any(i.check == "stdout_write" for t in report.tools for i in t.issues)
+
+
+def test_tool_module_named_like_a_test_without_sdk_import_is_scanned(tmp_path):
+    # Bug #109: jesse-ai/jesse's significance_test.py registers 8 tools through
+    # register_*(mcp) and imports no MCP library; it was skipped as a test file.
+    (tmp_path / "server.py").write_text(
+        "from mcp.server.fastmcp import FastMCP\nfrom significance_test import register\nmcp = FastMCP('x')\nregister(mcp)\n"
+    )
+    (tmp_path / "significance_test.py").write_text(
+        "def register(mcp):\n    @mcp.tool()\n    def run_significance_test(session_id: str) -> str:\n"
+        "        \"\"\"Run a significance test.\n\n        Args:\n            session_id: Session.\n        \"\"\"\n        return session_id\n"
+    )
+    (tmp_path / "helpers_test.py").write_text(
+        "import pytest\n\ndef test_helper():\n    assert True\n"
+    )
+    report = analyze_repo(tmp_path)
+    assert [t.name for t in report.tools] == ["run_significance_test"]

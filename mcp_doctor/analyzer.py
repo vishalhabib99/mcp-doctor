@@ -2369,6 +2369,9 @@ _PY_TEST_CONTENT = re.compile(
     r"^\s*(?:async\s+)?def test_|^class Test|^\s*(?:import|from)\s+(?:pytest|unittest)\b", re.M
 )
 _PY_MCP_IMPORT = re.compile(r"^\s*(?:import|from)\s+(?:mcp|fastmcp)\b", re.M)
+# A register_*(mcp) module gets the server passed in, so it decorates tools
+# without importing an MCP library (jesse-ai/jesse's significance_test.py).
+_PY_TOOL_DECORATOR = re.compile(r"^\s*@\w+(?:\.\w+)*\.tool\b", re.M)
 
 
 def _is_auxiliary_file(path: Path) -> bool:
@@ -2387,7 +2390,8 @@ def _is_auxiliary_file(path: Path) -> bool:
             text = path.read_text(errors="ignore")
         except OSError:
             return True
-        return not (_PY_MCP_IMPORT.search(text) and not _PY_TEST_CONTENT.search(text))
+        is_server = _PY_MCP_IMPORT.search(text) or _PY_TOOL_DECORATOR.search(text)
+        return not (is_server and not _PY_TEST_CONTENT.search(text))
     if name.endswith(_JS_TEST_SUFFIXES):
         return True
     return any(part in ("test", "tests", "scripts", "benchmarks") for part in path.parts)

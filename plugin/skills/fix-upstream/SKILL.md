@@ -35,13 +35,15 @@ Run `MCPD --diff --fix-only none-default <path>`. Read every file in the diff an
 
 **Size routing.** If what's left changes more than ~30 parameters or ~10 files, don't draft a PR. Draft an **issue** instead, with the repro, the count, and an offer to send the PR, so the maintainer chooses how big a change to take.
 
+**String parameters that take JSON text.** On the official SDK (`mcp.server.fastmcp`, `mcp.server.mcpserver`), any annotation other than exactly `str` makes the server JSON-decode a string argument. So `str | None` would turn a `'{...}'` or `'[...]'` value that works today into a validation error, and the literal text `"null"` into `None`. The CLI leaves such parameters alone when their name or docs mention JSON, and lists them after "Left N None-default parameter(s) as they are". Still read every `str` parameter in the diff: if it carries JSON (or JSON-looking text) and the docs don't say so, revert that hunk too. Those parameters belong in an issue, not this PR. Standalone `fastmcp` doesn't pre-parse, so this doesn't apply there.
+
 Then apply: `MCPD --fix --fix-only none-default <path>`. Revert (`git checkout -- <file>`) any file you dropped above. The diff must touch only annotations: `T` → `T | None` (or `Optional[T]` where the file already imports it), nothing else.
 
 ## 3. Prove it: a failing test first
 
 Write one regression test in the repo's own test style and location: list the server's tools through its real `FastMCP`/`MCPServer` object, and assert that every parameter whose schema says `"default": null` also accepts null (its schema type includes `"null"`, or an in-memory call with that argument set to `None` passes validation). Look at how the repo's tests already build the server and copy that. Never start a real backend, log in to a service, or call a tool that has side effects; schema checks and argument validation are enough.
 
-Run it on the original code (`git stash`), and it must **fail**. Then run it on the patch, and it must **pass**. If it doesn't fail on the original, the bug doesn't apply here (wrong SDK path, custom validation): drop the draft and say so.
+On the official SDK, also check that a `str` parameter you changed still accepts a JSON-looking string such as `'{"a": 1}'` after the fix, since step 2 explains why it might not. Run it on the original code (`git stash`), and it must **fail**. Then run it on the patch, and it must **pass**. If it doesn't fail on the original, the bug doesn't apply here (wrong SDK path, custom validation): drop the draft and say so.
 
 ## 4. Run the repo's tests
 

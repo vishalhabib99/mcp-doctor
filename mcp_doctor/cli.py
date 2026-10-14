@@ -10,6 +10,19 @@ from .report import render_json, render_text
 from .schema_diff import compute_schema_diff
 
 
+def _print_skipped(skipped: list[str]) -> None:
+    if not skipped:
+        return
+    print(
+        f"Left {len(skipped)} None-default parameter(s) as they are: each takes JSON text, and on the "
+        "official MCP SDK `str | None` makes the server JSON-decode the value, so a '{...}' or '[...]' "
+        "string that works today would be rejected. Fix these by hand:",
+        file=sys.stderr,
+    )
+    for item in skipped:
+        print(f"  {item}", file=sys.stderr)
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["init-action"]:
@@ -89,24 +102,28 @@ def main(argv: list[str] | None = None) -> int:
 
         from .fix import plan_fixes
 
-        planned = plan_fixes(root, report, only=only)
+        skipped: list[str] = []
+        planned = plan_fixes(root, report, only=only, skipped=skipped)
         for rel_file, (original, fixed) in planned.items():
             sys.stdout.writelines(difflib.unified_diff(
                 original.splitlines(keepends=True), fixed.splitlines(keepends=True),
                 fromfile=f"a/{rel_file}", tofile=f"b/{rel_file}",
             ))
         print(f"{len(planned)} file(s) would change." if planned else "Nothing to fix.", file=sys.stderr)
+        _print_skipped(skipped)
         return 0
 
     if args.fix:
         from .fix import apply_fixes
 
-        changed = apply_fixes(root, report, only=only)
+        skipped = []
+        changed = apply_fixes(root, report, only=only, skipped=skipped)
         if changed:
             print(f"Fixed {len(changed)} file(s): {', '.join(changed)}", file=sys.stderr)
             report = analyze_repo(root)
         else:
             print("Nothing to fix.", file=sys.stderr)
+        _print_skipped(skipped)
 
     schema_changes = []
     if args.diff_against:

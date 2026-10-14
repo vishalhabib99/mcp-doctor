@@ -535,3 +535,105 @@ def test_fix_only_cli_diff_and_bad_kind(tmp_path):
     assert bad.returncode == 2 and "typo" in bad.stderr
     alone = subprocess.run(cmd + ["--fix-only", "none-default"], capture_output=True, text=True)
     assert alone.returncode == 2 and "needs --fix or --diff" in alone.stderr
+
+
+def test_official_sdk_json_text_param_is_left_alone(tmp_path):
+    # Bug #108: on the official SDK, `str | None` makes the server JSON-decode
+    # the argument, so a '{...}' value that works today would be rejected.
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        @mcp.tool()
+        def update_notes(session_id: str, title: str = None, strategy_codes: str = None, raw_json: str = None) -> str:
+            \"\"\"Update notes.
+
+            Args:
+                session_id: Session.
+                title: Short title.
+                strategy_codes: JSON object string of code snapshots.
+                raw_json: Raw payload.
+            \"\"\"
+            return session_id
+        """)
+    skipped = []
+    apply_fixes(tmp_path, analyze_repo(tmp_path), only=frozenset({"none-default"}), skipped=skipped)
+    fixed = (tmp_path / "server.py").read_text()
+    assert "title: str | None = None" in fixed
+    assert "strategy_codes: str = None" in fixed
+    assert "raw_json: str = None" in fixed
+    assert skipped == ["server.py: update_notes.strategy_codes", "server.py: update_notes.raw_json"]
+
+
+def test_standalone_fastmcp_json_text_param_is_still_fixed(tmp_path):
+    # Standalone fastmcp doesn't pre-parse string arguments, so the fix is safe there.
+    write(tmp_path, "server.py", """
+        from fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        @mcp.tool()
+        def update_notes(strategy_codes: str = None) -> str:
+            \"\"\"Update notes.
+
+            Args:
+                strategy_codes: JSON object string of code snapshots.
+            \"\"\"
+            return ""
+        """)
+    skipped = []
+    apply_fixes(tmp_path, analyze_repo(tmp_path), only=frozenset({"none-default"}), skipped=skipped)
+    assert "strategy_codes: str | None = None" in (tmp_path / "server.py").read_text()
+    assert skipped == []
+
+
+def test_register_module_without_sdk_import_follows_repo_sdk(tmp_path):
+    # A register_*(mcp) module has no SDK import; the repo's server file decides.
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        from tools import register
+        mcp = FastMCP("x")
+        register(mcp)
+        """)
+    write(tmp_path, "tools.py", """
+        def register(mcp):
+            @mcp.tool()
+            def run(payload: str = None, limit: int = None) -> str:
+                \"\"\"Run.
+
+                Args:
+                    payload: JSON array of steps.
+                    limit: Max steps.
+                \"\"\"
+                return ""
+        """)
+    skipped = []
+    apply_fixes(tmp_path, analyze_repo(tmp_path), only=frozenset({"none-default"}), skipped=skipped)
+    fixed = (tmp_path / "tools.py").read_text()
+    assert "payload: str = None" in fixed and "limit: int | None = None" in fixed
+    assert skipped == ["tools.py: run.payload"]
+
+
+def test_official_sdk_json_file_path_is_still_fixed(tmp_path):
+    # A path to a .json file is plain text; only JSON as the value is skipped.
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        @mcp.tool()
+        def upload(file_path: str = None, output_path: str = None) -> str:
+            \"\"\"Upload a collection.
+
+            Args:
+                file_path: absolute path to collection file (.zip or .json)
+                output_path: Where to write the report.
+
+            Returns:
+                JSON (str) with the result: {"ok": bool, "output_path": "..."}
+            \"\"\"
+            return ""
+        """)
+    skipped = []
+    apply_fixes(tmp_path, analyze_repo(tmp_path), only=frozenset({"none-default"}), skipped=skipped)
+    fixed = (tmp_path / "server.py").read_text()
+    assert "file_path: str | None = None" in fixed and "output_path: str | None = None" in fixed
+    assert skipped == []

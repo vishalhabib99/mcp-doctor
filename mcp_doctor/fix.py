@@ -20,6 +20,7 @@ function body in try/except (too invasive to do safely), or a partial
 from __future__ import annotations
 
 import ast
+import functools
 import re
 from pathlib import Path
 
@@ -160,7 +161,62 @@ def _nullable_target(annotation: ast.expr) -> ast.expr:
     return annotation
 
 
-def _fix_none_defaults(source: str, tree: ast.Module, findings: list[ToolFinding]) -> tuple[str, int]:
+_OFFICIAL_SDK_IMPORT = re.compile(r"^\s*(?:from|import)\s+mcp\.server\.(?:fastmcp|mcpserver)\b", re.M)
+_STANDALONE_FASTMCP_IMPORT = re.compile(r"^\s*(?:from|import)\s+fastmcp\b", re.M)
+_JSON_TEXT = re.compile(r"\bjson\b", re.I)
+
+
+def _uses_official_sdk(root: Path, source: str) -> bool:
+    """The official SDK (mcp.server.fastmcp / mcpserver) JSON-decodes a string
+    argument whose annotation isn't exactly `str`; standalone fastmcp doesn't.
+    The file's own import decides; a tools module with neither import (its
+    register_*(mcp) gets the server passed in) goes by the repo."""
+    if _OFFICIAL_SDK_IMPORT.search(source):
+        return True
+    if _STANDALONE_FASTMCP_IMPORT.search(source):
+        return False
+    return _repo_uses_official_sdk(root)
+
+
+@functools.lru_cache(maxsize=32)
+def _repo_uses_official_sdk(root: Path) -> bool:
+    for f in root.rglob("*.py"):
+        try:
+            text = f.read_text(errors="ignore")
+        except OSError:
+            continue
+        if _OFFICIAL_SDK_IMPORT.search(text):
+            return True
+    return False
+
+
+def _says_json_text(text: str) -> bool:
+    """JSON as the value itself, not a JSON file or a path to one."""
+    return bool(_JSON_TEXT.search(text)) and not re.search(r"\.json\b|\bfiles?\b|\bpaths?\b", text, re.I)
+
+
+def _takes_json_text(fn: ast.FunctionDef | ast.AsyncFunctionDef, arg: ast.arg) -> bool:
+    """A `str` parameter documented as carrying JSON text: by its name, its
+    docstring line, or a Field(description=...) in its annotation or default."""
+    base = _nullable_target(arg.annotation)
+    if not (isinstance(base, ast.Name) and base.id == "str"):
+        return False
+    if "json" in arg.arg.lower():
+        return True
+    doc = ast.get_docstring(fn) or ""
+    entry = re.compile(rf"^\s*{re.escape(arg.arg)}\s*[(:]")  # the param's own Args:/Parameters: line
+    if any(_says_json_text(line) for line in doc.splitlines() if entry.match(line)):
+        return True
+    for node in ast.walk(arg.annotation):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and _says_json_text(node.value):
+            return True
+    return False
+
+
+def _fix_none_defaults(
+    source: str, tree: ast.Module, findings: list[ToolFinding], official_sdk: bool = False,
+    skipped: list[str] | None = None,
+) -> tuple[str, int]:
     flagged_lines = {t.line for t in findings if any(i.check == "none_default_type" for i in t.issues)}
     if not flagged_lines:
         return source, 0
@@ -177,6 +233,12 @@ def _fix_none_defaults(source: str, tree: ast.Module, findings: list[ToolFinding
             if a.arg in ("self", "cls"):
                 continue
             if not (_is_none_default(defaults_by_arg.get(a)) and _annotation_rejects_none(a.annotation)):
+                continue
+            if official_sdk and _takes_json_text(fn, a):
+                # `str | None` would make the SDK JSON-decode the value, so a
+                # '{...}' or '[...]' string that works today would be rejected.
+                if skipped is not None:
+                    skipped.append(f"{fn.name}.{a.arg}")
                 continue
             target = _nullable_target(a.annotation)
             start = _char_offset(lines, target.lineno, target.col_offset)
@@ -248,13 +310,15 @@ FIX_KINDS = ("none-default", "bare-except", "args-stub")
 
 def plan_fixes(
     root: Path, report: Report, doc_stubs: bool = True, only: frozenset[str] | None = None,
+    skipped: list[str] | None = None,
 ) -> dict[str, tuple[str, str]]:
     """Compute the safe subset of fixes without writing anything. Returns
     {relative path: (original source, fixed source)} for each file that
     would change. ``doc_stubs=False`` leaves out the ``Args:`` entries, which
     are TODO placeholders a person still has to write. ``only`` limits the
     fixes to those kinds (see ``FIX_KINDS``), so one upstream PR can carry
-    one kind of fix."""
+    one kind of fix. Parameters left alone on purpose are appended to
+    ``skipped`` as "file: function.param"."""
     kinds = frozenset(FIX_KINDS) if only is None else only
     doc_stubs = doc_stubs and "args-stub" in kinds
     planned: dict[str, tuple[str, str]] = {}
@@ -277,7 +341,12 @@ def plan_fixes(
         # runs first; the docstring fixes below insert lines and re-parse.
         source = original
         if "none-default" in kinds:
-            source, _ = _fix_none_defaults(original, tree, findings)
+            file_skipped: list[str] = []
+            source, _ = _fix_none_defaults(
+                original, tree, findings, official_sdk=_uses_official_sdk(root, original), skipped=file_skipped,
+            )
+            if skipped is not None:
+                skipped.extend(f"{rel_file}: {name}" for name in file_skipped)
             tree = ast.parse(source, filename=str(path))
 
         if "bare-except" in kinds:
@@ -311,10 +380,12 @@ def plan_fixes(
     return planned
 
 
-def apply_fixes(root: Path, report: Report, only: frozenset[str] | None = None) -> list[str]:
+def apply_fixes(
+    root: Path, report: Report, only: frozenset[str] | None = None, skipped: list[str] | None = None,
+) -> list[str]:
     """Apply the safe subset of fixes in place. Returns the relative paths
     of files that were changed."""
-    planned = plan_fixes(root, report, only=only)
+    planned = plan_fixes(root, report, only=only, skipped=skipped)
     for rel_file, (_, fixed) in planned.items():
         (root / rel_file).write_text(fixed)
     return list(planned)
