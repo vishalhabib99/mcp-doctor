@@ -15,7 +15,7 @@ Runner: as in the `mcp-doctor` skill (`mcp-doctor`, else `uvx --from mcp-server-
 
 ## Scope: one kind of fix per PR
 
-Only the **`none-default`** fix is in scope today: a parameter written `name: str = None` advertises `"default": null` on a field whose type excludes null, so a client that sends the default explicitly gets a validation error. This was checked on 44 merged upstream fixes and a 19-repo forward test; the replayed patch matched what maintainers merged in every case. Other findings (missing descriptions, stdout writes, bare `except:`) need the maintainer's judgment or the user's own words. Mention them in your report, but don't draft them.
+Only the **`none-default`** fix is in scope today: a parameter written `name: str = None` advertises `"default": null` on a field whose type excludes null, so a client that sends the default explicitly gets a validation error. This was checked by replaying 15 merged upstream null-default fixes (the patch changed the same parameters the maintainers merged in all 15) and a 19-repo forward test. Other findings (missing descriptions, stdout writes, bare `except:`) need the maintainer's judgment or the user's own words. Mention them in your report, but don't draft them.
 
 ## 1. Check before touching anything
 
