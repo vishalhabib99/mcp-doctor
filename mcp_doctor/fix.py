@@ -243,11 +243,20 @@ def _append_to_args_section(lines: list[str], fn: ast.FunctionDef | ast.AsyncFun
     return True
 
 
-def plan_fixes(root: Path, report: Report, doc_stubs: bool = True) -> dict[str, tuple[str, str]]:
+FIX_KINDS = ("none-default", "bare-except", "args-stub")
+
+
+def plan_fixes(
+    root: Path, report: Report, doc_stubs: bool = True, only: frozenset[str] | None = None,
+) -> dict[str, tuple[str, str]]:
     """Compute the safe subset of fixes without writing anything. Returns
     {relative path: (original source, fixed source)} for each file that
     would change. ``doc_stubs=False`` leaves out the ``Args:`` entries, which
-    are TODO placeholders a person still has to write."""
+    are TODO placeholders a person still has to write. ``only`` limits the
+    fixes to those kinds (see ``FIX_KINDS``), so one upstream PR can carry
+    one kind of fix."""
+    kinds = frozenset(FIX_KINDS) if only is None else only
+    doc_stubs = doc_stubs and "args-stub" in kinds
     planned: dict[str, tuple[str, str]] = {}
 
     by_file: dict[str, list[ToolFinding]] = {}
@@ -266,10 +275,13 @@ def plan_fixes(root: Path, report: Report, doc_stubs: bool = True) -> dict[str, 
 
         # Re-typing a None default only edits text inside the signature, so it
         # runs first; the docstring fixes below insert lines and re-parse.
-        source, _ = _fix_none_defaults(original, tree, findings)
-        tree = ast.parse(source, filename=str(path))
+        source = original
+        if "none-default" in kinds:
+            source, _ = _fix_none_defaults(original, tree, findings)
+            tree = ast.parse(source, filename=str(path))
 
-        source, _ = _fix_bare_except_in_source(source, tree)
+        if "bare-except" in kinds:
+            source, _ = _fix_bare_except_in_source(source, tree)
 
         needs_docs = sorted(
             (t for t in findings if t.param_count > 0 and not t.has_docstring_params),
@@ -299,10 +311,10 @@ def plan_fixes(root: Path, report: Report, doc_stubs: bool = True) -> dict[str, 
     return planned
 
 
-def apply_fixes(root: Path, report: Report) -> list[str]:
+def apply_fixes(root: Path, report: Report, only: frozenset[str] | None = None) -> list[str]:
     """Apply the safe subset of fixes in place. Returns the relative paths
     of files that were changed."""
-    planned = plan_fixes(root, report)
+    planned = plan_fixes(root, report, only=only)
     for rel_file, (_, fixed) in planned.items():
         (root / rel_file).write_text(fixed)
     return list(planned)

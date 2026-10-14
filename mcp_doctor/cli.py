@@ -42,6 +42,13 @@ def main(argv: list[str] | None = None) -> int:
         help="Print the fixes --fix would make as a unified diff (pipe to `git apply`) and change nothing",
     )
     parser.add_argument(
+        "--fix-only",
+        metavar="KINDS",
+        default=None,
+        help="With --fix or --diff: make only these kinds of fix, comma-separated "
+        "(none-default, bare-except, args-stub), e.g. one kind per upstream PR",
+    )
+    parser.add_argument(
         "--diff-against",
         metavar="PATH",
         default=None,
@@ -57,6 +64,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    only = None
+    if args.fix_only is not None:
+        from .fix import FIX_KINDS
+
+        only = frozenset(k.strip() for k in args.fix_only.split(",") if k.strip())
+        unknown = sorted(only - set(FIX_KINDS))
+        if unknown or not only:
+            print(f"error: --fix-only takes {', '.join(FIX_KINDS)}; got {args.fix_only!r}", file=sys.stderr)
+            return 2
+        if not (args.fix or args.diff):
+            print("error: --fix-only needs --fix or --diff", file=sys.stderr)
+            return 2
+
     root = Path(args.path).resolve()
     if not root.exists():
         print(f"error: path does not exist: {root}", file=sys.stderr)
@@ -69,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
 
         from .fix import plan_fixes
 
-        planned = plan_fixes(root, report)
+        planned = plan_fixes(root, report, only=only)
         for rel_file, (original, fixed) in planned.items():
             sys.stdout.writelines(difflib.unified_diff(
                 original.splitlines(keepends=True), fixed.splitlines(keepends=True),
@@ -81,7 +101,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.fix:
         from .fix import apply_fixes
 
-        changed = apply_fixes(root, report)
+        changed = apply_fixes(root, report, only=only)
         if changed:
             print(f"Fixed {len(changed)} file(s): {', '.join(changed)}", file=sys.stderr)
             report = analyze_repo(root)

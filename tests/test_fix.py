@@ -485,3 +485,53 @@ def test_param_mentioned_in_unparsed_form_is_not_duplicated(tmp_path):
     original = (tmp_path / "server.py").read_text()
     assert apply_fixes(tmp_path, analyze_repo(tmp_path)) == []
     assert (tmp_path / "server.py").read_text() == original
+
+
+MIXED_SERVER = """
+    from mcp.server.fastmcp import FastMCP
+    mcp = FastMCP("x")
+
+    @mcp.tool()
+    def run(name: str = None) -> str:
+        \"\"\"Run the thing.\"\"\"
+        try:
+            return name or ""
+        except:
+            return "fail"
+    """
+
+
+def test_fix_only_none_default_leaves_other_kinds_alone(tmp_path):
+    write(tmp_path, "server.py", MIXED_SERVER)
+    changed = apply_fixes(tmp_path, analyze_repo(tmp_path), only=frozenset({"none-default"}))
+    assert changed == ["server.py"]
+    fixed = (tmp_path / "server.py").read_text()
+    assert "def run(name: str | None = None) -> str:" in fixed
+    assert "except:" in fixed
+    assert "TODO" not in fixed
+
+
+def test_fix_only_args_stub_adds_only_stubs(tmp_path):
+    write(tmp_path, "server.py", MIXED_SERVER)
+    apply_fixes(tmp_path, analyze_repo(tmp_path), only=frozenset({"args-stub"}))
+    fixed = (tmp_path / "server.py").read_text()
+    assert "name: TODO: describe this parameter." in fixed
+    assert "def run(name: str = None) -> str:" in fixed
+    assert "except:" in fixed
+
+
+def test_fix_only_cli_diff_and_bad_kind(tmp_path):
+    import subprocess
+    import sys
+
+    write(tmp_path, "server.py", MIXED_SERVER)
+    cmd = [sys.executable, "-m", "mcp_doctor.cli", str(tmp_path)]
+    result = subprocess.run(cmd + ["--diff", "--fix-only", "bare-except"], capture_output=True, text=True)
+    assert result.returncode == 0
+    assert "+    except Exception:" in result.stdout
+    assert "| None" not in result.stdout and "TODO" not in result.stdout
+
+    bad = subprocess.run(cmd + ["--diff", "--fix-only", "none-default,typo"], capture_output=True, text=True)
+    assert bad.returncode == 2 and "typo" in bad.stderr
+    alone = subprocess.run(cmd + ["--fix-only", "none-default"], capture_output=True, text=True)
+    assert alone.returncode == 2 and "needs --fix or --diff" in alone.stderr

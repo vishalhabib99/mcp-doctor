@@ -98,6 +98,7 @@ mcp-doctor . --json               # machine-readable output
 mcp-doctor . --fail-under 80      # exit 1 if score drops below 80% — wire into CI
 mcp-doctor . --diff               # preview the safe fixes as a patch (pipe to `git apply`); changes nothing
 mcp-doctor . --fix                # apply safe, mechanical fixes in place, then re-report
+mcp-doctor . --fix --fix-only none-default  # one kind of fix only (none-default, bare-except, args-stub), e.g. one kind per PR
 ```
 
 `--fix` only touches what's safe to fix without human judgment:
