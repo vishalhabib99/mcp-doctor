@@ -184,6 +184,8 @@ Then ask "check my MCP server", or run `/mcp-doctor:mcp-doctor path/to/server`. 
 3. writes the judgment fixes the CLI can't (tool and parameter descriptions, actionable error messages, stdout writes on a stdio server) after reading what each tool actually does, never inventing behavior;
 4. re-scans and shows before → after, then offers `init-action` to keep it checked on every PR.
 
+**Fixing someone else's server: `fix-upstream`.** In a local clone of a third-party MCP server, run `/mcp-doctor:fix-upstream` (or ask Claude to "draft a PR for this finding"). It turns a null-default finding into a pull-request draft a maintainer can merge: it first checks for an existing issue or PR and the repo's contribution rules, skips fixtures, examples and unregistered functions, writes a regression test that fails before the fix and passes after, and runs the repo's own tests before and after. It stops at a local branch plus a PR description in the repo's template. It never pushes or posts; you review and send. Patches over ~30 parameters become an issue draft instead. On the code from before 15 merged upstream null-default fixes, it changed the same parameters the maintainers merged in all 15 ([v1.19.0 release notes](https://github.com/vishalhabib99/mcp-doctor/releases/tag/v1.19.0)).
+
 Security findings are explained, not silently rewritten. The plugin lives in [`plugin/`](plugin/) and ships with an eval suite in [`plugin/evals/`](plugin/evals/): it checks when the skill should and shouldn't fire, that it reports the real grades, and that it doesn't "fix" a clean server or write tool descriptions the code doesn't back up.
 
 ## Runtime gate — the same two checks, applied to live `tools/list` metadata
