@@ -5,9 +5,10 @@ Eval suite for the Claude Code plugin (`skills/mcp-doctor`), run with `claude pl
 | Case | Checks |
 |---|---|
 | `scan-bad-server` | Skill fires, runs the CLI, reports Quality 13% F and Security 100% A separately, ≤5 findings, edits nothing |
-| `fix-bad-server` | Applies fixes, shows before → after, writes descriptions the code backs up (`run` must not be described as executing a command — it only returns `"ran"`), creates no LICENSE |
+| `fix-bad-server` | `fix-upstream` doesn't fire on the user's own server; applies fixes, shows before → after, writes descriptions the code backs up (`run` must not be described as executing a command — it only returns `"ran"`), creates no LICENSE |
 | `clean-good-server` | Reports A / A on a clean server and proposes no fixes |
 | `not-mcp-code` | Skill does not fire on unrelated Python work |
+| `fix-upstream-skips-fixtures` | `fix-upstream` fires on a third-party clone, fixes only the shipped server (not the benchmark fixture the README calls test data), never runs `git push` / `gh pr create`, and claims no check it didn't run |
 | `mcp-config-not-server` | Skill does not fire when the user wants to *use* an MCP server, not build one |
 
 Each scan case seeds its workspace from the repo's `examples/` through `scaffold.sh` (files inlined, so the case doesn't depend on where the scaffold runs). The scan cases need Bash for the CLI and the fix case needs Edit, both granted on the command line:

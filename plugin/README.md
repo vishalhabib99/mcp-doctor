@@ -17,6 +17,12 @@ Then ask "check my MCP server", or run `/mcp-doctor:mcp-doctor path/to/server`. 
 
 Security findings are explained, not silently rewritten.
 
+### Fixing someone else's server: `fix-upstream`
+
+Cloned an open-source MCP server that mcp-doctor flags? Ask "prepare an upstream fix as a PR draft" (or run `/mcp-doctor:fix-upstream path/to/clone`). The skill checks for an existing issue or PR and the repo's contribution rules. It applies one kind of fix (today: optional arguments that reject an explicit null), leaves out fixtures, examples and unregistered functions, and writes a regression test that fails before the fix and passes after. It runs the repo's own tests before and after, then commits on a local branch and writes the PR description. **It never pushes, opens a PR or posts anything**: you review and send it. Big changes (more than ~30 parameters) become an issue draft instead, so the maintainer chooses the scope.
+
+Why trust the patch: replayed on the code from before 15 merged upstream fixes, the patch matched what the maintainers merged in every case. A 19-repo forward test is what added the fixture filter, the size limit and the snapshot-test step.
+
 ## Requirements
 
 The `mcp-doctor` CLI, from the [`mcp-server-lint`](https://pypi.org/project/mcp-server-lint/) package on PyPI. If it isn't installed, the skill tries `uvx` or `pipx` (each asks you first), or tells you how to install it. If the CLI can't run, the skill says so and doesn't make up a grade.
