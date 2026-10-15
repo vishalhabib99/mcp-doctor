@@ -1,0 +1,38 @@
+name: "mcp-doctor comment"
+description: "Post the mcp-doctor report on a pull request from a fork. Runs from a workflow_run job after the mcp-doctor scan, which can't comment with a fork's read-only token."
+author: "Vishal Habib"
+branding:
+  icon: "message-square"
+  color: "purple"
+
+inputs:
+  github-token:
+    description: "Token with pull-requests: write and actions: read."
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Download the saved report
+      if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' }}
+      uses: actions/download-artifact@v4
+      continue-on-error: true   # no artifact = the scan posted its own comment
+      with:
+        name: mcp-doctor-report
+        path: mcp-doctor-handoff
+        run-id: ${{ github.event.workflow_run.id }}
+        github-token: ${{ inputs.github-token }}
+
+    - name: Post it on the pull request
+      if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        HEAD_OWNER: ${{ github.event.workflow_run.head_repository.owner.login }}
+        HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        HANDOFF_DIR: mcp-doctor-handoff
+      # Nothing from the PR is executed here: post.py only reads the artifact as text.
+      run: python3 "$GITHUB_ACTION_PATH/post.py"

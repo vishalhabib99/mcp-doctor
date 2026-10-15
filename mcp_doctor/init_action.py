@@ -8,6 +8,26 @@ import sys
 from pathlib import Path
 
 WORKFLOW_REL = Path(".github") / "workflows" / "mcp-doctor.yml"
+COMMENT_WORKFLOW_REL = Path(".github") / "workflows" / "mcp-doctor-comment.yml"
+
+# A fork's PR gets a read-only token, so the scan can't comment there. This
+# second workflow runs after the scan with a write token, never checks out the
+# PR's code, and posts the report the scan saved.
+COMMENT_WORKFLOW = """name: mcp-doctor comment
+on:
+  workflow_run:
+    workflows: ["mcp-doctor"]
+    types: [completed]
+permissions:
+  actions: read          # to download the report the scan saved
+  pull-requests: write   # to post it on a pull request from a fork
+jobs:
+  comment:
+    if: github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: vishalhabib99/mcp-doctor/comment@v1
+"""
 
 
 def render_workflow(path: str = ".", fail_under: int = 0) -> str:
@@ -39,7 +59,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="mcp-doctor init-action",
         description="Add the mcp-doctor GitHub Action to a repo: every pull request gets a report "
-        "comment and the safe fixes as one-click suggestions.",
+        "comment and the safe fixes as one-click suggestions, including pull requests from forks.",
     )
     parser.add_argument("path", nargs="?", default=".", help="The MCP server's directory (default: current directory). "
                         "The workflow goes in the enclosing git repo's root, pointed at this path.")
@@ -60,19 +80,28 @@ def main(argv: list[str] | None = None) -> int:
         print(f"warning: no git repo found at or above {target}; writing the workflow there", file=sys.stderr)
         root = target
     rel = target.relative_to(root).as_posix()
-    workflow = render_workflow(path=rel if rel != "." else ".", fail_under=args.fail_under)
+    files = {
+        WORKFLOW_REL: render_workflow(path=rel if rel != "." else ".", fail_under=args.fail_under),
+        COMMENT_WORKFLOW_REL: COMMENT_WORKFLOW,
+    }
 
     if args.print_only:
-        sys.stdout.write(workflow)
+        sys.stdout.write("\n".join(f"# {rel_path.as_posix()}\n{text}" for rel_path, text in files.items()))
         return 0
 
-    out = root / WORKFLOW_REL
-    if out.exists() and not args.force:
-        print(f"error: {out.relative_to(root)} already exists (use --force to overwrite)", file=sys.stderr)
+    written = []
+    for rel_path, text in files.items():
+        out = root / rel_path
+        if out.exists() and not args.force:
+            print(f"Kept the existing {rel_path.as_posix()} (use --force to overwrite)", file=sys.stderr)
+            continue
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(text)
+        written.append(rel_path.as_posix())
+        print(f"Wrote {rel_path.as_posix()}")
+    if not written:
+        print("error: both workflows already exist (use --force to overwrite)", file=sys.stderr)
         return 1
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(workflow)
-    print(f"Wrote {WORKFLOW_REL.as_posix()}")
 
     # Show the grade PRs will start from, so the first report comment isn't a surprise.
     from .analyzer import analyze_repo
@@ -83,5 +112,5 @@ def main(argv: list[str] | None = None) -> int:
               "If the server lives in a subdirectory, rerun with that path.")
     else:
         print(f"Current quality: {report.percent}% ({report.grade}), {len(report.tools)} tool(s).")
-    print(f"Next: git add {WORKFLOW_REL.as_posix()} && git commit -m \"Add mcp-doctor PR check\"")
+    print(f"Next: git add {' '.join(written)} && git commit -m \"Add mcp-doctor PR check\"")
     return 0

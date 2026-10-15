@@ -49,13 +49,25 @@ def test_subdirectory_server_gets_relative_path(tmp_path):
     assert "fail-under: 70 " in wf
 
 
+def test_writes_comment_workflow_for_fork_prs(tmp_path):
+    _repo(tmp_path)
+    assert main(["init-action", str(tmp_path)]) == 0
+    wf = (tmp_path / ".github/workflows/mcp-doctor-comment.yml").read_text()
+    assert 'workflows: ["mcp-doctor"]' in wf  # must match the scan workflow's name
+    assert "uses: vishalhabib99/mcp-doctor/comment@v1" in wf
+    assert "actions/checkout" not in wf  # never runs the PR's code with a write token
+
+
 def test_refuses_to_overwrite_without_force(tmp_path):
     _repo(tmp_path)
     out = tmp_path / ".github/workflows/mcp-doctor.yml"
     out.parent.mkdir(parents=True)
     out.write_text("mine\n")
-    assert main(["init-action", str(tmp_path)]) == 1
+    # An existing install keeps its scan workflow and gains the comment workflow.
+    assert main(["init-action", str(tmp_path)]) == 0
     assert out.read_text() == "mine\n"
+    assert (tmp_path / ".github/workflows/mcp-doctor-comment.yml").exists()
+    assert main(["init-action", str(tmp_path)]) == 1
     assert main(["init-action", str(tmp_path), "--force"]) == 0
     assert out.read_text() != "mine\n"
 
@@ -63,7 +75,9 @@ def test_refuses_to_overwrite_without_force(tmp_path):
 def test_print_writes_nothing(tmp_path, capsys):
     _repo(tmp_path)
     assert main(["init-action", str(tmp_path), "--print"]) == 0
-    assert "vishalhabib99/mcp-doctor@v1" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "vishalhabib99/mcp-doctor@v1" in out
+    assert "vishalhabib99/mcp-doctor/comment@v1" in out
     assert not (tmp_path / ".github").exists()
 
 
