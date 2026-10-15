@@ -168,7 +168,7 @@ jobs:
 
 GitHub only runs a `workflow_run` workflow from the default branch, so fork PRs get comments once it's merged. Without it, the report stays in the job summary.
 
-The report also gets written to the job summary either way. `@v1` tracks the latest `v1.x` release; pin an exact tag or commit SHA instead if you need stricter reproducibility.
+The report also gets written to the job summary either way. `@v1` tracks the latest `v1.x` release; pin an exact tag or commit SHA instead if you need stricter reproducibility. Pinning the action pins the analyser too: it installs mcp-doctor from the action's own checkout, not from `main` (set `version:` to a branch, tag or commit to override). The scan never imports code from the repo it checks: every Python call runs with `-I`, so a `json.py` or `mcp_doctor/` in a PR can't shadow the installed modules, and the actions it uses are pinned by commit.
 
 Want mcp-fuzz's runtime resilience checks and mcp-reality-check's output-fidelity checks in the same PR check, not just this one? [`mcp-trust-check`](https://github.com/vishalhabib99/mcp-trust-check) wraps all three behind a single Action and one combined score.
 
