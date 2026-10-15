@@ -25,6 +25,7 @@ jobs:
   comment:
     if: github.event.workflow_run.event == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: vishalhabib99/mcp-doctor/comment@v1
 """
@@ -39,8 +40,11 @@ permissions:
 jobs:
   mcp-doctor:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false   # the scan reads the tree, never pushes
       - uses: vishalhabib99/mcp-doctor@v1
         with:
           path: {path}

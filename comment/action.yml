@@ -16,7 +16,7 @@ runs:
   steps:
     - name: Download the saved report
       if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' }}
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
       continue-on-error: true   # no artifact = the scan posted its own comment
       with:
         name: mcp-doctor-report

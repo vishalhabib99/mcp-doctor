@@ -27,9 +27,9 @@ inputs:
     required: false
     default: "false"
   version:
-    description: "Git ref of mcp-doctor to install (branch, tag, or commit)."
+    description: "Git ref of mcp-doctor to install (branch, tag, or commit). Empty (the default) installs the copy of mcp-doctor this action was checked out at, so pinning the action by commit also pins the analyser."
     required: false
-    default: "main"
+    default: ""
 
 outputs:
   score:
@@ -46,27 +46,39 @@ runs:
   using: "composite"
   steps:
     - name: Set up Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
       with:
         python-version: "3.14"
 
     - name: Install mcp-doctor
       shell: bash
-      run: pip install "git+https://github.com/vishalhabib99/mcp-doctor.git@${{ inputs.version }}"
+      # Installed from outside the checkout, so nothing in the scanned repo is on the path.
+      working-directory: ${{ runner.temp }}
+      env:
+        VERSION: ${{ inputs.version }}
+      run: |
+        if [ -z "$VERSION" ]; then
+          pip install "$GITHUB_ACTION_PATH"
+        else
+          pip install "git+https://github.com/vishalhabib99/mcp-doctor.git@$VERSION"
+        fi
 
     - name: Run audit
       id: audit
       shell: bash
+      env:
+        SCAN_PATH: ${{ inputs.path }}
+        FAIL_UNDER: ${{ inputs.fail-under }}
       run: |
         set +e
-        mcp-doctor "${{ inputs.path }}" --no-color > mcp-doctor-report.txt
+        mcp-doctor "$SCAN_PATH" --no-color > mcp-doctor-report.txt
         text_status=$?
-        mcp-doctor "${{ inputs.path }}" --json > mcp-doctor-report.json
+        mcp-doctor "$SCAN_PATH" --json > mcp-doctor-report.json
         set -e
 
-        score=$(python -c "import json;print(json.load(open('mcp-doctor-report.json'))['percent'])")
-        grade=$(python -c "import json;print(json.load(open('mcp-doctor-report.json'))['grade'])")
-        graded=$(python -c "import json;print(str(json.load(open('mcp-doctor-report.json')).get('graded', True)).lower())")
+        score=$(python -I -c "import json;print(json.load(open('mcp-doctor-report.json'))['percent'])")
+        grade=$(python -I -c "import json;print(json.load(open('mcp-doctor-report.json'))['grade'])")
+        graded=$(python -I -c "import json;print(str(json.load(open('mcp-doctor-report.json')).get('graded', True)).lower())")
         echo "score=$score" >> "$GITHUB_OUTPUT"
         echo "grade=$grade" >> "$GITHUB_OUTPUT"
         echo "graded=$graded" >> "$GITHUB_OUTPUT"
@@ -78,7 +90,7 @@ runs:
           echo '```'
         } >> "$GITHUB_STEP_SUMMARY"
 
-        fail_under="${{ inputs.fail-under }}"
+        fail_under="$FAIL_UNDER"
         if [ "$graded" != "true" ]; then
           # 0 tools: no quality score to gate on. Warn instead of a silent pass (bug #102).
           if [ "$fail_under" != "0" ]; then
@@ -111,7 +123,9 @@ runs:
           || { echo "::warning::mcp-doctor: couldn't read the PR's files; skipping fix suggestions"; exit 0; }
         gh api "repos/$REPO/pulls/$PR/comments" --paginate \
           --jq '.[] | select(.body | contains("<!-- mcp-doctor-fix -->")) | {path, line, body}' > mcp-doctor-existing.ndjson
-        python -m mcp_doctor.suggest "$SCAN_PATH" mcp-doctor-pr-files.ndjson \
+        # -I: the scanned repo is the working directory, and a json.py or
+        # mcp_doctor/ in it must not shadow the installed modules.
+        python -I -m mcp_doctor.suggest "$SCAN_PATH" mcp-doctor-pr-files.ndjson \
           --existing mcp-doctor-existing.ndjson --commit "$HEAD_SHA" \
           --review-out mcp-doctor-review.json --summary-out mcp-doctor-fixes.md \
           $([ "$DOC_STUBS" = "true" ] && echo --doc-stubs) \
@@ -132,11 +146,16 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+        PR: ${{ github.event.pull_request.number }}
+        GRADED: ${{ steps.audit.outputs.graded }}
+        SCORE: ${{ steps.audit.outputs.score }}
+        GRADE: ${{ steps.audit.outputs.grade }}
       run: |
         {
           echo "<!-- mcp-doctor-report -->"
-          if [ "${{ steps.audit.outputs.graded }}" = "true" ]; then
-            echo "### mcp-doctor report — Score: ${{ steps.audit.outputs.score }}% (${{ steps.audit.outputs.grade }})"
+          if [ "$GRADED" = "true" ]; then
+            echo "### mcp-doctor report — Score: $SCORE% ($GRADE)"
           else
             echo "### mcp-doctor report — Not graded (0 tools found)"
           fi
@@ -146,12 +165,10 @@ runs:
           echo '```'
           if [ -f mcp-doctor-fixes.md ]; then cat mcp-doctor-fixes.md; fi
         } > mcp-doctor-comment.md
-        if gh pr comment "${{ github.event.pull_request.number }}" \
-             --repo "${{ github.repository }}" \
+        if gh pr comment "$PR" --repo "$REPO" \
              --body-file mcp-doctor-comment.md \
              --edit-last || \
-           gh pr comment "${{ github.event.pull_request.number }}" \
-             --repo "${{ github.repository }}" \
+           gh pr comment "$PR" --repo "$REPO" \
              --body-file mcp-doctor-comment.md; then
           echo "posted=true" >> "$GITHUB_OUTPUT"
         else
@@ -163,14 +180,17 @@ runs:
       id: handoff
       if: ${{ github.event_name == 'pull_request' && (steps.comment.outputs.posted == 'false' || steps.suggest.outputs.posted == 'false') }}
       shell: bash
+      env:
+        COMMENT_POSTED: ${{ steps.comment.outputs.posted }}
+        SUGGEST_POSTED: ${{ steps.suggest.outputs.posted }}
       run: |
         mkdir -p mcp-doctor-handoff
-        if [ "${{ steps.comment.outputs.posted }}" = "false" ]; then cp mcp-doctor-comment.md mcp-doctor-handoff/comment.md; fi
-        if [ "${{ steps.suggest.outputs.posted }}" = "false" ]; then cp mcp-doctor-review.json mcp-doctor-handoff/review.json; fi
+        if [ "$COMMENT_POSTED" = "false" ]; then cp mcp-doctor-comment.md mcp-doctor-handoff/comment.md; fi
+        if [ "$SUGGEST_POSTED" = "false" ]; then cp mcp-doctor-review.json mcp-doctor-handoff/review.json; fi
 
     - name: Upload the saved report
       if: ${{ steps.handoff.outcome == 'success' }}
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
       with:
         name: mcp-doctor-report
         path: mcp-doctor-handoff/
