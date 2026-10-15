@@ -484,9 +484,15 @@ def _is_url_param_name(name: str) -> bool:
     """Name-based, like every other heuristic in this module: `url`/`icon_url`/
     `target_url` match (the token appears between underscores or at either
     end), `curl`/`hourly` don't (the token has to be a whole underscore-
-    separated component, not a substring)."""
+    separated component, not a substring). A filter over URLs (`uri_pattern`,
+    `url_glob`, `url_regex`) isn't a URL itself, so `format: "uri"` would be wrong."""
     tokens = name.lower().split("_")
+    if tokens[-1] in _PATTERN_TOKENS:
+        return False
     return "url" in tokens or "uri" in tokens
+
+
+_PATTERN_TOKENS = {"pattern", "patterns", "glob", "regex", "re", "filter", "contains", "match"}
 
 
 def _annotation_is_str_like(annotation: ast.expr | None) -> bool:

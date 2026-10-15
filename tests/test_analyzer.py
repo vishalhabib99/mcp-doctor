@@ -1828,6 +1828,33 @@ def test_non_url_param_name_not_falsely_flagged(tmp_path):
     assert not any(i.check == "url_format_hint" for i in tool.issues)
 
 
+def test_url_pattern_param_not_flagged(tmp_path):
+    # call518/MCP-Airflow-API's list_datasets(uri_pattern) takes a substring
+    # filter, not a URI, so a `format: "uri"` hint would reject valid input.
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        @mcp.tool()
+        def list_datasets(uri_pattern: str = "", url_glob: str = "", url_regex: str = "",
+                          dataset_uri: str = "") -> str:
+            \"\"\"List datasets.
+
+            Args:
+                uri_pattern: Substring to match against dataset URIs.
+                url_glob: Glob over URLs.
+                url_regex: Regex over URLs.
+                dataset_uri: The dataset's URI.
+            \"\"\"
+            try:
+                return uri_pattern
+            except ValueError as e:
+                return str(e)
+        """)
+    issues = [i for i in analyze_repo(tmp_path).tools[0].issues if i.check == "url_format_hint"]
+    assert len(issues) == 1 and issues[0].message.startswith("dataset_uri ")
+
+
 def test_non_str_url_param_not_flagged(tmp_path):
     write(tmp_path, "server.py", """
         from typing import Annotated
