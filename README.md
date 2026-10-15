@@ -126,9 +126,10 @@ Deliberately doesn't touch the quality/security scores — those are properties 
 
 Gate PRs on server quality without installing anything yourself:
 
-Fastest way: run `mcp-doctor init-action` in your repo (or `mcp-doctor init-action path/to/server` for a server in a subdirectory). It writes `.github/workflows/mcp-doctor.yml` in report-only mode and shows the grade your PRs will start from. `--fail-under 70` turns on the gate; `--print` shows the file without writing it. Or copy it by hand:
+Fastest way: run `mcp-doctor init-action` in your repo (or `mcp-doctor init-action path/to/server` for a server in a subdirectory). It writes `.github/workflows/mcp-doctor.yml` in report-only mode, plus `mcp-doctor-comment.yml` so PRs from forks get the report too, and shows the grade your PRs will start from. Run it again on an existing install to add just the comment workflow. `--fail-under 70` turns on the gate; `--print` shows the file without writing it. Or copy it by hand:
 
 ```yaml
+name: mcp-doctor   # the comment workflow below finds the scan by this name
 on: pull_request
 permissions:
   contents: read
@@ -146,7 +147,26 @@ jobs:
           suggest-fixes: true    # default: true — one-click fix suggestions on the PR's lines
 ```
 
-**Fix suggestions:** on a pull request, the safe fixes from `--fix` (a `None` default typed as nullable, a bare `except:`) are posted as GitHub suggestion blocks on the lines the PR changes, so accepting one is a click. Missing `Args:` entries aren't suggested by default, because `--fix` can only add a `TODO: describe this parameter.` placeholder; the report counts those tools instead. Set `suggest-doc-stubs: true` to get the placeholders as suggestions too. GitHub only allows suggestions inside the PR's diff, so fixes on other lines are counted in the report comment with the full patch, ready for `git apply`. A re-run never posts the same suggestion twice. On a PR from a fork, GitHub's token is read-only, so the suggestions and comment are skipped with a warning instead of failing the check.
+**Fix suggestions:** on a pull request, the safe fixes from `--fix` (a `None` default typed as nullable, a bare `except:`) are posted as GitHub suggestion blocks on the lines the PR changes, so accepting one is a click. Missing `Args:` entries aren't suggested by default, because `--fix` can only add a `TODO: describe this parameter.` placeholder; the report counts those tools instead. Set `suggest-doc-stubs: true` to get the placeholders as suggestions too. GitHub only allows suggestions inside the PR's diff, so fixes on other lines are counted in the report comment with the full patch, ready for `git apply`. A re-run never posts the same suggestion twice. **PRs from forks:** GitHub gives a fork's PR a read-only token, so the scan can't comment there. It saves the report and suggestions as a 3-day artifact instead, and a second workflow posts them once the scan finishes. That workflow gets the write token, never checks out the PR's code, looks the PR up from GitHub's event rather than the artifact, rebuilds each suggestion field by field and defuses `@mentions`. `init-action` writes it; by hand it's:
+
+```yaml
+name: mcp-doctor comment
+on:
+  workflow_run:
+    workflows: ["mcp-doctor"]   # the scan workflow's name
+    types: [completed]
+permissions:
+  actions: read
+  pull-requests: write
+jobs:
+  comment:
+    if: github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: vishalhabib99/mcp-doctor/comment@v1
+```
+
+GitHub only runs a `workflow_run` workflow from the default branch, so fork PRs get comments once it's merged. Without it, the report stays in the job summary.
 
 The report also gets written to the job summary either way. `@v1` tracks the latest `v1.x` release; pin an exact tag or commit SHA instead if you need stricter reproducibility.
 

@@ -56,7 +56,7 @@ Split fixes into two kinds and say which is which.
 
 Re-run `MCPD --json <path>` and show the before → after for both grades, e.g. `Quality 51% → 89%`. If something didn't move, say why.
 
-Then offer — once, don't push — to keep it checked on every PR: `MCPD init-action <path>` writes `.github/workflows/mcp-doctor.yml` in report-only mode (the user commits it themselves).
+Then offer — once, don't push — to keep it checked on every PR: `MCPD init-action <path>` writes `.github/workflows/mcp-doctor.yml` in report-only mode, plus `mcp-doctor-comment.yml` so PRs from forks get the report too (the user commits them themselves).
 
 ## If you think a finding is wrong
 
