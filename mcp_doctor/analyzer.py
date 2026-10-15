@@ -2378,6 +2378,8 @@ def _is_auxiliary_file(path: Path) -> bool:
     name = path.name
     if name.endswith("_test.go"):
         return True  # enforced by the Go toolchain
+    if name == "conftest.py":
+        return True  # pytest setup wherever it sits (jupyter-mcp-server's examples/cli/)
     if name.startswith("test_") or name.endswith("_test.py"):
         # Only a naming convention in Python: oaslananka/kicad-mcp-pro keeps 4
         # real tools in tools/test_points.py (test points on a PCB). Outside a

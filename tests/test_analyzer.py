@@ -2262,6 +2262,26 @@ def test_test_named_harness_script_without_mcp_import_stays_auxiliary(tmp_path):
     assert not any(i.check == "dangerous_exec" for i in report.repo_issues)
 
 
+def test_conftest_outside_tests_folder_stays_auxiliary(tmp_path):
+    # datalayer/jupyter-mcp-server's examples/cli/conftest.py starts the server
+    # with subprocess.Popen and polls a readiness URL. conftest.py is always
+    # pytest setup, wherever it sits, so it is neither exec nor SSRF in the server.
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+        """)
+    write(tmp_path, "examples/cli/conftest.py", """
+        import subprocess
+        import requests
+        def serve(command, readiness_url):
+            proc = subprocess.Popen(command)
+            requests.get(readiness_url, timeout=5)
+            return proc
+        """)
+    report = analyze_repo(tmp_path)
+    assert not any(i.check in ("dangerous_exec", "ssrf") for i in report.repo_issues)
+
+
 def test_none_default_on_non_optional_type_flagged(tmp_path):
     # Reproduced on barvhaim/qiskit-mcp-server: `name: str = None` advertises
     # {"type": "string", "default": null}, and an explicit `name: null` call
