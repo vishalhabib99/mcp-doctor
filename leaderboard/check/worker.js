@@ -12,7 +12,8 @@ import { loadPyodide } from "https://cdn.jsdelivr.net/pyodide/v314.0.7/full/pyod
 const ROOT = "/repo";
 let pyodideReady = null;
 
-function post(type, data) { self.postMessage({ type, ...data }); }
+let currentId = 0;
+function post(type, data) { self.postMessage({ type, id: currentId, ...data }); }
 
 async function loadEngine() {
   post("progress", { step: "engine", text: "Loading mcp-doctor in your browser…" });
@@ -123,12 +124,23 @@ function writeTree(pyodide, files, empty) {
   for (const rel of empty) { mk(rel); FS.writeFile(`${ROOT}/${rel}`, new Uint8Array()); }
 }
 
-self.onmessage = async ({ data }) => {
+// One check at a time, so every message carries the id of the check it belongs to.
+let queue = Promise.resolve();
+self.onmessage = ({ data }) => { queue = queue.then(() => run(data)); };
+
+async function run(data) {
+  currentId = data.id;
   try {
-    pyodideReady = pyodideReady || loadEngine();
+    // A failed engine load (network blip) is retried on the next check.
+    pyodideReady = pyodideReady || loadEngine().catch(e => { pyodideReady = null; throw e; });
     const rules = await (await fetch("fetch_rules.json")).json();
     const [engine, repo] = await Promise.all([pyodideReady, download(data.target, rules)]);
-    post("progress", { step: "scan", text: "Scanning…" });
+    // ha-mcp (1,768 source files) takes ~50 s in Pyodide vs 22 s in the CLI;
+    // say so, or a long scan looks frozen.
+    const n = repo.files.length;
+    post("progress", { step: "scan", text: n > 500
+      ? `Scanning ${n} source files. A repo this size takes a minute or two in the browser…`
+      : `Scanning ${n} source files…` });
     writeTree(engine.pyodide, repo.files, repo.empty);
     const report = JSON.parse(engine.pyodide.globals.get("_scan")(ROOT));
     const tsFiles = repo.files.some(f => /\.(ts|tsx|mts|cts)$/.test(f.rel) && !/\.d\.[mc]?ts$/.test(f.rel));
@@ -139,4 +151,4 @@ self.onmessage = async ({ data }) => {
   } catch (err) {
     post("error", { message: err.message || String(err) });
   }
-};
+}

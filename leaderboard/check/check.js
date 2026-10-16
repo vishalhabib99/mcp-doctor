@@ -179,16 +179,23 @@ mcp-doctor ${esc(dir)}</pre>
   });
 }
 
+// Each check carries an id the worker echoes back. Without it, a check started
+// while another was still scanning got the earlier repo's grades under its own
+// name (seen in testing on 2026-10-15).
+let nextId = 0;
+
 function runWorker(target) {
   if (!worker) worker = new Worker("worker.js", { type: "module" });
+  const id = ++nextId;
   return new Promise((resolve, reject) => {
     worker.onmessage = ({ data }) => {
+      if (data.id !== id) return;
       if (data.type === "progress") setStatus(data.text);
       else if (data.type === "done") resolve(data);
       else if (data.type === "error") reject(new Error(data.message));
     };
     worker.onerror = e => reject(new Error(e.message || "The checker crashed."));
-    worker.postMessage({ target: { owner: target.owner, repo: target.repo, ref: target.ref, subdir: target.subdir } });
+    worker.postMessage({ id, target: { owner: target.owner, repo: target.repo, ref: target.ref, subdir: target.subdir } });
   });
 }
 
@@ -218,7 +225,7 @@ async function check(text, ref) {
   }
 }
 
-form.addEventListener("submit", e => { e.preventDefault(); check(input.value); });
+form.addEventListener("submit", e => { e.preventDefault(); if (!button.disabled) check(input.value); });
 
 const params = new URLSearchParams(location.search);
 if (params.get("repo")) {
