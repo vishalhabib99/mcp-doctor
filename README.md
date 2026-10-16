@@ -16,6 +16,7 @@
 - **In your browser:** [check any MCP server](https://vishalhabib99.github.io/mcp-doctor/check/). Paste a GitHub repo, npm or PyPI name and get both grades in seconds. The real mcp-doctor runs in your browser (Pyodide); nothing is uploaded or run.
 - **No install, as a GitHub issue:** [open a scan request](https://github.com/vishalhabib99/mcp-doctor/issues/new?template=scan-request.yml) with your server's GitHub URL. A bot replies with the report in a few minutes. It reads the code only and never runs it. Security findings are posted as counts only, since the issue is public.
 - **CLI:** `pip install mcp-server-lint`, then `mcp-doctor path/to/your/server`
+- **Fuzz a running server:** `uvx --from 'mcp-server-lint[runtime]' mcp-doctor fuzz -- python server.py`, or `mcp-doctor verdict . --run "python server.py"` for one SHIP / FIX-FIRST / BLOCK decision ([details](#fuzz-and-verdict--launch-the-server-and-check-it))
 - **Running an agent?** Put [`mcp-doctor guard`](#guard--catch-tool-calls-that-report-success-but-didnt-work) in front of any MCP server, and the agent is told when a tool says "success" but the write didn't land, its arguments were ignored, or it didn't do what it claims
 - **Claude Code:** `/plugin install mcp-doctor --marketplace vishalhabib99/mcp-doctor`, then ask "check my MCP server". Claude scans, explains each finding, and fixes what it can with your OK ([details](#claude-code-plugin))
 - **CI:** `uses: vishalhabib99/mcp-doctor@v1` comments on each PR, suggests one-click fixes on the lines it changes, and can fail a PR that drops below your score ([details](#github-action))
@@ -92,13 +93,32 @@ Live, Claude Code with Haiku in `bypassPermissions`, same prompts with and witho
 
 In the default and `acceptEdits` modes Claude Code already refuses `.git/hooks` writes through Write/Edit on its own, so the plugin adds most in unattended runs and on the shell route. Skipped on purpose: blocking destructive commands (`rm -rf`, `DROP`), which free hook packs and Claude Code's own permissions already cover. Limits: a secret passed by variable (`$GITHUB_TOKEN`) instead of its literal value, or paraphrased, gets past it; reading a file from a cloned repo doesn't count as outside content.
 
+## Fuzz and verdict — launch the server and check it
+
+The static scan reads code. These run the server and call it, so they need the MCP SDK (Python 3.10+): `pip install 'mcp-server-lint[runtime]'`, or with no install, `uvx --from 'mcp-server-lint[runtime]' mcp-doctor fuzz -- ...`.
+
+```bash
+mcp-doctor fuzz -- python server.py            # bad input: does it crash, hang, or fail cleanly?
+mcp-doctor fuzz --truth -- python server.py    # valid input: is a "success" a real answer?
+mcp-doctor fuzz --url https://example.com/mcp --header 'Authorization=Bearer ...'
+mcp-doctor verdict . --run "python server.py"  # one decision: SHIP, FIX-FIRST or BLOCK
+```
+
+- **`fuzz`** calls every read-only tool with schema-derived valid, missing-required and wrong-type input and scores crash resilience, plus latency and response size from the valid call. `--concurrency N` and `--sequential` (create, read, delete, then re-read the same id) add concurrent-access and lifecycle checks. `--full-trace PATH` writes every call as JSON lines.
+- **`fuzz --truth`** calls each tool once with realistic valid input and flags a refusal returned as success, an empty "success", or structured output that breaks the tool's own `outputSchema`. `guard` runs the same checks on every real call; this is the one-shot batch version.
+- **`verdict`** runs the static scan and, with `--run` or `--url`, both runtime passes, then applies a short list of explicit rules: the worst finding wins and every rule that fired is listed, so one crash can't hide inside an average grade. Each verdict carries a confidence level (how much of the server was actually called) and a needs-human-review flag. `--fail-on BLOCK` or `--fail-on FIX-FIRST` sets the exit code for CI.
+
+**Safety:** only tools annotated `readOnlyHint: true` are called unless you pass `--include-destructive`, and `--sequential` requires it. Point those at a sandbox, never at production data. Valid-call errors can come from synthetic input (a path that doesn't exist), so they're reported as warnings, not crashes.
+
+For agents, the same checks run per call inside a live session: `from mcp_doctor.session import GuardedSession` decides each call ACT, ESCALATE or BLOCK, with an operator-written `Policy`, a hash-chained `AuditLog` and checksum-backed PII detection (formerly the mcp-trust-check package).
+
 ## What it is
 
 A static analysis CLI that audits **MCP (Model Context Protocol) server** implementations for the things that actually break an agent calling them: missing tool descriptions, undocumented parameters, no error handling, no README coverage — plus a separate **security** score covering prompt-injection-prone tool descriptions ("tool poisoning"), dangerous dynamic execution, SSRF-prone outbound requests, unsafe deserialization, and hardcoded secrets. Quality and security are scored independently: a repo can be a documented, well-tested A on quality and still have a real security gap, and the two shouldn't be blended into one number that hides which is true.
 
 The MCP ecosystem is growing faster than the conventions around building a *good* server have settled. Most servers are hand-written in an afternoon and never checked against anything. `mcp-doctor` is a linter for that gap — point it at a repo, get a score and a concrete list of what to fix.
 
-`mcp-doctor` reads source and never runs it, so it can't see everything. Two companion tools cover what's left: [`mcp-fuzz`](https://github.com/vishalhabib99/mcp-fuzz) actually launches a server and calls its tools with schema-derived bad input to see if it fails safely or crashes; [`mcp-reality-check`](https://github.com/vishalhabib99/mcp-reality-check) calls a tool with a realistic *valid* input and checks whether the response is a genuine answer — not a disguised refusal, not empty, not violating its own declared output schema. Three independent checks: is it documented, does it fail safely, does it actually work.
+`mcp-doctor` reads source without running it, so it can't see everything. [`mcp-doctor fuzz`](#fuzz-and-verdict--launch-the-server-and-check-it) launches the server and calls its tools with schema-derived bad input to see if it fails safely, and `--truth` calls each tool with realistic *valid* input to check the answer is genuine: not a disguised refusal, not empty, not violating its own output schema. `mcp-doctor verdict` turns all three into one release decision. Three independent checks: is it documented, does it fail safely, does it actually work. (These were three separate tools, mcp-fuzz, mcp-reality-check and mcp-trust-check, until v1.25.0.)
 
 Dogfooded against 40+ real, in-the-wild MCP servers across Python, TypeScript, and Go (up to 91.0k★ with the official `modelcontextprotocol/servers` monorepo, including GitHub's own official server at 33.3k★, and official servers from Red Hat, Brave, and MathWorks) — 101 genuine mcp-doctor bugs found and fixed post-release, plus Go support itself (the official SDK's two registration styles and `mark3labs/mcp-go`'s) built and verified against real Go servers before ever shipping. One fix led to a PR [merged upstream](https://github.com/homeassistant-ai/ha-mcp/pull/2327) into a 4.9k★ repo; a separate clean pass surfaced a real doc-coverage gap in a target repo itself, [filed upstream](https://github.com/haris-musa/excel-mcp-server/issues/158). Tool-detection recall is measured in the open: **15,755 of 15,977 tools found across 805 real servers on 5 frameworks**, every miss listed in [docs/coverage.md](docs/coverage.md). What the first outside users hit, and what changed because of it: [docs/what-users-taught-me.md](docs/what-users-taught-me.md). How 69 bugs got through, and what changed to stop the worst kind: [docs/postmortem-69-bugs.md](docs/postmortem-69-bugs.md). See [Real-world spot check](#real-world-spot-check) below, or the live [leaderboard](https://vishalhabib99.github.io/mcp-doctor/) ranking every audited repo by quality + security grade — each scored repo gets a real, dated SVG badge (`![mcp-doctor](https://vishalhabib99.github.io/mcp-doctor/badges/OWNER-REPO.svg)`) showing its actual grade, not a generic "scanned" badge, free to add to your own README. The leaderboard also tracks drift: every re-scan compares against whatever was live before it, so a grade change shows a real ▲/▼ delta instead of silently overwriting the old number.
 
@@ -138,7 +158,8 @@ Security: 100%  Grade: A
 ## Install
 
 ```bash
-pip install mcp-server-lint
+pip install mcp-server-lint             # static scan, guard, fixes
+pip install 'mcp-server-lint[runtime]'   # adds fuzz and verdict (MCP SDK, Python 3.10+)
 ```
 
 (The PyPI project is named `mcp-server-lint` — `mcp-doctor` and every close variant of it were already taken or blocked by PyPI's anti-typosquat check — but the installed command is still `mcp-doctor`.)

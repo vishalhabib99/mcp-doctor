@@ -29,6 +29,27 @@ def main(argv: list[str] | None = None) -> int:
         from .init_action import main as init_action_main
 
         return init_action_main(argv[1:])
+    if argv[:1] == ["fuzz"]:
+        # Runtime checks (formerly mcp-fuzz and mcp-reality-check) launch the server and call
+        # it, so they need the MCP SDK, kept optional to keep the static scan light.
+        try:
+            import mcp  # noqa: F401
+        except ImportError:
+            print(
+                "mcp-doctor fuzz needs the MCP SDK (Python 3.10+). Install it with:\n"
+                "  pip install 'mcp-server-lint[runtime]'\n"
+                "or run it without installing:\n"
+                "  uvx --from 'mcp-server-lint[runtime]' mcp-doctor fuzz -- python server.py",
+                file=sys.stderr,
+            )
+            return 2
+        from .fuzz.cli import main as fuzz_main
+
+        return fuzz_main(argv[1:])
+    if argv[:1] == ["verdict"]:
+        from .verdict import main as verdict_main
+
+        return verdict_main(argv[1:])
     if argv[:1] == ["guard"]:
         from .guard import main as guard_main
 
