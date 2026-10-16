@@ -2381,6 +2381,98 @@ def test_none_default_on_nullable_or_unknown_type_not_flagged(tmp_path):
     assert not any(i.check == "none_default_type" for i in tool.issues)
 
 
+def test_none_default_on_repo_model_class_flagged(tmp_path):
+    # Missed until bug #112: RollingGo-AI/RollingGo-hotel-MCP-CN's getHotelDetail has
+    # `dateParam: Annotated[DateParam, Field(...)] = None`, DateParam a BaseModel in models.py.
+    write(tmp_path, "models.py", """
+        import enum
+        from dataclasses import dataclass
+        from typing import Optional, TypedDict
+        from pydantic import BaseModel, RootModel
+
+        class DateParam(BaseModel):
+            check_in: str
+
+        class StayParam(DateParam):
+            nights: int = 1
+
+        class Color(enum.Enum):
+            RED = "red"
+
+        class Box(TypedDict):
+            w: int
+
+        @dataclass(frozen=True)
+        class Point:
+            x: float
+
+        class MaybeDate(RootModel[Optional[str]]):
+            pass
+
+        class Plain:
+            pass
+        """)
+    write(tmp_path, "server.py", """
+        from typing import Annotated, Optional
+        from pydantic import Field
+        from mcp.server.fastmcp import FastMCP
+        from .models import DateParam, StayParam, Color, Box, Point, MaybeDate, Plain
+        from somelib import ExternalModel
+        mcp = FastMCP("x")
+
+        @mcp.tool()
+        def book(
+            date: Annotated[DateParam, Field(description="Dates")] = None,
+            stay: StayParam = None,
+            color: Color = None,
+            box: Box = None,
+            point: Point = None,
+            ok_optional: Optional[DateParam] = None,
+            ok_union: DateParam | None = None,
+            ok_root: MaybeDate = None,
+            ok_plain: Plain = None,
+            ok_external: ExternalModel = None,
+        ) -> str:
+            \"\"\"Book a room.\"\"\"
+            try:
+                return ""
+            except ValueError as e:
+                return str(e)
+        """)
+    tool = analyze_repo(tmp_path).tools[0]
+    msgs = [i.message for i in tool.issues if i.check == "none_default_type"]
+    assert len(msgs) == 1
+    flagged = msgs[0].split(" defaults to None")[0]
+    assert flagged == "date, stay, color, box, point"
+
+
+def test_none_default_model_name_also_assigned_not_flagged(tmp_path):
+    # A name that's both a class and an assignment somewhere may be an alias
+    # that allows None, so it stays unknown.
+    write(tmp_path, "server.py", """
+        from typing import Optional
+        from pydantic import BaseModel
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        class Query(BaseModel):
+            q: str
+
+        if True:
+            Query = Optional[Query]
+
+        @mcp.tool()
+        def search(query: Query = None) -> str:
+            \"\"\"Search.\"\"\"
+            try:
+                return ""
+            except ValueError as e:
+                return str(e)
+        """)
+    tool = analyze_repo(tmp_path).tools[0]
+    assert not any(i.check == "none_default_type" for i in tool.issues)
+
+
 def test_none_default_on_typing_generic_flagged(tmp_path):
     # Missed by v1.13.0: ahujasid/mcp-for-blender's describe_node_type has
     # `property_overrides: Dict[str, Any] = None`.

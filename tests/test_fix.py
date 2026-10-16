@@ -259,6 +259,37 @@ def test_none_default_retyped_as_nullable(tmp_path):
     assert not any(i.check == "none_default_type" for i in after.issues)
 
 
+def test_none_default_on_repo_model_retyped_as_nullable(tmp_path):
+    # Bug #112, the RollingGo shape: a pydantic model param inside Annotated.
+    write(tmp_path, "server.py", """
+        from typing import Annotated
+        from pydantic import BaseModel, Field
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+
+        class DateParam(BaseModel):
+            check_in: str
+
+        @mcp.tool()
+        def detail(
+            dateParam: Annotated[
+                DateParam,
+                Field(description="Dates."),
+            ] = None,
+        ) -> str:
+            \"\"\"Hotel detail.\"\"\"
+            try:
+                return ""
+            except ValueError as e:
+                return str(e)
+        """)
+
+    assert apply_fixes(tmp_path, analyze_repo(tmp_path)) == ["server.py"]
+    assert "DateParam | None,\n" in (tmp_path / "server.py").read_text()
+    after = analyze_repo(tmp_path).tools[0]
+    assert not any(i.check == "none_default_type" for i in after.issues)
+
+
 def test_none_default_matches_file_optional_style(tmp_path):
     write(tmp_path, "server.py", """
         from typing import Optional

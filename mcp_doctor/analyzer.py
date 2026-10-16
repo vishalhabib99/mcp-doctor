@@ -527,6 +527,49 @@ _NON_NULLABLE_BUILTINS = {"str", "int", "float", "bool", "list", "dict", "tuple"
 # typing's capitalized aliases of the same containers (`Dict[str, Any]`), which
 # are just as non-nullable and still common in older FastMCP code.
 _NON_NULLABLE_TYPING = {"List", "Dict", "Tuple", "Set", "FrozenSet", "Sequence", "Mapping"}
+# Classes defined in the scanned repo that reject None: pydantic models, enums,
+# TypedDicts and dataclasses (`dateParam: DateParam = None`). Filled per scan by
+# analyze_repo; a model imported from a library stays unknown, so not flagged.
+_MODEL_CLASSES: set[str] = set()
+_MODEL_BASES = {"BaseModel", "Enum", "StrEnum", "IntEnum", "Flag", "IntFlag", "TypedDict"}
+
+
+def _collect_model_classes(trees: list[tuple[str, "ast.Module"]]) -> set[str]:
+    """Names of repo classes pydantic validates as non-nullable. A subclass of
+    a repo model counts too (found by repeating until nothing new is added).
+    RootModel is left out (`RootModel[X | None]` accepts None), and so is any
+    name that's also bound by an assignment somewhere, since that alias could
+    make it nullable."""
+    classes: list[ast.ClassDef] = []
+    assigned: set[str] = set()
+    for _, tree in trees:
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                classes.append(node)
+            elif isinstance(node, ast.Assign):
+                assigned.update(t.id for t in node.targets if isinstance(t, ast.Name))
+            elif isinstance(node, ast.AnnAssign) and node.value is not None and isinstance(node.target, ast.Name):
+                assigned.add(node.target.id)
+            elif type(node).__name__ == "TypeAlias" and isinstance(node.name, ast.Name):
+                assigned.add(node.name.id)
+
+    def base_names(c: ast.ClassDef) -> set[str]:
+        return {_annotation_base_name(b.value if isinstance(b, ast.Subscript) else b) for b in c.bases}
+
+    names: set[str] = set()
+    for c in classes:
+        if any(_annotation_base_name(d.func if isinstance(d, ast.Call) else d) == "dataclass" for d in c.decorator_list):
+            names.add(c.name)
+    while True:
+        new = {
+            c.name for c in classes
+            if c.name not in names and "RootModel" not in base_names(c)
+            and base_names(c) & (_MODEL_BASES | names)
+        }
+        if not new:
+            break
+        names |= new
+    return names - assigned
 
 
 def _is_none_default(default: ast.expr | None) -> bool:
@@ -550,7 +593,10 @@ def _annotation_rejects_none(annotation: ast.expr | None) -> bool:
     Union/Any, or any name this module can't see the definition of, is
     treated as nullable so the check can't false-positive on it."""
     if isinstance(annotation, ast.Name):
-        return annotation.id in _NON_NULLABLE_BUILTINS or annotation.id in _NON_NULLABLE_TYPING
+        return (
+            annotation.id in _NON_NULLABLE_BUILTINS or annotation.id in _NON_NULLABLE_TYPING
+            or annotation.id in _MODEL_CLASSES
+        )
     if isinstance(annotation, ast.Subscript):
         base_name = _annotation_base_name(annotation.value)
         if base_name == "Annotated":
@@ -2479,8 +2525,9 @@ def analyze_repo(root: Path) -> Report:
     for _, tree in trees:
         _collect_field_aliases(tree, alias_registry)
 
-    global _CONTEXT_NAMES
+    global _CONTEXT_NAMES, _MODEL_CLASSES
     _CONTEXT_NAMES = _collect_context_aliases(trees)
+    _MODEL_CLASSES = _collect_model_classes(trees)
     error_handling_registry = _build_error_handling_registry(trees, _build_import_aliases(trees))
 
     plain_string_ok = _plain_string_docs_reach_model(trees)
