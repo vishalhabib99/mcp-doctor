@@ -154,6 +154,12 @@ class ToolFinding:
     # removed, only as "not statically visible" (reported by Edward
     # Izgorodin, github.com/modelcontextprotocol/modelcontextprotocol#3322).
     param_names_complete: bool = True
+    # Whether param_names/required_param_names were extracted at all. TS and Go
+    # tools fill them since v1.27.0 when their schema resolves; a tool whose
+    # schema couldn't be read (or a baseline written before that) says False,
+    # and schema_diff.py then skips its parameter checks rather than read
+    # "unknown" as "no parameters".
+    params_tracked: bool = True
 
 
 @dataclass

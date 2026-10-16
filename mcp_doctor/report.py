@@ -100,6 +100,7 @@ def render_json(report: Report, schema_changes: list[SchemaChange] | None = None
                 "param_names": t.param_names,
                 "required_param_names": t.required_param_names,
                 "param_names_complete": t.param_names_complete,
+                "params_tracked": t.params_tracked,
             }
             for t in report.tools
         ],

@@ -590,10 +590,107 @@ class Pending:
     findings: list[Finding] = field(default_factory=list)
 
 
+class HttpUpstream:
+    """Streamable HTTP to a remote MCP server, stdlib only. Each client message is
+    POSTed; the reply is JSON, an event stream, or 202 for a notification. The
+    session id from the server goes back on every request, and once there is one,
+    a GET stream carries messages the server sends on its own (list_changed)."""
+
+    def __init__(self, url: str, headers: dict[str, str], deliver, err):
+        self.url = url
+        self.headers = headers
+        self.deliver = deliver  # called with each server message as bytes
+        self.err = err
+        self.session: str | None = None
+        self.protocol: str | None = None
+        self.listening = False
+        self.closed = False
+
+    def _request(self, method: str, data: bytes | None = None, accept: str = "application/json, text/event-stream"):
+        import urllib.request
+
+        h = {"Accept": accept, **self.headers}
+        if data is not None:
+            h["Content-Type"] = "application/json"
+        if self.session:
+            h["Mcp-Session-Id"] = self.session
+        if self.protocol:
+            h["MCP-Protocol-Version"] = self.protocol
+        return urllib.request.urlopen(urllib.request.Request(self.url, data=data, headers=h, method=method), timeout=300)
+
+    def _read(self, resp) -> None:
+        sid = resp.headers.get("Mcp-Session-Id")
+        if sid:
+            self.session = sid
+        ctype = (resp.headers.get("Content-Type") or "").lower()
+        if "text/event-stream" in ctype:
+            data: list[str] = []
+            for raw in resp:
+                line = raw.decode("utf-8", "replace").rstrip("\r\n")
+                if line.startswith("data:"):
+                    data.append(line[5:].lstrip())
+                elif line == "" and data:
+                    self._emit("\n".join(data))
+                    data = []
+            if data:
+                self._emit("\n".join(data))
+        else:
+            body = resp.read().decode("utf-8", "replace").strip()
+            if body:
+                self._emit(body)
+
+    def _emit(self, text: str) -> None:
+        try:
+            msg = json.loads(text)
+        except ValueError:
+            return
+        for m in msg if isinstance(msg, list) else [msg]:
+            if isinstance(m, dict) and isinstance(m.get("result"), dict) and m["result"].get("protocolVersion"):
+                self.protocol = str(m["result"]["protocolVersion"])
+            self.deliver((json.dumps(m, ensure_ascii=False) + "\n").encode())
+
+    def post(self, data: bytes) -> None:
+        try:
+            msg = json.loads(data)
+        except ValueError:
+            msg = None
+        try:
+            with self._request("POST", data) as resp:
+                self._read(resp)
+        except Exception as e:  # a failed POST must still answer a request, or the client hangs
+            code = getattr(e, "code", None)
+            print(f"[mcp-doctor guard] {self.url}: {code or e!r}", file=self.err, flush=True)
+            if isinstance(msg, dict) and "id" in msg and "method" in msg:
+                self.deliver((json.dumps({"jsonrpc": "2.0", "id": msg["id"], "error": {
+                    "code": -32000, "message": f"mcp-doctor guard could not reach {self.url}: {code or e}"}}) + "\n").encode())
+        if self.session and not self.listening:
+            self.listening = True
+            threading.Thread(target=self.listen, daemon=True).start()
+
+    def listen(self) -> None:
+        try:
+            with self._request("GET", accept="text/event-stream") as resp:
+                if resp.status == 200:
+                    self._read(resp)
+        except Exception:
+            pass  # optional in the spec (405 when the server has no stream to offer)
+
+    def close(self) -> None:
+        self.closed = True
+        if self.session:
+            try:
+                self._request("DELETE").close()
+            except Exception:
+                pass
+
+
 class Guard:
     def __init__(self, argv: list[str], verify: bool = True, log_path: str | None = None,
-                 client_in=None, client_out=None, err=None, hold_leaks: bool = False, journal: str | None = None):
+                 client_in=None, client_out=None, err=None, hold_leaks: bool = False, journal: str | None = None,
+                 url: str | None = None, headers: dict[str, str] | None = None):
         self.argv = argv
+        self.url = url
+        self.upstream: HttpUpstream | None = None
         self.verify = verify
         self.hold_leaks = hold_leaks
         self.leaks = LeakWatch(journal)
@@ -611,6 +708,8 @@ class Guard:
         self.out_lock = threading.Lock()
         self.in_lock = threading.Lock()
         self.proc: subprocess.Popen | None = None
+        if url:
+            self.upstream = HttpUpstream(url, headers or {}, self.handle_server_line, self.err)
 
     # writing
     def to_client(self, msg: dict | bytes) -> None:
@@ -621,6 +720,18 @@ class Guard:
 
     def to_server(self, msg: dict | bytes) -> None:
         data = msg if isinstance(msg, bytes) else (json.dumps(msg) + "\n").encode()
+        if self.upstream is not None:
+            try:
+                parsed = json.loads(data)
+            except ValueError:
+                return
+            # Requests run in parallel (a slow tool must not hold up the rest); the
+            # handshake and notifications go in order, so `initialized` can't overtake.
+            if isinstance(parsed, dict) and "id" in parsed and parsed.get("method") not in (None, "initialize"):
+                threading.Thread(target=self.upstream.post, args=(data,), daemon=True).start()
+            else:
+                self.upstream.post(data)
+            return
         with self.in_lock:
             self.proc.stdin.write(data)
             self.proc.stdin.flush()
@@ -681,6 +792,8 @@ class Guard:
                 self.to_server(line)
             except (BrokenPipeError, OSError):
                 break
+        if self.upstream is not None:
+            return
         try:
             self.proc.stdin.close()
         except OSError:
@@ -689,35 +802,38 @@ class Guard:
     # server → client
     def pump_server(self) -> None:
         for line in iter(self.proc.stdout.readline, b""):
-            try:
-                msg = json.loads(line)
-            except ValueError:
-                msg = None
-            if not isinstance(msg, dict):
-                self.to_client(line)
-                continue
-            rid = msg.get("id")
-            if isinstance(rid, str) and rid.startswith(_GUARD_ID):
-                with self.lock:
-                    box = self.own.get(rid)
-                if box:
-                    box.put(msg)
-                continue
-            if msg.get("method") == "notifications/tools/list_changed":
-                with self.lock:
-                    self.tools.clear()
-            with self.lock:
-                is_list = rid in self.list_requests and "result" in msg
-                if is_list:
-                    self.list_requests.discard(rid)
-                pending = self.pending.pop(rid, None) if "method" not in msg else None
-            if is_list:
-                self.remember_tools(msg["result"])
-            if pending is not None and isinstance(msg.get("result"), dict):
-                elapsed = time.monotonic() - pending.started
-                threading.Thread(target=self.finish_call, args=(msg, pending, elapsed), daemon=True).start()
-                continue
+            self.handle_server_line(line)
+
+    def handle_server_line(self, line: bytes) -> None:
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            msg = None
+        if not isinstance(msg, dict):
             self.to_client(line)
+            return
+        rid = msg.get("id")
+        if isinstance(rid, str) and rid.startswith(_GUARD_ID):
+            with self.lock:
+                box = self.own.get(rid)
+            if box:
+                box.put(msg)
+            return
+        if msg.get("method") == "notifications/tools/list_changed":
+            with self.lock:
+                self.tools.clear()
+        with self.lock:
+            is_list = rid in self.list_requests and "result" in msg
+            if is_list:
+                self.list_requests.discard(rid)
+            pending = self.pending.pop(rid, None) if "method" not in msg else None
+        if is_list:
+            self.remember_tools(msg["result"])
+        if pending is not None and isinstance(msg.get("result"), dict):
+            elapsed = time.monotonic() - pending.started
+            threading.Thread(target=self.finish_call, args=(msg, pending, elapsed), daemon=True).start()
+            return
+        self.to_client(line)
 
     def remember_tools(self, result: dict) -> None:
         with self.lock:
@@ -767,6 +883,11 @@ class Guard:
         self.to_client(msg)
 
     def run(self) -> int:
+        if self.upstream is not None:
+            self.pump_client()  # until the client closes stdin
+            time.sleep(0.2)  # let in-flight replies and their checks finish writing
+            self.upstream.close()
+            return 0
         try:
             self.proc = subprocess.Popen(self.argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
         except OSError as e:
@@ -788,8 +909,13 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="mcp-doctor guard",
         description="Run an MCP server behind a check that flags tool calls that reported success but didn't work.",
-        usage="mcp-doctor guard [--log FILE] [--no-verify] [--hold-leaks] -- <server command> [args...]",
+        usage="mcp-doctor guard [--log FILE] [--no-verify] [--hold-leaks] -- <server command> [args...]\n"
+        "       mcp-doctor guard [options] --url https://host/mcp [--header KEY=VALUE ...]",
     )
+    parser.add_argument("--url", help="Guard a remote server over Streamable HTTP instead of launching one; "
+                        "the agent talks to guard over stdio as usual")
+    parser.add_argument("--header", action="append", default=[], metavar="KEY=VALUE",
+                        help="HTTP header for --url (repeatable), e.g. 'Authorization=Bearer ...'")
     parser.add_argument("--log", help="Also append each finding to FILE as a JSON line")
     parser.add_argument("--no-verify", action="store_true", help="Don't make read calls to confirm writes")
     parser.add_argument("--hold-leaks", action="store_true", help="Don't send a write flagged as a likely leak; return an error instead")
@@ -801,6 +927,19 @@ def main(argv: list[str]) -> int:
     else:
         opts, server = [], argv
     args = parser.parse_args(opts)
+    if args.url:
+        if server:
+            parser.error("use --url or a server command after --, not both")
+        headers = {}
+        for pair in args.header:
+            key, sep, value = pair.partition("=")
+            if not sep:
+                parser.error(f"--header expects KEY=VALUE, got {pair!r}")
+            headers[key] = value
+        return Guard([], verify=not args.no_verify, log_path=args.log, hold_leaks=args.hold_leaks,
+                     url=args.url, headers=headers).run()
+    if args.header:
+        parser.error("--header requires --url")
     if not server:
         parser.error("give the server command after --, e.g. mcp-doctor guard -- npx @modelcontextprotocol/server-filesystem /tmp")
     return Guard(server, verify=not args.no_verify, log_path=args.log, hold_leaks=args.hold_leaks).run()

@@ -658,6 +658,49 @@ def _resolve_str(node, src: bytes, consts: dict[str, tuple["Node", bytes]]) -> s
     return _string_value(resolved, resolved_src)
 
 
+_ZOD_OPTIONAL = {"optional", "nullish", "default", "catch"}
+
+
+def _zod_required(node, src: bytes, consts: dict) -> bool | None:
+    """Whether a Zod field must be passed: False for `.optional()`, `.nullish()`,
+    `.default(...)`, `.catch(...)` or `z.optional(...)` anywhere on its own
+    method chain (not inside its arguments, so `z.array(z.string().optional())`
+    stays required). None when the field doesn't resolve to a call chain."""
+    node, src = _resolve(node, src, consts)
+    if node is None or node.type != "call_expression":
+        return None
+    while node is not None and node.type == "call_expression":
+        func = node.child_by_field_name("function")
+        if func is None or func.type != "member_expression":
+            return True
+        prop = func.child_by_field_name("property")
+        if prop is not None and _text(prop, src) in _ZOD_OPTIONAL:
+            return False
+        node = func.child_by_field_name("object")
+    return True
+
+
+def _set_zod_params(finding: ToolFinding, zod_obj, src: bytes, consts: dict) -> None:
+    props = _object_pairs(zod_obj, src)
+    finding.param_names = list(props)
+    finding.required_param_names = [k for k, v in props.items() if _zod_required(v, src, consts)]
+    finding.param_names_complete = not any(c.type == "spread_element" for c in zod_obj.children)
+    finding.params_tracked = True
+
+
+def _string_list(node, src: bytes, consts: dict) -> list[str] | None:
+    node, src = _resolve(node, src, consts)
+    if node is None or node.type != "array":
+        return None
+    out = []
+    for c in node.named_children:
+        v = _resolve_str(c, src, consts)
+        if v is None:
+            return None
+        out.append(v)
+    return out
+
+
 def _finding_with_description_and_param_issues(
     name: str, file: str, line: int, description: str, param_count: int, documented: int,
     param_doc_label: str,
@@ -679,6 +722,7 @@ def _finding_with_description_and_param_issues(
         has_try_except=True,
         has_bare_except=False,
         description_text=description,
+        params_tracked=False,  # set by the caller once the schema's parameters are read
     )
 
     if not finding.has_description:
@@ -740,6 +784,10 @@ def _analyze_ts_tool(
         "Zod schema properties have no .describe(...)",
     )
     finding.has_try_except = has_try
+    if zod_obj is not None:
+        _set_zod_params(finding, zod_obj, schema_src, consts)
+    elif schema_arg is None:
+        finding.params_tracked = True  # no schema at all: a tool with no parameters
     if description_unresolved:
         finding.has_description = True
         finding.issues = [i for i in finding.issues if i.check != "description"]
@@ -864,6 +912,8 @@ def _analyze_json_schema_tool(
     param_count = 0
     documented = 0
     param_doc_label = "JSON-schema properties have no description"
+    json_params: tuple[list[str], list[str]] | None = None
+    zod_params = None
 
     if schema is not None and schema.type == "object":
         properties_node = _object_pairs(schema, resolved_schema_src).get("properties")
@@ -872,6 +922,10 @@ def _analyze_json_schema_tool(
             if resolved_props.type == "object":
                 props = _object_pairs(resolved_props, resolved_props_src)
                 param_count = len(props)
+                req_node = _object_pairs(schema, resolved_schema_src).get("required")
+                required = _string_list(req_node, resolved_schema_src, consts) if req_node is not None else []
+                if not any(c.type == "spread_element" for c in resolved_props.children):
+                    json_params = (list(props), [r for r in (required or []) if r in props])
                 for v in props.values():
                     v_resolved, v_resolved_src = _resolve(v, resolved_props_src, consts)
                     if v_resolved.type == "object":
@@ -891,14 +945,23 @@ def _analyze_json_schema_tool(
             zod_node, zod_src = schema, resolved_schema_src
         zod_obj = _zod_object_arg(zod_node)
         if zod_obj is not None:
+            zod_params = (zod_obj, zod_src)
             zod_props = _object_pairs(zod_obj, zod_src)
             param_count = len(zod_props)
             documented = sum(1 for v in zod_props.values() if _has_describe_call(v, zod_src, consts))
             param_doc_label = "Zod schema properties have no .describe(...)"
 
-    return _finding_with_description_and_param_issues(
+    finding = _finding_with_description_and_param_issues(
         name, file, line, description, param_count, documented, param_doc_label,
     )
+    if zod_params is not None:
+        _set_zod_params(finding, zod_params[0], zod_params[1], consts)
+    elif json_params is not None:
+        finding.param_names, finding.required_param_names = json_params
+        finding.params_tracked = True
+    elif schema_node is None:
+        finding.params_tracked = True
+    return finding
 
 
 # Test files by name: `foo.test.ts`, `foo.spec.ts`, `foo-test.ts`, `test_foo.ts`,

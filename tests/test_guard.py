@@ -16,9 +16,18 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class Session:
-    def __init__(self, scenario, *opts, journal=None):
+    def __init__(self, scenario, *opts, journal=None, http=False):
+        self.bridge = None
+        if http:
+            # The same fake server, reached over Streamable HTTP (guard --url).
+            self.bridge = subprocess.Popen([sys.executable, str(FIXTURE.parent / "http_bridge.py"), scenario],
+                                           stdout=subprocess.PIPE)
+            port = int(self.bridge.stdout.readline())
+            target = ["--url", f"http://127.0.0.1:{port}/mcp", "--header", "X-Test=1"]
+        else:
+            target = ["--", sys.executable, str(FIXTURE), scenario]
         cmd = [sys.executable, "-c", "import sys; from mcp_doctor.cli import main; sys.exit(main())",
-               "guard", *opts, "--", sys.executable, str(FIXTURE), scenario]
+               "guard", *opts, *target]
         # Each session gets its own leak journal unless a test shares one on purpose.
         env = dict(os.environ, MCP_DOCTOR_GUARD_JOURNAL=str(journal or Path(tempfile.mkdtemp()) / "j.jsonl"))
         self.p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=ROOT, env=env)
@@ -43,6 +52,8 @@ class Session:
     def close(self):
         self.p.stdin.close()
         self.p.wait(timeout=10)
+        if self.bridge is not None:
+            self.bridge.kill()
         return self.p.stderr.read().decode()
 
 
@@ -50,14 +61,16 @@ class Session:
 def session():
     opened = []
 
-    def make(scenario, *opts, journal=None):
-        s = Session(scenario, *opts, journal=journal)
+    def make(scenario, *opts, journal=None, http=False):
+        s = Session(scenario, *opts, journal=journal, http=http)
         opened.append(s)
         return s
     yield make
     for s in opened:
         if s.p.poll() is None:
             s.close()
+        elif s.bridge is not None:
+            s.bridge.kill()
 
 
 # servers#4138
@@ -300,3 +313,45 @@ def test_schema_checker_agrees_on_the_common_keywords():
     assert "anyOf" in schema_error({"count": 1, "id": 5}, schema)
     assert schema_error({"count": 1.5}, {"properties": {"count": {"type": "number"}}}) is None
     assert schema_error({"x": 1}, {"type": "object", "patternProperties": {"^x": {"type": "string"}}}) is None  # unknown keyword: accept
+
+
+# --url: the same checks against a server reached over Streamable HTTP
+# (tests/fixtures/http_bridge.py: JSON and event-stream replies, a session id).
+def test_http_write_that_never_happened_is_flagged_and_twin_is_quiet(session):
+    res, warns = session("fs_broken", http=True).call("write_file", {"path": "/tmp/report.md", "content": "# Report\n"})
+    assert res["content"][0]["text"] == "Successfully wrote to /tmp/report.md"
+    assert len(warns) == 1 and "write_file reported success" in warns[0]
+    assert session("fs_ok", http=True).call("write_file", {"path": "/tmp/report.md", "content": "# Report\n"})[1] == []
+
+
+def test_http_dropped_labels_and_unknown_arguments_are_flagged(session):
+    _, warns = session("gh_broken", http=True).call("issue_write", {"method": "create", "owner": "o", "repo": "r", "title": "Bug", "body": "It broke", "labels": ["enhancement"]})
+    assert len(warns) == 1 and "labels ('enhancement')" in warns[0]
+    _, warns = session("unknown_args", http=True).call("read_doc", {"path": "intro.md"})
+    assert len(warns) == 1 and "'path'" in warns[0]
+
+
+def test_http_refusal_empty_and_schema_break_are_flagged(session):
+    s = session("reality_bad", http=True)
+    assert "refusal" in s.call("get_weather", {"city": "Paris"})[1][0]
+    assert "returned nothing" in s.call("read_notes", {"topic": "q3"})[1][0]
+    assert "outputSchema" in s.call("count_items", {"kind": "open"})[1][0]
+
+
+def test_http_leak_is_held(session):
+    s = session("gh_leak", "--hold-leaks", http=True)
+    s.call("get_issue", {**PUBLIC, "issue_number": 1})
+    s.call("get_file_contents", {**PRIVATE, "path": "README.md"})
+    res, warns = s.call("add_issue_comment", {**PUBLIC, "issue_number": 1, "body": PRIVATE_README})
+    assert res["isError"] is True and "held and not sent" in warns[0]
+    stored, _ = s.call("list_issue_comments", {**PUBLIC, "issue_number": 1})
+    assert stored["content"][0]["text"] == "[]"
+
+
+def test_http_unreachable_server_answers_with_an_error(tmp_path):
+    cmd = [sys.executable, "-c", "import sys; from mcp_doctor.cli import main; sys.exit(main())",
+           "guard", "--url", "http://127.0.0.1:9/mcp"]
+    p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=ROOT)
+    out, _ = p.communicate(b'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n', timeout=30)
+    msg = json.loads(out.splitlines()[0])
+    assert msg["id"] == 1 and "could not reach" in msg["error"]["message"]

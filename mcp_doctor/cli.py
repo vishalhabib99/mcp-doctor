@@ -31,6 +31,7 @@ the suite, one command each:
   mcp-doctor fuzz --truth -- <command>  call it with valid input, check answers are real  [runtime]
   mcp-doctor verdict [path] --run CMD   one release decision: SHIP, FIX-FIRST or BLOCK
   mcp-doctor guard -- <command>         put a live check in front of a server an agent uses
+  mcp-doctor guard --url URL            the same for a remote server over HTTP
   mcp-doctor guard hook                 the same check on Claude Code's own tools (plugin)
   mcp-doctor init-action                add the GitHub Action to a repo
 

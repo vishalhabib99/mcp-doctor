@@ -8,10 +8,10 @@ properties of a single snapshot, this is a property of *two* snapshots
 compared — a fundamentally different kind of question, with its own
 `--fail-on-breaking-change` exit code instead of `--fail-under`.
 
-Python-only for now, same incremental language-by-language pattern as the
-rest of this analyzer: a TS/Go tool's `param_names`/`required_param_names`
-are empty in both the baseline and the current run, so the comparison is
-naturally a no-op there rather than a false positive. Type changes aren't
+Python, TypeScript and Go since v1.27.0. A tool's parameters are compared only
+when both runs actually read them (`params_tracked`): a TS/Go tool in a
+baseline written before v1.27.0, or one whose schema couldn't be resolved,
+is skipped rather than compared as if it had no parameters. Type changes aren't
 checked either — presence and required-ness alone already catch the two
 most common breaking-change classes (a removed parameter, a
 newly-required one) without needing to resolve and compare arbitrary
@@ -70,6 +70,12 @@ def compute_schema_diff(baseline: dict, current_tools: list[ToolFinding]) -> lis
             continue
 
         current = current_by_name[name]
+        base_tracked = base_tool.get("params_tracked")
+        if base_tracked is None:  # baseline from before v1.27.0: only Python was read
+            base_tracked = not str(base_tool.get("file", "")).endswith(
+                (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".go"))
+        if not (base_tracked and current.params_tracked):
+            continue
         base_params = set(base_tool.get("param_names", []))
         current_params = set(current.param_names)
         base_required = set(base_tool.get("required_param_names", []))

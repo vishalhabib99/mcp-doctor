@@ -298,3 +298,47 @@ def test_identical_schema_produces_no_changes(tmp_path):
     ])
 
     assert compute_schema_diff(baseline, report.tools) == []
+
+
+def _snapshot(tmp_path, analyze_repo, render_json):
+    import json as _json
+    return _json.loads(render_json(analyze_repo(tmp_path)))
+
+
+def test_ts_and_go_breaking_changes_are_caught(tmp_path):
+    import pytest
+
+    from mcp_doctor.analyzer import analyze_repo
+    from mcp_doctor.report import render_json
+    from mcp_doctor.ts_analyzer import TS_AVAILABLE
+
+    if not TS_AVAILABLE:
+        pytest.skip("tree_sitter not installed")
+    ts = tmp_path / "server.ts"
+    go = tmp_path / "main.go"
+    ts.write_text('server.registerTool("search", { description: "Search the index", inputSchema: '
+                  '{ q: z.string().describe("query"), limit: z.number().optional().describe("max") } }, async () => ({ content: [] }));\n')
+    go.write_text('package main\nfunc main() {\n  s.AddTool(mcp.NewTool("echo", mcp.WithDescription("Echo text back"), '
+                  'mcp.WithString("text", mcp.Required(), mcp.Description("t")), mcp.WithString("lang", mcp.Description("l"))), h)\n}\n')
+    baseline = _snapshot(tmp_path, analyze_repo, render_json)
+    assert compute_schema_diff(baseline, analyze_repo(tmp_path).tools) == []
+
+    # limit becomes required, q is removed; Go: lang becomes required
+    ts.write_text('server.registerTool("search", { description: "Search the index", inputSchema: '
+                  '{ limit: z.number().describe("max") } }, async () => ({ content: [] }));\n')
+    go.write_text(go.read_text().replace('mcp.WithString("lang", mcp.Description("l"))', 'mcp.WithString("lang", mcp.Required(), mcp.Description("l"))'))
+    changes = {(c.tool, c.change, c.detail.split("'")[1]) for c in compute_schema_diff(baseline, analyze_repo(tmp_path).tools)}
+    assert changes == {
+        ("search", "param_removed", "q"),
+        ("search", "param_newly_required", "limit"),
+        ("echo", "param_newly_required", "lang"),
+    }
+
+
+def test_baseline_from_before_ts_go_tracking_is_not_compared(tmp_path):
+    from mcp_doctor.analyzer import analyze_repo
+
+    (tmp_path / "server.ts").write_text('server.registerTool("search", { description: "Search the index", inputSchema: '
+                                        '{ q: z.string().describe("query") } }, async () => ({ content: [] }));\n')
+    legacy = {"tools": [{"name": "search", "file": "server.ts", "param_names": [], "required_param_names": []}]}
+    assert compute_schema_diff(legacy, analyze_repo(tmp_path).tools) == []

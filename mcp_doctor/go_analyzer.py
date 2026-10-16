@@ -467,6 +467,104 @@ def _collect_const_strings(tree_root, src: bytes) -> dict[str, str]:
     return registry
 
 
+def _new_tool_params(new_tool_call, src: bytes, const_registry: dict[str, str]) -> tuple[list[str], list[str]] | None:
+    """mark3labs `mcp.NewTool(name, mcp.WithString("p", mcp.Required()), ...)`:
+    (param names, required ones), or None if a parameter name isn't a literal."""
+    args_node = new_tool_call.child_by_field_name("arguments")
+    if args_node is None:
+        return None
+    names: list[str] = []
+    required: list[str] = []
+    for opt in [c for c in args_node.children if c.type not in ("(", ")", ",")][1:]:
+        if opt.type != "call_expression" or _selector_field(opt.child_by_field_name("function")) not in MARK3LABS_PARAM_OPTIONS:
+            continue
+        opt_args_node = opt.child_by_field_name("arguments")
+        opt_args = [c for c in opt_args_node.children if c.type not in ("(", ")", ",")] if opt_args_node is not None else []
+        pname = _resolve_string_field(opt_args[0], src, const_registry) if opt_args else None
+        if pname is None:
+            return None
+        names.append(pname)
+        if any(a.type == "call_expression" and _selector_field(a.child_by_field_name("function")) == "Required" for a in opt_args[1:]):
+            required.append(pname)
+    return names, required
+
+
+def _struct_params(struct_type, src: bytes) -> tuple[list[str], list[str]]:
+    """The official SDK infers the schema from the input struct: the json tag
+    names each parameter, and it's required unless tagged omitempty/omitzero."""
+    body = next((c for c in struct_type.children if c.type == "field_declaration_list"), None)
+    names: list[str] = []
+    required: list[str] = []
+    for child in (body.children if body is not None else []):
+        if child.type != "field_declaration":
+            continue
+        name_node = child.child_by_field_name("name")
+        if name_node is None:
+            continue
+        tag_node = child.child_by_field_name("tag")
+        pname = _json_field_name(tag_node, src, _text(name_node, src))
+        if pname == "-":
+            continue
+        names.append(pname)
+        raw = _string_value(tag_node, src) or "" if tag_node is not None else ""
+        idx = raw.find('json:"')
+        opts = raw[idx + 6:].split('"', 1)[0].split(",")[1:] if idx != -1 else []
+        if not {"omitempty", "omitzero"} & {o.strip() for o in opts}:
+            required.append(pname)
+    return names, required
+
+
+def _input_schema_params(schema_value, src: bytes) -> tuple[list[str], list[str]] | None:
+    """Explicit `InputSchema: &jsonschema.Schema{Properties: ..., Required: []string{...}}`."""
+    schema = _unwrap_pointer(schema_value)
+    if schema is None or schema.type != "composite_literal":
+        return None
+    fields = _composite_fields(schema, src)
+    props = _unwrap_pointer(fields.get("Properties")) if fields.get("Properties") is not None else None
+    if props is None or props.type != "composite_literal":
+        return None
+    body = props.child_by_field_name("body")
+    names: list[str] = []
+    for child in (body.children if body is not None else []):
+        if child.type != "keyed_element":
+            continue
+        key_node = child.child_by_field_name("key")
+        key_inner = key_node.children[0] if key_node is not None and key_node.type == "literal_element" and key_node.children else key_node
+        pname = _string_value(key_inner, src) if key_inner is not None else None
+        if pname is None:
+            return None
+        names.append(pname)
+    required: list[str] = []
+    req = fields.get("Required")
+    if req is not None and req.type == "composite_literal":
+        rbody = req.child_by_field_name("body")
+        for el in (rbody.named_children if rbody is not None else []):
+            inner = el.children[0] if el.type == "literal_element" and el.children else el
+            v = _string_value(inner, src)
+            if v is not None and v in names:
+                required.append(v)
+    return names, required
+
+
+def _apply_params(finding: ToolFinding, params: tuple[list[str], list[str]] | None) -> None:
+    if params is not None:
+        finding.param_names, finding.required_param_names = params
+        finding.params_tracked = True
+
+
+def _literal_tool_params(fields: dict, handler_node, src: bytes, struct_registry: dict) -> tuple[list[str], list[str]] | None:
+    schema_field = fields.get("InputSchema")
+    if schema_field is not None:
+        return _input_schema_params(schema_field, src)
+    if handler_node is not None:
+        type_node = _handler_last_param_type(handler_node)
+        if type_node is not None and type_node.type == "type_identifier":
+            entry = struct_registry.get(_text(type_node, src))
+            if entry is not None:
+                return _struct_params(entry[0], entry[1])
+    return None
+
+
 def _analyze_new_tool_call(new_tool_call, src: bytes, const_registry: dict[str, str]) -> tuple[str | None, str, int, int]:
     """For a `mcp.NewTool(name, mcp.WithDescription(...), mcp.WithString(...),
     ...)` call (mark3labs/mcp-go's fluent builder), returns
@@ -534,7 +632,9 @@ def _build_mark3labs_finding(new_tool_call, rel: str, line: int, src: bytes, con
         has_try_except=True,  # not checked for Go — see module docstring
         has_bare_except=False,
         description_text=description,
+        params_tracked=False,
     )
+    _apply_params(finding, _new_tool_params(new_tool_call, src, const_registry))
     if not finding.has_description:
         finding.issues.append(ToolIssue(
             name_val, rel, finding.line, "description",
@@ -575,6 +675,7 @@ def _finding_from_name_description(name_val: str, description: str, rel: str, li
         has_try_except=True,  # not checked for Go — see module docstring
         has_bare_except=False,
         description_text=description,
+        params_tracked=False,
     )
     if not finding.has_description:
         finding.issues.append(ToolIssue(
@@ -889,7 +990,9 @@ def _build_literal_tool_finding(
         has_try_except=True,  # not checked for Go — see module docstring
         has_bare_except=False,
         description_text=description,
+        params_tracked=False,
     )
+    _apply_params(finding, _literal_tool_params(fields, handler_node, src, struct_registry))
 
     if not finding.has_description:
         finding.issues.append(ToolIssue(
@@ -1179,7 +1282,9 @@ def find_go_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
                 has_try_except=True,  # not checked for Go — see module docstring
                 has_bare_except=False,
                 description_text=description,
+                params_tracked=False,
             )
+            _apply_params(finding, _literal_tool_params(fields, handler_node, src, struct_registry))
 
             if not finding.has_description:
                 finding.issues.append(ToolIssue(

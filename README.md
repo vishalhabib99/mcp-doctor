@@ -75,7 +75,9 @@ How it confirms a write: it pairs the write with a read tool on the same thing (
 
 Checked on real servers before release: filesystem (11 calls: writes, edits, moves, a rejected typo, an access-denied path), memory (6), everything (10): no warnings on calls that worked. Caught: playwright-mcp 0.0.82's short wait and FastMCP's dropped argument. Tests: [`tests/test_guard.py`](tests/test_guard.py) reproduces each issue above against a fake server, each with a healthy twin that must stay quiet.
 
-Limits: stdio servers only (not HTTP yet). Writes are confirmed only when the server has a matching read tool. Values the server rewrites on the way in (formatting, normalization) can read as missing.
+**Remote servers:** `mcp-doctor guard --url https://host/mcp --header 'Authorization=Bearer ...'` runs the same checks in front of a server reached over Streamable HTTP. The agent's config points at guard as a local stdio server, guard forwards each message over HTTP (JSON or event-stream replies, session id kept, the server's own GET stream relayed when it offers one), and nothing else changes. Checked against DeepWiki's public server: handshake, tool list and a real call, no false alarms.
+
+Limits: writes are confirmed only when the server has a matching read tool. Values the server rewrites on the way in (formatting, normalization) can read as missing.
 
 ### Guard for coding agents (Claude Code hooks)
 
@@ -217,7 +219,7 @@ mcp-doctor . --diff-against baseline.json  # compare against it
 mcp-doctor . --diff-against baseline.json --fail-on-breaking-change  # non-zero exit in CI
 ```
 
-Deliberately doesn't touch the quality/security scores — those are properties of one snapshot, this is a property of two compared, a different kind of question with its own exit code. A **new** tool or a **new optional** parameter is never flagged — nothing an existing caller relied on stopped working. Python only for now (parameter presence and required-ness — not types), same incremental language-by-language pattern as the rest of this analyzer.
+Deliberately doesn't touch the quality/security scores — those are properties of one snapshot, this is a property of two compared, a different kind of question with its own exit code. A **new** tool or a **new optional** parameter is never flagged — nothing an existing caller relied on stopped working. Python, TypeScript and Go (parameter presence and required-ness, not types): Python signatures and schema dicts; TypeScript Zod shapes (`.optional()`, `.nullish()`, `.default()` make a field optional) and raw JSON Schema `required` lists; Go `mcp.Required()` builder options, explicit `InputSchema` `Required` lists, and input structs, where a field is optional only when its `json` tag says `omitempty` or `omitzero`. A tool whose schema can't be read statically, or a TS/Go tool in a baseline saved before v1.27.0, is skipped rather than compared.
 
 ## GitHub Action
 
@@ -537,7 +539,7 @@ A thirtieth pass closed an already-documented, real known limitation rather than
 - **Go: error handling isn't checked at all.** Go has no exception mechanism — a handler communicates failure through its `error` return value, which the SDK already turns into a structured tool error either way — and what a genuinely useful Go-specific check should even look for (a bare `panic` with no `recover`? an ignored error from a called function?) hasn't been researched carefully enough yet to check for without risking a check that's wrong rather than just incomplete.
 - **Go: heavily customized in-house registries built on top of either SDK aren't introspected.** `github/github-mcp-server` (32k★) wraps the official SDK in its own bespoke tool registry (middleware, OAuth-scope gating, generated handlers) rather than calling `mcp.AddTool` directly at any single, simple call site — same category of gap as Python's class-based low-level `Server` registries, and left undone for the same reason: reliably resolving it is a materially bigger undertaking than a scoped fix.
 - **The description-length heuristic weighs script density via Unicode's East Asian Width property, not a full per-language model.** Fixed (see the thirtieth pass) for CJK and other Wide/Fullwidth scripts, verified on a real repo (`xiaohongshu-mcp`'s Chinese descriptions). A script that packs more meaning per character than Latin but isn't classified Wide/Fullwidth by Unicode (e.g. Arabic, Devanagari, Cyrillic) still counts 1 column per character — a real, narrower residual gap than the one just closed, not yet found misfiring on an actual repo.
-- **`--diff-against` only tracks parameter presence and required-ness, not types.** A parameter that changes type without changing name or required-ness (e.g. `str` → `int`) isn't caught, for any Python registration style. TS/Go tools have empty `param_names`/`required_param_names` in both snapshots, so a real schema change there is silently a no-op rather than a false positive — correctly incomplete, not wrong, but still a real coverage gap. Within Python, the raw-schema-dict `Tool(name=..., inputSchema={...})` constructor style is only as complete as the schema is statically resolvable: a dynamic property key or an unresolved `**spread_call()` drops that tool's `required_param_names` back to empty and marks `param_names_complete` false, so `param_removed` detection is skipped entirely for that tool rather than risk a false positive from partial coverage (see analyzer.py's `_find_lowlevel_tools` and schema_diff.py).
+- **`--diff-against` only tracks parameter presence and required-ness, not types.** A parameter that changes type without changing name or required-ness (e.g. `str` → `int`) isn't caught, in any language. A TS/Go tool whose schema is built at runtime or defined in a helper the analyzer doesn't follow isn't compared (on 121 local real repos, 934 of 1,152 TS/Go tools are). Within Python, the raw-schema-dict `Tool(name=..., inputSchema={...})` constructor style is only as complete as the schema is statically resolvable: a dynamic property key or an unresolved `**spread_call()` drops that tool's `required_param_names` back to empty and marks `param_names_complete` false, so `param_removed` detection is skipped entirely for that tool rather than risk a false positive from partial coverage (see analyzer.py's `_find_lowlevel_tools` and schema_diff.py).
 
 ## Roadmap
 
@@ -549,8 +551,9 @@ A thirtieth pass closed an already-documented, real known limitation rather than
 - [x] Claude Code plugin — scan and fix from inside the editor, with an eval suite
 - [x] Runtime checks in the same tool — `fuzz`, `fuzz --truth`, `verdict` and the `session` wrapper (formerly mcp-fuzz, mcp-reality-check and mcp-trust-check), and the Action runs them with `run:`
 - [x] Live guard for agents — `guard` for MCP servers, `guard hook` for Claude Code's own tools
-- [ ] `guard` over HTTP (stdio only today)
-- [ ] `--fix` and `--diff-against` for TypeScript and Go (Python only today)
+- [x] `guard` over HTTP (`--url`)
+- [x] `--diff-against` for TypeScript and Go
+- [ ] `--fix` for TypeScript and Go: deliberately not planned yet. The mechanical fixes (nullable `None` defaults, bare `except:`) are Python bugs; the only TS candidate is a `TODO` description placeholder, which the Action already leaves off by default
 
 ## Contributing
 
