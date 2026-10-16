@@ -35,7 +35,7 @@ inputs:
     required: false
     default: ""
   headers:
-    description: "HTTP headers for `url`, one KEY=VALUE per line (pass secrets through `${{ secrets.X }}`)."
+    description: "HTTP headers for `url`, one KEY=VALUE per line. Pass tokens in from repository secrets, never as literal text."
     required: false
     default: ""
   env:
