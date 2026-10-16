@@ -254,3 +254,49 @@ def test_journal_holds_hashes_not_text(session, tmp_path):
     s.close()
     raw = journal.read_text()
     assert "Salary" not in raw and "prod-west" not in raw
+
+
+# ---- is the answer real (folded in from mcp-reality-check) ---------------------
+
+def test_refusal_empty_read_and_schema_break_are_flagged(session):
+    s = session("reality_bad")
+    assert "refusal" in s.call("get_weather", {"city": "Paris"})[1][0]
+    assert "returned nothing" in s.call("read_notes", {"topic": "q3"})[1][0]
+    assert "outputSchema" in s.call("count_items", {"kind": "open"})[1][0] and "count should be integer" in s.call("count_items", {"kind": "open"})[1][0]
+
+
+def test_real_answers_quoted_refusals_and_empty_deletes_are_quiet(session):
+    s = session("reality_ok")
+    for name, args in [("get_weather", {"city": "Paris"}), ("read_notes", {"topic": "q3"}), ("count_items", {"kind": "open"}),
+                       ("read_readme", {}), ("delete_note", {"id": "n1"})]:
+        assert s.call(name, args)[1] == [], name
+
+
+def test_refusal_phrasings_carried_over_from_reality_check():
+    from mcp_doctor.guard import check_refusal
+
+    def flags(text):
+        return bool(check_refusal("t", {"content": [{"type": "text", "text": text}]}))
+    for refusal in ["I don't have access to real-time data.", "I'm sorry, but I cannot do that.",
+                    "As an AI, I have no way to browse the web.", "Unfortunately, I cannot process this request.",
+                    "As an AI language model, I cannot browse the internet.", "I have no access to the user's calendar.",
+                    '{"result": "I\'m sorry, but I can\'t provide that."}']:
+        assert flags(refusal), refusal
+    for answer in ["The weather in Paris is sunny and 72F.", "Sorry for the delay, here are your results: 3 items found.",
+                   "Structured record of work as an AI Product Manager.", "An agent has no access to server source, only metadata.",
+                   "x" * 300 + " I'm sorry, but I can't help with that."]:
+        assert not flags(answer), answer
+    assert not check_refusal("t", {"isError": True, "content": [{"type": "text", "text": "I'm sorry, but no."}]})
+
+
+def test_schema_checker_agrees_on_the_common_keywords():
+    from mcp_doctor.guard import schema_error
+    schema = {"type": "object", "required": ["count"], "properties": {"count": {"type": "integer"},
+              "tags": {"type": "array", "items": {"type": "string"}}, "id": {"anyOf": [{"type": "string"}, {"type": "null"}]}}}
+    assert schema_error({"count": 3, "tags": ["a"], "id": None}, schema) is None
+    assert "missing required field 'count'" in schema_error({}, schema)
+    assert "count should be integer" in schema_error({"count": True}, schema)
+    assert "tags[1]" in schema_error({"count": 1, "tags": ["a", 2]}, schema)
+    assert "anyOf" in schema_error({"count": 1, "id": 5}, schema)
+    assert schema_error({"count": 1.5}, {"properties": {"count": {"type": "number"}}}) is None
+    assert schema_error({"x": 1}, {"type": "object", "patternProperties": {"^x": {"type": "string"}}}) is None  # unknown keyword: accept

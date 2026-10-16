@@ -47,6 +47,9 @@
 | Arguments the tool's schema doesn't have, which the server drops and runs with defaults | [python-sdk#3067](https://github.com/modelcontextprotocol/python-sdk/issues/3067) (still true on `mcp` 1.x: `read_doc(path=...)` returns `topic=''`); [openai-agents-python#5170](https://github.com/openai/openai-agents-python/issues/5170) |
 | A wait that returned early while its result claims the full time | [playwright-mcp#1767](https://github.com/microsoft/playwright-mcp/issues/1767): "Waited for 40" after 30 s on 0.0.82; the fixed release says so and stays quiet |
 | An error message returned as a successful result | `Error: database is locked` without `isError` |
+| A refusal returned as a successful answer ("I don't have access to…", "I'm sorry, but…"), only when it starts the answer, not when a document quotes one | A tool that hides "I can't" inside a success, so the agent treats it as data |
+| A read that succeeded with nothing in it (writes and deletes may return nothing) | An empty "success" the agent would read as "there's nothing there" |
+| Structured output that breaks the tool's own `outputSchema` | `{"count": "three"}` from a tool that declares `count` an integer |
 | **Likely prompt-injection leak:** a secret (key, token) read through one call about to be written by another; or text from one repo about to be written into a different repo after the session read outside content (an issue, ticket, web page) | GitHub MCP (Invariant, 2025): public issue → private repo → public PR; GitLost (Noma, 2026): public issue → private repo in a public comment; Supabase MCP (2025): ticket → tokens table → token written back out |
 
 What it looks like to the agent, same broken `write_file`, same prompt, Claude Code:
@@ -54,6 +57,8 @@ What it looks like to the agent, same broken `write_file`, same prompt, Claude C
 > **Without guard:** "Yes, the file was saved. The fs server's write_file tool reported success…"
 >
 > **With guard:** "I can't confirm the file was saved. `write_file` returned 'Successfully wrote to /tmp/q3/report.md', but the result also carried a warning that a read-back of that path failed with 'no such file or directory'."
+
+The refusal, empty-read and output-schema checks came from [mcp-reality-check](https://github.com/vishalhabib99/mcp-reality-check), which folded into `guard`: the same phrase list (including its fix for documents that quote a refusal), now applied to every real call instead of one synthetic call per tool. The schema check is built in (no `jsonschema` dependency) and covers `type`, `required`, `properties`, `items`, `enum`, `const`, `anyOf` and `oneOf`; it accepts anything it doesn't understand rather than guess.
 
 How the leak check works: every result is fingerprinted as line and secret hashes (never the text) in a journal shared by the guards one client started, so outside content fetched through one server and a write made through another are seen together. It stays quiet on copying within the same repo, on quoting the outside content itself, on copying between repos when no outside content was read, and on a single short shared line. By default it warns; `--hold-leaks` returns an error instead of sending the write. It matches copied text, so a leak the model paraphrases can get past it; in a Claude Code run against an injected issue, Haiku refused the injection itself, so this is a net for when the model is fooled, not a replacement for least-privilege tokens.
 

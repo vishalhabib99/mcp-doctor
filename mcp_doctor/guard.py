@@ -9,6 +9,10 @@ JSON-RPC line through unchanged, and checks each tools/call on the way:
   (servers#4138 write_file on Windows, github-mcp-server#3160 dropped labels)
 - a wait that returned sooner than it said it waited (playwright-mcp#1767)
 - an error message returned as a successful result
+- a refusal returned as a successful answer ("I don't have access to...")
+- a read that succeeded with nothing in it
+- structured output that breaks the tool's own declared outputSchema
+  (these three came from mcp-reality-check, which folded into guard)
 - a likely leak: a secret read through one call about to be written by another,
   or text from one repo written into a different repo after the agent read
   outside content (an issue, ticket, web page): the shape of the GitHub MCP,
@@ -100,6 +104,7 @@ class Tool:
     schema: dict
     annotations: dict | None
     description: str = ""
+    output_schema: dict | None = None
 
     @property
     def properties(self) -> dict:
@@ -181,6 +186,110 @@ def check_error_text(tool_name: str, result: dict) -> list[Finding]:
         f"{tool_name} returned what reads as an error (\"{line}\") but didn't mark the result isError, "
         "so a client may treat it as success.",
     )]
+
+
+# ---- is the answer real (from mcp-reality-check) ----------------------------
+
+# Phrases specific enough that a genuine, on-topic answer is unlikely to contain
+# them: full phrases, not "sorry" or "can't". A missed refusal beats a false accusation.
+_REFUSAL = re.compile("|".join([
+    r"\bi (?:can(?:not|'t)|am unable to|'m unable to|do not have access|don't have access|"
+    r"am not able to|'m not able to|don't have the ability|do not have the ability)\b",
+    r"\bas an ai(?: (?:language )?model| assistant)?,",  # not "as an AI Product Manager"
+    r"\bi'm sorry, but\b",
+    r"\bunfortunately,? i (?:cannot|can't|am unable|don't|do not)\b",
+    r"\bi(?: have|'ve| had) no access to\b",  # not "an agent has no access to"
+    r"\bnot authorized to\b",
+    r"\bunable to (?:process|complete|fulfill) this request\b",
+    r"\bi don't have (?:the )?(?:permission|access|ability) to\b",
+]), re.IGNORECASE)
+# A disguised refusal IS the answer, so it starts the response. Deeper in, it's a
+# document quoting one (a README about refusals), which made every file reader a
+# false positive in mcp-reality-check 0.4.1.
+_REFUSAL_WINDOW = 200
+
+
+def check_refusal(tool_name: str, result: dict) -> list[Finding]:
+    if result.get("isError"):
+        return []
+    text = _text_of(result).lstrip()
+    m = _REFUSAL.search(text)
+    if not m or m.start() >= _REFUSAL_WINDOW:
+        return []
+    return [Finding(
+        "refusal_as_success",
+        f"{tool_name} reported success, but its answer is a refusal (\"{m.group(0)}\"). Treat it as a failure, not a result.",
+    )]
+
+
+def check_empty(tool: Tool | None, tool_name: str, result: dict, server_annotates: bool) -> list[Finding]:
+    """A read that succeeded with nothing in it. Reads only: a write or delete
+    that answers with nothing is normal."""
+    if result.get("isError") or tool is None or not tool.read_only(server_annotates):
+        return []
+    content = result.get("content") or []
+    has_payload = result.get("structuredContent") is not None or any(
+        isinstance(c, dict) and (c.get("type") != "text" or str(c.get("text", "")).strip()) for c in content)
+    if has_payload:
+        return []
+    return [Finding("empty_success", f"{tool_name} reported success but returned nothing. There is no answer here to use.")]
+
+
+_JSON_TYPES = {"object": dict, "array": list, "string": str, "boolean": bool, "null": type(None)}
+
+
+def schema_error(value: Any, schema: Any, path: str = "") -> str | None:
+    """The first way `value` breaks `schema`, for the keywords outputs use in
+    practice (type, required, properties, items, enum, const, anyOf/oneOf).
+    Anything else is accepted rather than guessed at, so this never reports a
+    violation a full validator wouldn't."""
+    if not isinstance(schema, dict):
+        return None
+    where = path or "the output"
+    types = schema.get("type")
+    if types is not None:
+        allowed = types if isinstance(types, list) else [types]
+        def fits(t: str) -> bool:
+            if t == "integer":
+                return isinstance(value, int) and not isinstance(value, bool)
+            if t == "number":
+                return isinstance(value, (int, float)) and not isinstance(value, bool)
+            py = _JSON_TYPES.get(t)
+            return py is None or isinstance(value, py)  # bool is an int subclass, but not a str/list/dict/None
+        if not any(fits(t) for t in allowed):
+            return f"{where} should be {' or '.join(allowed)}, got {type(value).__name__}"
+    if "enum" in schema and value not in schema["enum"]:
+        return f"{where} is {value!r}, not one of {schema['enum']}"
+    if "const" in schema and value != schema["const"]:
+        return f"{where} is {value!r}, not {schema['const']!r}"
+    for key in ("anyOf", "oneOf"):
+        options = schema.get(key)
+        if isinstance(options, list) and options and all(schema_error(value, o, path) for o in options):
+            return f"{where} matches none of its {key} options"
+    if isinstance(value, dict):
+        for name in schema.get("required") or []:
+            if name not in value:
+                return f"{where} is missing required field {name!r}"
+        for name, sub in (schema.get("properties") or {}).items():
+            if name in value:
+                err = schema_error(value[name], sub, f"{path}.{name}" if path else name)
+                if err:
+                    return err
+    if isinstance(value, list) and isinstance(schema.get("items"), dict):
+        for i, item in enumerate(value):
+            err = schema_error(item, schema["items"], f"{path}[{i}]")
+            if err:
+                return err
+    return None
+
+
+def check_output_schema(tool: Tool | None, tool_name: str, result: dict, output_schema: dict | None) -> list[Finding]:
+    if result.get("isError") or output_schema is None or result.get("structuredContent") is None:
+        return []
+    err = schema_error(result["structuredContent"], output_schema)
+    if err is None:
+        return []
+    return [Finding("output_schema", f"{tool_name}'s structured result breaks its own declared outputSchema: {err}.")]
 
 
 # ---- write verification ------------------------------------------------------
@@ -579,7 +688,8 @@ class Guard:
                     ann = t.get("annotations") if isinstance(t.get("annotations"), dict) else None
                     if ann and ("readOnlyHint" in ann or "destructiveHint" in ann):
                         self.server_annotates = True
-                    self.tools[t["name"]] = Tool(t["name"], t.get("inputSchema") or {}, ann, t.get("description") or "")
+                    out = t.get("outputSchema") if isinstance(t.get("outputSchema"), dict) else None
+                    self.tools[t["name"]] = Tool(t["name"], t.get("inputSchema") or {}, ann, t.get("description") or "", out)
 
     def finish_call(self, msg: dict, p: Pending, elapsed: float) -> None:
         result = msg["result"]
@@ -587,10 +697,13 @@ class Guard:
         try:
             findings += check_wait(p.name, p.args, elapsed, result)
             findings += check_error_text(p.name, result)
+            tool = self.tools.get(p.name)
+            findings += check_refusal(p.name, result)
+            findings += check_empty(tool, p.name, result, self.server_annotates)
+            findings += check_output_schema(tool, p.name, result, tool.output_schema if tool else None)
             if result.get("isError"):
                 # The server rejected the call itself, so nothing ran on dropped arguments.
                 findings = [f for f in findings if f.check != "unknown_arguments"]
-            tool = self.tools.get(p.name)
             if not result.get("isError"):
                 self.leaks.record(p.name, p.args, result)
             if self.verify and tool is not None and not result.get("isError") and not findings:
