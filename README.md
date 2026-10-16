@@ -16,6 +16,7 @@
 - **In your browser:** [check any MCP server](https://vishalhabib99.github.io/mcp-doctor/check/). Paste a GitHub repo, npm or PyPI name and get both grades in seconds. The real mcp-doctor runs in your browser (Pyodide); nothing is uploaded or run.
 - **No install, as a GitHub issue:** [open a scan request](https://github.com/vishalhabib99/mcp-doctor/issues/new?template=scan-request.yml) with your server's GitHub URL. A bot replies with the report in a few minutes. It reads the code only and never runs it. Security findings are posted as counts only, since the issue is public.
 - **CLI:** `pip install mcp-server-lint`, then `mcp-doctor path/to/your/server`
+- **Running an agent?** Put [`mcp-doctor guard`](#guard--catch-tool-calls-that-report-success-but-didnt-work) in front of any MCP server, and the agent is told when a tool says "success" but the write didn't land, its arguments were ignored, or it didn't do what it claims
 - **Claude Code:** `/plugin install mcp-doctor --marketplace vishalhabib99/mcp-doctor`, then ask "check my MCP server". Claude scans, explains each finding, and fixes what it can with your OK ([details](#claude-code-plugin))
 - **CI:** `uses: vishalhabib99/mcp-doctor@v1` comments on each PR, suggests one-click fixes on the lines it changes, and can fail a PR that drops below your score ([details](#github-action))
 
@@ -24,6 +25,40 @@
 - **Recall is measured in the open:** 15,755 of 15,977 tools found across 805 real servers on 5 frameworks. Every miss is listed in [docs/coverage.md](docs/coverage.md).
 - **112 bugs found and fixed after release** by running it on 40+ real servers, up to the 91.0k★ official `modelcontextprotocol/servers` monorepo. [How 69 of them got through](docs/postmortem-69-bugs.md).
 - **Maintainers act on the reports:** fixes merged upstream, e.g. [ha-mcp (4.9k★)](https://github.com/homeassistant-ai/ha-mcp/pull/2327). Every audited repo is ranked on the [leaderboard](https://vishalhabib99.github.io/mcp-doctor/), with a dated grade badge you can add to your README.
+
+## Guard — catch tool calls that report success but didn't work
+
+`mcp-doctor guard` runs any stdio MCP server behind a check. Every message passes through unchanged; after each `tools/call` it looks for a "success" that isn't one and, if it finds one, adds a warning to the result the agent reads, so the agent can retry or tell you instead of saying "done".
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "mcp-doctor",
+      "args": ["guard", "--", "npx", "-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"]
+    }
+  }
+}
+```
+
+| Check | Real issue it catches |
+|---|---|
+| A write says it worked, but a matching read can't find it | [servers#4138](https://github.com/modelcontextprotocol/servers/issues/4138): `write_file` returns "Successfully wrote" on Windows and writes nothing; [github-mcp-server#3160](https://github.com/github/github-mcp-server/issues/3160): `issue_write` drops labels and still succeeds |
+| Arguments the tool's schema doesn't have, which the server drops and runs with defaults | [python-sdk#3067](https://github.com/modelcontextprotocol/python-sdk/issues/3067) (still true on `mcp` 1.x: `read_doc(path=...)` returns `topic=''`); [openai-agents-python#5170](https://github.com/openai/openai-agents-python/issues/5170) |
+| A wait that returned early while its result claims the full time | [playwright-mcp#1767](https://github.com/microsoft/playwright-mcp/issues/1767): "Waited for 40" after 30 s on 0.0.82; the fixed release says so and stays quiet |
+| An error message returned as a successful result | `Error: database is locked` without `isError` |
+
+What it looks like to the agent, same broken `write_file`, same prompt, Claude Code:
+
+> **Without guard:** "Yes, the file was saved. The fs server's write_file tool reported success…"
+>
+> **With guard:** "I can't confirm the file was saved. `write_file` returned 'Successfully wrote to /tmp/q3/report.md', but the result also carried a warning that a read-back of that path failed with 'no such file or directory'."
+
+How it confirms a write: it pairs the write with a read tool on the same thing (`write_file` → `read_text_file`, `issue_write` → `issue_read`), calls it with the write's own arguments or the id it returned, and checks the written values are there. It tries up to three matching reads and warns only if none confirms the write. It only ever calls tools the server marks `readOnlyHint: true` (or, on a server that declares no annotations, tools named `read_`/`get_`/`fetch_`…); `--no-verify` turns read-backs off. It never blocks a call or changes `isError`. Findings also go to stderr, and to `--log FILE` as JSON lines.
+
+Checked on real servers before release: filesystem (11 calls: writes, edits, moves, a rejected typo, an access-denied path), memory (6), everything (10): no warnings on calls that worked. Caught: playwright-mcp 0.0.82's short wait and FastMCP's dropped argument. Tests: [`tests/test_guard.py`](tests/test_guard.py) reproduces each issue above against a fake server, each with a healthy twin that must stay quiet.
+
+Limits: stdio servers only (not HTTP yet). Writes are confirmed only when the server has a matching read tool. Values the server rewrites on the way in (formatting, normalization) can read as missing.
 
 ## What it is
 

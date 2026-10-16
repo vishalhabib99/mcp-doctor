@@ -29,6 +29,10 @@ def main(argv: list[str] | None = None) -> int:
         from .init_action import main as init_action_main
 
         return init_action_main(argv[1:])
+    if argv[:1] == ["guard"]:
+        from .guard import main as guard_main
+
+        return guard_main(argv[1:])
 
     parser = argparse.ArgumentParser(
         prog="mcp-doctor",

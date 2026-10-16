@@ -1,0 +1,484 @@
+"""`mcp-doctor guard`: catch tool calls that report success but didn't work.
+
+Sits between an MCP client (the agent) and a stdio MCP server, passing every
+JSON-RPC line through unchanged, and checks each tools/call on the way:
+
+- arguments the tool's schema doesn't have, which a server may silently drop
+  (python-sdk#3067, openai-agents-python#5170)
+- a write that reports success but whose effect a matching read can't find
+  (servers#4138 write_file on Windows, github-mcp-server#3160 dropped labels)
+- a wait that returned sooner than it said it waited (playwright-mcp#1767)
+- an error message returned as a successful result
+
+A finding is appended to the result as one more text item, so the agent reads
+it in the same turn and can retry or tell the user, and is logged to stderr
+(and to --log as JSON lines). Nothing is blocked and isError is never changed.
+
+Verification only ever calls tools that declare readOnlyHint, or, when a server
+declares no annotations at all, tools named read_/get_/fetch_/... It can be
+turned off with --no-verify.
+
+    mcp-doctor guard [--log FILE] [--no-verify] -- <server command> [args...]
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import queue
+import re
+import subprocess
+import sys
+import threading
+import time
+from dataclasses import dataclass, field
+from typing import Any, Callable
+
+PREFIX = "⚠ mcp-doctor guard: "
+_GUARD_ID = "mcp-doctor-guard-"
+
+_WRITE_VERBS = {"write", "create", "save", "update", "edit", "add", "set", "append", "put", "upsert"}
+_READ_VERBS = {"read", "get", "fetch", "show", "view", "cat", "list", "describe"}
+_OTHER_VERBS = {"delete", "remove", "move", "rename", "search", "find", "run", "call"}
+_WAIT_NAME = re.compile(r"(?:^|_)(?:wait|sleep|delay|pause)(?:$|_|for)", re.I)
+_WAIT_ARG = re.compile(r"^(?:time|seconds|secs|duration|wait|sleep|delay)(_s|_sec|_seconds|_ms)?$", re.I)
+_ERROR_TEXT = re.compile(r"^\s*(?:error|failed|failure|exception|traceback|fatal)\b[\s:]", re.I)
+_URL_NUMBER = re.compile(r"/(?:issues|pull|pulls|items|comments)/(\d+)")
+
+
+def _tokens(name: str) -> list[str]:
+    spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name)
+    return [t for t in re.split(r"[^A-Za-z0-9]+", spaced.lower()) if t]
+
+
+def _verb_and_nouns(name: str) -> tuple[str | None, set[str]]:
+    toks = _tokens(name)
+    verbs = [t for t in toks if t in _WRITE_VERBS | _READ_VERBS | _OTHER_VERBS]
+    nouns = {t for t in toks if t not in _WRITE_VERBS | _READ_VERBS | _OTHER_VERBS}
+    nouns |= {t[:-1] for t in nouns if t.endswith("s") and len(t) > 3}  # entities → entity
+    return (verbs[0] if verbs else None), nouns
+
+
+def _text_of(result: dict) -> str:
+    parts = []
+    for item in result.get("content") or []:
+        if isinstance(item, dict):
+            if item.get("type") == "text":
+                parts.append(str(item.get("text", "")))
+            elif item.get("type") == "resource" and isinstance(item.get("resource"), dict):
+                parts.append(str(item["resource"].get("text", "")))
+    if result.get("structuredContent") is not None:
+        parts.append(json.dumps(result["structuredContent"]))
+    return "\n".join(parts)
+
+
+def _norm(s: str) -> str:
+    return s.replace("\r\n", "\n").strip()
+
+
+@dataclass
+class Finding:
+    check: str
+    message: str
+
+
+@dataclass
+class Tool:
+    name: str
+    schema: dict
+    annotations: dict | None
+    description: str = ""
+
+    @property
+    def properties(self) -> dict:
+        return self.schema.get("properties") or {}
+
+    @property
+    def required(self) -> list[str]:
+        return list(self.schema.get("required") or [])
+
+    def read_only(self, server_annotates: bool) -> bool:
+        if self.annotations and "readOnlyHint" in self.annotations:
+            return self.annotations["readOnlyHint"] is True
+        if server_annotates:
+            return False  # this server says what's read-only, and didn't say it for this one
+        verb, _ = _verb_and_nouns(self.name)
+        return verb in _READ_VERBS
+
+
+# ---- checks that need only the call -----------------------------------------
+
+def check_arguments(tool: Tool | None, args: dict) -> list[Finding]:
+    """Arguments the schema doesn't declare. Most servers drop them without a
+    word, so the tool runs with a default instead of what the agent meant."""
+    if tool is None or not isinstance(args, dict):
+        return []
+    schema = tool.schema
+    if schema.get("additionalProperties") not in (None, False) or "patternProperties" in schema:
+        return []
+    if not tool.properties and "properties" not in schema:
+        return []  # no declared shape to compare against
+    unknown = [k for k in args if k not in tool.properties]
+    if not unknown:
+        return []
+    known = ", ".join(tool.properties) or "none"
+    return [Finding(
+        "unknown_arguments",
+        f"{tool.name} was called with {', '.join(repr(k) for k in unknown)}, which "
+        f"{'is' if len(unknown) == 1 else 'are'} not in its input schema (it takes: {known}). "
+        "The server may have ignored {} and run with defaults, so this result may not be what was asked for."
+        .format("it" if len(unknown) == 1 else "them"),
+    )]
+
+
+def check_wait(tool_name: str, args: dict, elapsed: float, result: dict | None = None) -> list[Finding]:
+    """A wait/sleep that came back well before the requested time and doesn't
+    say so. Playwright MCP's fixed release answers "Waited for 30 seconds
+    (requested 40, maximum is 30)": a result that names the time it really
+    waited is honest, so it stays quiet."""
+    if not isinstance(args, dict):
+        return []
+    for key, value in args.items():
+        if not _WAIT_ARG.match(key) or isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        if not (_WAIT_NAME.search(tool_name) or key.lower() in ("sleep", "wait", "delay")):
+            continue
+        seconds = value / 1000 if key.lower().endswith("_ms") else float(value)
+        if 0 < seconds <= 3600 and elapsed < 0.8 * seconds - 0.5:
+            said = [float(n) for n in re.findall(r"\d+(?:\.\d+)?", _text_of(result or {}))]
+            if any(abs(n - elapsed) <= max(1.0, 0.15 * elapsed) and n != seconds for n in said):
+                return []
+            return [Finding(
+                "short_wait",
+                f"{tool_name} was asked to wait {seconds:g} s but returned after {elapsed:.1f} s. "
+                "If its result says it waited the full time, that isn't what happened.",
+            )]
+    return []
+
+
+def check_error_text(tool_name: str, result: dict) -> list[Finding]:
+    """An error message sent back as a successful result."""
+    if result.get("isError"):
+        return []
+    first = next((i for i in result.get("content") or [] if isinstance(i, dict) and i.get("type") == "text"), None)
+    if first is None or not _ERROR_TEXT.match(str(first.get("text", ""))):
+        return []
+    line = str(first["text"]).strip().splitlines()[0][:160]
+    return [Finding(
+        "error_as_success",
+        f"{tool_name} returned what reads as an error (\"{line}\") but didn't mark the result isError, "
+        "so a client may treat it as success.",
+    )]
+
+
+# ---- write verification ------------------------------------------------------
+
+@dataclass
+class ReadPlan:
+    tool: Tool
+    args: dict
+    used_keys: set[str]
+
+
+def _ids_from_result(result: dict) -> dict[str, Any]:
+    """Identifiers a create call returned: top-level JSON keys, and a number
+    from an issue/PR URL."""
+    found: dict[str, Any] = {}
+    text = _text_of(result)
+    for chunk in [result.get("structuredContent")] + [text]:
+        data = chunk
+        if isinstance(chunk, str):
+            try:
+                data = json.loads(chunk)
+            except ValueError:
+                data = None
+        if isinstance(data, dict):
+            for k, v in data.items():
+                if isinstance(v, (str, int)) and not isinstance(v, bool):
+                    found.setdefault(k, v)
+    m = _URL_NUMBER.search(text)
+    if m:
+        found.setdefault("number", int(m.group(1)))
+    return found
+
+
+def plan_reads(write: Tool, args: dict, result: dict, tools: dict[str, Tool], server_annotates: bool) -> list[ReadPlan]:
+    """Read calls that could confirm this write, best first. Several, because
+    the best-named one can return metadata instead of content: the filesystem
+    server's get_file_info shows size and dates, read_text_file the text."""
+    verb, nouns = _verb_and_nouns(write.name)
+    if verb not in _WRITE_VERBS or not nouns:
+        return []
+    if write.annotations and write.annotations.get("readOnlyHint") is True:
+        return []
+    ids = _ids_from_result(result)
+    candidates = []
+    for t in tools.values():
+        if t.name == write.name or not t.read_only(server_annotates):
+            continue
+        rverb, rnouns = _verb_and_nouns(t.name)
+        overlap = nouns & rnouns
+        if rverb not in _READ_VERBS or rverb == "list" and "directory" not in rnouns or not overlap:
+            continue
+        call_args, used = {}, set()
+        ok = True
+        for p in t.required:
+            spec = t.properties.get(p) or {}
+            enum = spec.get("enum")
+            if p in args and (not enum or args[p] in enum):
+                call_args[p] = args[p]
+                used.add(p)
+            elif p in ids:
+                call_args[p] = ids[p]
+            elif p.endswith("number") and "number" in ids:
+                call_args[p] = ids["number"]
+            elif enum:
+                call_args[p] = "get" if "get" in enum else enum[0]
+            else:
+                ok = False
+                break
+        if not ok:
+            continue
+        deprecated = "deprecated" in (t.description or "").lower()
+        candidates.append((-len(overlap), deprecated, len(t.required), t.name, ReadPlan(t, call_args, used)))
+    return [c[4] for c in sorted(candidates, key=lambda c: c[:4])]
+
+
+def _values_to_confirm(write: Tool, args: dict, skip: set[str]) -> dict[str, list[str]]:
+    """Top-level string / list-of-string arguments the read-back should contain.
+    Enum-valued and identifying arguments say how to write, not what was written."""
+    out: dict[str, list[str]] = {}
+    for k, v in args.items():
+        if k in skip or (write.properties.get(k) or {}).get("enum"):
+            continue
+        if isinstance(v, str) and 0 < len(_norm(v)) <= 20000:
+            out[k] = [_norm(v)]
+        elif isinstance(v, list) and v and all(isinstance(x, str) and x for x in v):
+            out[k] = [_norm(x) for x in v]
+    return out
+
+
+def check_readback(write: Tool, args: dict, plan: ReadPlan, read_result: dict | None) -> list[Finding]:
+    call = f"{plan.tool.name}({', '.join(f'{k}={v!r}' for k, v in plan.args.items())})"
+    if read_result is None:
+        return []  # the read timed out or the server went away: no evidence either way
+    text = _norm(_text_of(read_result))
+    if read_result.get("isError") or _ERROR_TEXT.match(text):
+        return [Finding(
+            "unconfirmed_write",
+            f"{write.name} reported success, but reading it back with {call} failed: "
+            f"\"{text.splitlines()[0][:160] if text else 'error'}\". The write may not have happened.",
+        )]
+    missing = []
+    for key, values in _values_to_confirm(write, args, plan.used_keys | set(plan.args)).items():
+        absent = [v for v in values if v not in text]
+        if absent:
+            shown = ", ".join(repr(a[:40]) for a in absent[:3])
+            missing.append(f"{key} ({shown})")
+    if not missing:
+        return []
+    return [Finding(
+        "unconfirmed_write",
+        f"{write.name} reported success, but {call} doesn't show {'; '.join(missing)}. "
+        "Part of the write may have been dropped.",
+    )]
+
+
+# ---- the proxy ---------------------------------------------------------------
+
+@dataclass
+class Pending:
+    name: str
+    args: dict
+    started: float
+    findings: list[Finding] = field(default_factory=list)
+
+
+class Guard:
+    def __init__(self, argv: list[str], verify: bool = True, log_path: str | None = None,
+                 client_in=None, client_out=None, err=None):
+        self.argv = argv
+        self.verify = verify
+        self.client_in = client_in or sys.stdin.buffer
+        self.client_out = client_out or sys.stdout.buffer
+        self.err = err or sys.stderr
+        self.log = open(log_path, "a", encoding="utf-8") if log_path else None
+        self.tools: dict[str, Tool] = {}
+        self.server_annotates = False
+        self.pending: dict[Any, Pending] = {}
+        self.list_requests: set[Any] = set()
+        self.own: dict[str, queue.Queue] = {}
+        self.next_own = 0
+        self.lock = threading.Lock()
+        self.out_lock = threading.Lock()
+        self.in_lock = threading.Lock()
+        self.proc: subprocess.Popen | None = None
+
+    # writing
+    def to_client(self, msg: dict | bytes) -> None:
+        data = msg if isinstance(msg, bytes) else (json.dumps(msg, ensure_ascii=False) + "\n").encode()
+        with self.out_lock:
+            self.client_out.write(data)
+            self.client_out.flush()
+
+    def to_server(self, msg: dict | bytes) -> None:
+        data = msg if isinstance(msg, bytes) else (json.dumps(msg) + "\n").encode()
+        with self.in_lock:
+            self.proc.stdin.write(data)
+            self.proc.stdin.flush()
+
+    def call_server(self, name: str, args: dict, timeout: float = 10.0) -> dict | None:
+        with self.lock:
+            self.next_own += 1
+            rid = f"{_GUARD_ID}{self.next_own}"
+            box: queue.Queue = queue.Queue(1)
+            self.own[rid] = box
+        self.to_server({"jsonrpc": "2.0", "id": rid, "method": "tools/call", "params": {"name": name, "arguments": args}})
+        try:
+            msg = box.get(timeout=timeout)
+        except queue.Empty:
+            return None
+        finally:
+            with self.lock:
+                self.own.pop(rid, None)
+        return msg.get("result") if "result" in msg else {"isError": True, "content": [{"type": "text", "text": str((msg.get("error") or {}).get("message", "error"))}]}
+
+    def report(self, name: str, findings: list[Finding]) -> None:
+        for f in findings:
+            print(f"[mcp-doctor guard] {name}: {f.check}: {f.message}", file=self.err, flush=True)
+            if self.log:
+                self.log.write(json.dumps({"time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "tool": name, "check": f.check, "message": f.message}) + "\n")
+                self.log.flush()
+
+    # client → server
+    def pump_client(self) -> None:
+        for line in iter(self.client_in.readline, b""):
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                msg = None
+            if isinstance(msg, dict) and "id" in msg and msg.get("method") == "tools/call":
+                params = msg.get("params") or {}
+                name, args = params.get("name", ""), params.get("arguments") or {}
+                p = Pending(name, args, time.monotonic())
+                p.findings += check_arguments(self.tools.get(name), args)
+                with self.lock:
+                    self.pending[msg["id"]] = p
+            elif isinstance(msg, dict) and "id" in msg and msg.get("method") == "tools/list":
+                with self.lock:
+                    self.list_requests.add(msg["id"])
+            try:
+                self.to_server(line)
+            except (BrokenPipeError, OSError):
+                break
+        try:
+            self.proc.stdin.close()
+        except OSError:
+            pass
+
+    # server → client
+    def pump_server(self) -> None:
+        for line in iter(self.proc.stdout.readline, b""):
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                msg = None
+            if not isinstance(msg, dict):
+                self.to_client(line)
+                continue
+            rid = msg.get("id")
+            if isinstance(rid, str) and rid.startswith(_GUARD_ID):
+                with self.lock:
+                    box = self.own.get(rid)
+                if box:
+                    box.put(msg)
+                continue
+            if msg.get("method") == "notifications/tools/list_changed":
+                with self.lock:
+                    self.tools.clear()
+            with self.lock:
+                is_list = rid in self.list_requests and "result" in msg
+                if is_list:
+                    self.list_requests.discard(rid)
+                pending = self.pending.pop(rid, None) if "method" not in msg else None
+            if is_list:
+                self.remember_tools(msg["result"])
+            if pending is not None and isinstance(msg.get("result"), dict):
+                elapsed = time.monotonic() - pending.started
+                threading.Thread(target=self.finish_call, args=(msg, pending, elapsed), daemon=True).start()
+                continue
+            self.to_client(line)
+
+    def remember_tools(self, result: dict) -> None:
+        with self.lock:
+            for t in result.get("tools") or []:
+                if isinstance(t, dict) and t.get("name"):
+                    ann = t.get("annotations") if isinstance(t.get("annotations"), dict) else None
+                    if ann and ("readOnlyHint" in ann or "destructiveHint" in ann):
+                        self.server_annotates = True
+                    self.tools[t["name"]] = Tool(t["name"], t.get("inputSchema") or {}, ann, t.get("description") or "")
+
+    def finish_call(self, msg: dict, p: Pending, elapsed: float) -> None:
+        result = msg["result"]
+        findings = list(p.findings)
+        try:
+            findings += check_wait(p.name, p.args, elapsed, result)
+            findings += check_error_text(p.name, result)
+            if result.get("isError"):
+                # The server rejected the call itself, so nothing ran on dropped arguments.
+                findings = [f for f in findings if f.check != "unknown_arguments"]
+            tool = self.tools.get(p.name)
+            if self.verify and tool is not None and not result.get("isError") and not findings:
+                with self.lock:
+                    tools = dict(self.tools)
+                first: list[Finding] | None = None
+                for plan in plan_reads(tool, p.args, result, tools, self.server_annotates)[:3]:
+                    found = check_readback(tool, p.args, plan, self.call_server(plan.tool.name, plan.args))
+                    if not found:
+                        first = None
+                        break  # one read confirms the write: that's enough
+                    first = first if first is not None else found
+                findings += first or []
+        except Exception as e:  # a guard bug must never cost the agent its result
+            print(f"[mcp-doctor guard] internal error on {p.name}: {e!r}", file=self.err, flush=True)
+        if findings:
+            self.report(p.name, findings)
+            result = dict(result)
+            result["content"] = list(result.get("content") or []) + [
+                {"type": "text", "text": PREFIX + f.message} for f in findings
+            ]
+            msg = dict(msg, result=result)
+        self.to_client(msg)
+
+    def run(self) -> int:
+        try:
+            self.proc = subprocess.Popen(self.argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        except OSError as e:
+            print(f"mcp-doctor guard: can't start {self.argv[0]}: {e}", file=self.err)
+            return 127
+        t_server = threading.Thread(target=self.pump_server, daemon=True)
+        t_server.start()
+        threading.Thread(target=self.pump_client, daemon=True).start()
+        code = self.proc.wait()
+        t_server.join(timeout=5)
+        return code
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="mcp-doctor guard",
+        description="Run an MCP server behind a check that flags tool calls that reported success but didn't work.",
+        usage="mcp-doctor guard [--log FILE] [--no-verify] -- <server command> [args...]",
+    )
+    parser.add_argument("--log", help="Also append each finding to FILE as a JSON line")
+    parser.add_argument("--no-verify", action="store_true", help="Don't make read calls to confirm writes")
+    if "--" in argv:
+        i = argv.index("--")
+        opts, server = argv[:i], argv[i + 1:]
+    elif argv[:1] and argv[0].startswith("-"):
+        opts, server = argv, []  # `guard --help`, or options with no server yet
+    else:
+        opts, server = [], argv
+    args = parser.parse_args(opts)
+    if not server:
+        parser.error("give the server command after --, e.g. mcp-doctor guard -- npx @modelcontextprotocol/server-filesystem /tmp")
+    return Guard(server, verify=not args.no_verify, log_path=args.log).run()
