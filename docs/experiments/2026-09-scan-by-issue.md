@@ -51,6 +51,11 @@ gh issue list -R vishalhabib99/mcp-doctor --label scan-request --state all \
 - **30 days is short** for developer tools, and the MCP author population is small.
 - **Bots and tests.** Issues opened by bots or by test accounts are excluded and listed.
 
+## Changes after pre-registration
+
+- **2026-10-15: the decision rule was dropped, before the readout.** At 3 outside requests, I decided to keep growing mcp-doctor in the open whatever the number, so "under 10 → stop promoting" no longer applies. The metric, the counting rule and the 2026-10-27 readout are unchanged, and the readout will say the rule was dropped.
+- **2026-10-16: two requests the metric doesn't count.** #6 and #7 (one outside maintainer, same repo) were opened from the GitHub CLI, which can't apply the `scan-request` label without triage permission, so the bot never ran. The requester closed both. They fail the label rule above and aren't counted; they're reported here because they show a real gap: a request that doesn't come through the issue form gets no reply.
+
 ## Readout (fill in on 2026-10-27)
 
 - Outside scan requests: **_**
