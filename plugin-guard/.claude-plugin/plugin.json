@@ -1,0 +1,15 @@
+{
+  "name": "mcp-doctor-guard",
+  "version": "0.1.0",
+  "description": "mcp-doctor guard for Claude Code's own tools: holds a secret about to be sent out, or a write to a file that runs code later (.git/hooks, .git/config, shell rc, .claude/settings), after the session read outside content. Hashes only, no network, nothing leaves your machine.",
+  "author": {
+    "name": "Vishal Habib"
+  },
+  "homepage": "https://github.com/vishalhabib99/mcp-doctor#guard-for-coding-agents-claude-code-hooks",
+  "repository": "https://github.com/vishalhabib99/mcp-doctor",
+  "license": "MIT",
+  "keywords": ["security", "prompt-injection", "hooks", "agents", "mcp"],
+  "displayName": "mcp-doctor guard",
+  "privacyPolicyUrl": "https://github.com/vishalhabib99/mcp-doctor/blob/main/plugin/PRIVACY.md",
+  "termsOfServiceUrl": "https://github.com/vishalhabib99/mcp-doctor/blob/main/LICENSE"
+}

@@ -417,6 +417,8 @@ _SECRET = re.compile(
     r"|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----"
 )
 _MIN_LINE = 40
+_MAX_TEXT = 1_000_000  # a huge file read: fingerprint the first megabyte
+_MAX_LINES = 2000
 
 
 def _h(text: str) -> str:
@@ -471,26 +473,62 @@ def is_write(tool: Tool | None, name: str, server_annotates: bool) -> bool:
     return verb in _WRITE_VERBS or bool(toks & _SEND_VERBS) or (tool is not None and not tool.read_only(server_annotates))
 
 
+# Launchers between the agent and us: `uvx` keeps a uv process as our parent and
+# hooks run through a shell, so the parent pid alone would split one session.
+# Python is not skipped: the agent itself may be a Python program.
+_LAUNCHERS = {"sh", "bash", "zsh", "dash", "fish", "env", "uv", "uvx", "pipx", "mcp-doctor"}
+
+
+def client_pid() -> int:
+    """The agent process that started us: the nearest ancestor that isn't a shell
+    or uv launcher. MCP guards and hooks of one session agree on it."""
+    pid = os.getppid()
+    if os.name == "nt":
+        return pid
+    try:
+        out = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,comm="], capture_output=True, text=True, timeout=2).stdout
+    except (OSError, subprocess.SubprocessError):
+        return pid
+    procs = {}
+    for row in out.splitlines():
+        parts = row.split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            procs[int(parts[0])] = (int(parts[1]), os.path.basename(parts[2].strip()).lstrip("-"))
+    for _ in range(8):
+        parent, name = procs.get(pid, (0, ""))
+        if not parent or name not in _LAUNCHERS:
+            return pid
+        pid = parent
+    return pid
+
+
 class LeakWatch:
     """What tool results this client session has seen, as hashes, shared by every
-    guard the same client started."""
+    guard and hook the same client started."""
 
     def __init__(self, journal: str | None = None):
         journal = journal or os.environ.get("MCP_DOCTOR_GUARD_JOURNAL")
         if journal is None:
             folder = os.path.join(tempfile.gettempdir(), "mcp-doctor-guard")
             os.makedirs(folder, exist_ok=True)
-            journal = os.path.join(folder, f"session-{os.getppid()}.jsonl")
+            journal = os.path.join(folder, f"session-{client_pid()}.jsonl")
         self.journal = journal
 
     def record(self, tool_name: str, args: dict, result: dict) -> None:
-        lines, secrets = fingerprint(_text_of(result))
-        if not lines and not secrets and not is_external(tool_name):
+        self.record_text(tool_name, scope_of(args), _text_of(result), is_external(tool_name))
+
+    def record_text(self, tool_name: str, scope: str | None, text: str, external: bool) -> None:
+        lines, secrets = fingerprint(text[:_MAX_TEXT])
+        if not lines and not secrets and not external:
             return
-        row = {"t": time.time(), "tool": tool_name, "scope": scope_of(args), "external": is_external(tool_name),
-               "lines": lines, "secrets": sorted(secrets)}
+        row = {"t": time.time(), "tool": tool_name, "scope": scope, "external": external,
+               "lines": dict(list(lines.items())[:_MAX_LINES]), "secrets": sorted(secrets)}
         with open(self.journal, "a", encoding="utf-8") as f:
             f.write(json.dumps(row) + "\n")
+
+    def saw_outside(self) -> str | None:
+        """The last outside-content tool this session read, if any."""
+        return next((r["tool"] for r in reversed(self.rows()) if r["external"]), None)
 
     def rows(self) -> list[dict]:
         try:
@@ -501,9 +539,9 @@ class LeakWatch:
         # A parent process id can be reused days later: only this session's rows count.
         return [r for r in rows if time.time() - r.get("t", 0) < 12 * 3600][-500:]
 
-    def check(self, tool_name: str, args: dict) -> list[Finding]:
+    def check(self, tool_name: str, args: dict, need_outside: bool = False) -> list[Finding]:
         rows = self.rows()
-        if not rows:
+        if not rows or (need_outside and not any(r["external"] for r in rows)):
             return []
         text = "\n".join(_strings(args))
         lines, secrets = fingerprint(text)
@@ -743,6 +781,10 @@ class Guard:
 
 
 def main(argv: list[str]) -> int:
+    if argv[:1] == ["hook"]:
+        from .guard_hook import main as hook_main
+
+        return hook_main(argv[1:])
     parser = argparse.ArgumentParser(
         prog="mcp-doctor guard",
         description="Run an MCP server behind a check that flags tool calls that reported success but didn't work.",

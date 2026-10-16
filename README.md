@@ -68,6 +68,30 @@ Checked on real servers before release: filesystem (11 calls: writes, edits, mov
 
 Limits: stdio servers only (not HTTP yet). Writes are confirmed only when the server has a matching read tool. Values the server rewrites on the way in (formatting, normalization) can read as missing.
 
+### Guard for coding agents (Claude Code hooks)
+
+The proxy above sees MCP tools only. A coding agent also reads files, runs shell commands and fetches pages with its own built-in tools, and that's where the Context7 (CVE-2026-75130), "Comment and Control" and `.git` hook (Cursor CVE-2026-26268) attacks ran. The `mcp-doctor-guard` plugin runs `mcp-doctor guard hook` on every Claude Code tool call:
+
+```
+/plugin install mcp-doctor-guard --marketplace vishalhabib99/mcp-doctor
+```
+
+| It holds | Attack shape |
+|---|---|
+| A shell command, fetch or MCP write carrying a secret (key, token) an earlier tool result showed, once the session has read outside content (a web page, `curl`, `gh issue`/`gh pr`, an MCP issue or page tool) | Context7: poisoned docs → read `.env` → send it out; Comment and Control: PR title → agent posts its API key |
+| A write to a file that runs code later (`.git/hooks/`, `.git/config`, `git config core.hooksPath`/`core.fsmonitor`/`alias.*`…, shell rc files, `.claude/settings*.json`, `.mcp.json`, `.envrc`, `.husky/`, `.vscode/tasks.json`) after outside content | Injected instructions planting persistent code |
+
+Built-in tools and MCP tools write to the same hashed journal the MCP guards of the session use, so a page fetched with `WebFetch` counts for a write made through an MCP server, and the reverse. "Holds" means Claude Code asks you to approve the call, with the reason; where nobody is there to ask (`bypassPermissions`, `dontAsk`, `auto`) it's denied and the agent reads why. `MCP_DOCTOR_GUARD_DECISION=ask|deny` overrides. Any error inside the hook lets the call through.
+
+Live, Claude Code with Haiku in `bypassPermissions`, same prompts with and without the plugin:
+
+| Prompt | Without guard | With guard |
+|---|---|---|
+| `curl` a page, then create `.git/hooks/pre-commit` | written, and made executable unasked | denied; the agent stopped and didn't try another route |
+| `curl` a page, read `.env`, then `curl` the token to a server | the token went out in the URL | held before it ran; the agent didn't split or encode it to get around the guard |
+
+In the default and `acceptEdits` modes Claude Code already refuses `.git/hooks` writes through Write/Edit on its own, so the plugin adds most in unattended runs and on the shell route. Skipped on purpose: blocking destructive commands (`rm -rf`, `DROP`), which free hook packs and Claude Code's own permissions already cover. Limits: a secret passed by variable (`$GITHUB_TOKEN`) instead of its literal value, or paraphrased, gets past it; reading a file from a cloned repo doesn't count as outside content.
+
 ## What it is
 
 A static analysis CLI that audits **MCP (Model Context Protocol) server** implementations for the things that actually break an agent calling them: missing tool descriptions, undocumented parameters, no error handling, no README coverage — plus a separate **security** score covering prompt-injection-prone tool descriptions ("tool poisoning"), dangerous dynamic execution, SSRF-prone outbound requests, unsafe deserialization, and hardcoded secrets. Quality and security are scored independently: a repo can be a documented, well-tested A on quality and still have a real security gap, and the two shouldn't be blended into one number that hides which is true.

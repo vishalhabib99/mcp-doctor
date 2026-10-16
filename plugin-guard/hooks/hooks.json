@@ -1,0 +1,29 @@
+{
+  "description": "mcp-doctor guard: track what each tool returned (as hashes) and hold leaks and run-later writes after outside content",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "mcp-doctor guard hook 2>/dev/null || uvx --from 'mcp-server-lint>=0.24.0' mcp-doctor guard hook 2>/dev/null || true",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "mcp-doctor guard hook 2>/dev/null || uvx --from 'mcp-server-lint>=0.24.0' mcp-doctor guard hook 2>/dev/null || true",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
