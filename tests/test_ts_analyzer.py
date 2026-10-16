@@ -2062,3 +2062,31 @@ def test_stdout_write_not_flagged_for_http_only_ts_server(tmp_path):
         """)
     findings, _ = find_ts_tools(tmp_path)
     assert not any(i.check == "stdout_write" for f in findings for i in f.issues)
+
+
+def test_bare_tool_call_to_local_helper_maps_args_by_its_parameters(tmp_path):
+    # Bug #114: arhancanli/canlicapital's `tool(name, title, description, keywords,
+    # fields, compute)` helper had its title ("MACD") read as the description.
+    write(tmp_path, "indicators.mjs", """
+        import { z } from "zod";
+        function tool(name, title, description, keywords, fields, compute) {
+          return { name, title, description, keywords, input: z.object(fields), run: compute };
+        }
+        export const TOOLS = [
+          tool("macd", "MACD", "Compute MACD, its signal line and histogram, as TA-Lib does.", "macd momentum", { close }, (a) => a),
+        ];
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    macd = next(f for f in findings if f.name == "macd")
+    assert "description" not in {i.check for i in macd.issues}
+
+
+def test_bare_tool_helper_without_description_param_is_skipped(tmp_path):
+    write(tmp_path, "defs.mjs", """
+        function tool(name, label, fields, run) {
+          return { name, label, fields, run };
+        }
+        export const TOOLS = [tool("sma", "SMA", { close }, (a) => a)];
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert not any(f.name == "sma" for f in findings)

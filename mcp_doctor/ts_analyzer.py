@@ -1423,6 +1423,22 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
                 config_raw, schema_raw = arg_nodes[1], None
             else:  # "tool": name, description, schema, handler
                 config_raw, schema_raw = arg_nodes[1], arg_nodes[2] if len(arg_nodes) >= 4 else None
+                local_def = local_funcs.get("tool") if node.child_by_field_name("function").type == "identifier" else None
+                if local_def is not None:
+                    # Bug #114: a bare `tool(...)` call to a helper defined in the same file
+                    # isn't the SDK's `server.tool(name, description, schema, handler)`, so
+                    # its arguments follow the helper's own parameters. arhancanli/canlicapital's
+                    # `tool(name, title, description, keywords, fields, compute)` had its title
+                    # ("MACD") read as the description.
+                    params = [_text(p.child_by_field_name("pattern") or p, src)
+                              for p in (local_def.child_by_field_name("parameters") or local_def).named_children]
+                    by_param = dict(zip(params, arg_nodes))
+                    # The schema is left unchecked: helpers like this one build their fields
+                    # through further helpers (`period(20)` returning `.describe(...)`), which
+                    # would read as undocumented.
+                    config_raw, schema_raw = by_param.get("description"), None
+                    if config_raw is None:
+                        continue  # can't tell which argument is the description; don't guess
             config, config_src = _resolve(config_raw, src, consts)
             schema_arg, schema_src = (
                 _resolve(schema_raw, src, consts) if schema_raw is not None else (None, src)

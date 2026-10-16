@@ -996,6 +996,27 @@ def test_same_name_in_python_and_ts_servers_not_flagged_as_duplicate(tmp_path):
     assert not any(i.check == "tool_name" and "unique" in i.message for i in report.repo_issues)
 
 
+def test_same_name_in_separate_packages_not_flagged_as_duplicate(tmp_path):
+    # Bug #115: arhancanli/canlicapital publishes 14 servers from one repo; mcp-canli
+    # and mcp-quant both expose find_tool. Within one package it's still a duplicate.
+    write(tmp_path, "package.json", "{}")
+    for pkg in ("mcp-canli", "mcp-quant"):
+        write(tmp_path, f"{pkg}/package.json", "{}")
+        write(tmp_path, f"{pkg}/src/server.mjs", """
+            server.registerTool("find_tool", { description: "Find a tool by what it does.", inputSchema: {} }, async () => ({ content: [] }));
+            """)
+    write(tmp_path, "mcp-quant/src/extra.mjs", """
+        server.registerTool("find_tool", { description: "Find a tool by what it does.", inputSchema: {} }, async () => ({ content: [] }));
+        """)
+    report = analyze_repo(tmp_path)
+    issue = next(i for i in report.repo_issues if i.check == "tool_name" and "unique" in i.message)
+    assert issue.message.startswith("1 tool name(s)")
+
+    (tmp_path / "mcp-quant/src/extra.mjs").unlink()
+    report = analyze_repo(tmp_path)
+    assert not any(i.check == "tool_name" and "unique" in i.message for i in report.repo_issues)
+
+
 def test_mounted_namespace_tools_not_flagged_as_duplicate(tmp_path):
     write(tmp_path, "jira.py", """
         from mcp.server.fastmcp import FastMCP

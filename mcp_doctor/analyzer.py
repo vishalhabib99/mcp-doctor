@@ -2592,12 +2592,30 @@ def analyze_repo(root: Path) -> Report:
     standalone_files = _find_standalone_entrypoint_files(trees, set(mount_namespace_map))
     branch_paths = {rel: _if_branch_paths(tree) for rel, tree in trees}
     seen_by_group: dict[str, dict[str, list[ToolFinding]]] = {}
+
+    # Bug #115: a monorepo of separately published servers (arhancanli/canlicapital:
+    # 14 packages, `find_tool` in both mcp-canli and mcp-quant) is many servers, not
+    # one, so names are only compared within the nearest package.
+    manifests = ("package.json", "pyproject.toml", "setup.py", "go.mod")
+    package_roots: dict[str, str] = {}
+
+    def package_root(rel: str) -> str:
+        d = Path(rel).parent
+        while True:
+            key = str(d)
+            if key in package_roots:
+                return package_roots[key]
+            if any((Path(root) / d / m).is_file() for m in manifests) or d == d.parent:
+                package_roots[key] = key
+                return key
+            d = d.parent
+
     for t in tools:
         # A Python tool and a TS/Go tool of the same name are two servers, not one
         # (dealfluence/adeu ships a Python and a Node server with the same tools).
         lang = Path(t.file).suffix.lstrip(".")
         lang = "py" if lang == "py" else "go" if lang == "go" else "ts"
-        group = t.file if t.file in standalone_files else f"__default__:{lang}"
+        group = t.file if t.file in standalone_files else f"__default__:{lang}:{package_root(t.file)}"
         seen_by_group.setdefault(group, {}).setdefault(t.name, []).append(t)
 
     def _is_duplicate(same_name: list[ToolFinding]) -> bool:
