@@ -133,3 +133,17 @@ def test_fuzz_without_mcp_sdk_prints_install_hint(monkeypatch, capsys):
     monkeypatch.setitem(sys.modules, "mcp", None)  # makes `import mcp` raise ImportError
     assert main(["fuzz", "--", "python", "server.py"]) == 2
     assert "mcp-server-lint[runtime]" in capsys.readouterr().err
+
+
+def test_verdict_url_without_path_does_not_scan_the_current_directory(capsys, monkeypatch, tmp_path):
+    # Bug #116: `verdict --url` graded whatever repo the command ran in.
+    import pytest
+
+    pytest.importorskip("mcp")
+    from mcp_doctor.cli import main
+
+    monkeypatch.chdir(Path(__file__).resolve().parent.parent)  # mcp-doctor's own source: 20+ exec findings
+    main(["verdict", "--url", "http://127.0.0.1:9/mcp", "--json", "--timeout", "2"])
+    payload = json.loads(capsys.readouterr().out)
+    assert "static" not in payload["scores"]
+    assert not any(b.startswith("static scan") for b in payload["blockers"])

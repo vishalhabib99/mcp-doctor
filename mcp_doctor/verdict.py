@@ -75,11 +75,11 @@ def decide(doctor: dict | None, fuzz: dict | None, reality: dict | None) -> Deci
         quality_errors = [i for i in issues if i.get("category") != "security" and i.get("severity") == "error"]
         if sec_errors:
             checks = sorted({i["check"] for i in sec_errors})
-            blockers.append(f"mcp-doctor: {_count(len(sec_errors), 'security error')} ({', '.join(checks)})")
+            blockers.append(f"static scan: {_count(len(sec_errors), 'security error')} ({', '.join(checks)})")
         if sec_warnings:
-            fixes.append(f"mcp-doctor: {_count(len(sec_warnings), 'security warning')}")
+            fixes.append(f"static scan: {_count(len(sec_warnings), 'security warning')}")
         if quality_errors:
-            fixes.append(f"mcp-doctor: {_count(len(quality_errors), 'spec/documentation error')}")
+            fixes.append(f"static scan: {_count(len(quality_errors), 'spec/documentation error')}")
 
     if fuzz is not None:
         if fuzz.get("connect_error"):
@@ -227,7 +227,8 @@ def main(argv: list[str]) -> int:
         "listed and a confidence level. Static scan always; add --run or --url to also launch the "
         "server and fuzz it (needs the runtime extra).",
     )
-    parser.add_argument("path", nargs="?", default=".", help="the server's source (default: current directory)")
+    parser.add_argument("path", nargs="?", default=None,
+                        help="the server's source for the static scan (default: current directory; with --url, skipped unless given)")
     parser.add_argument("--run", default=None, help='the command that starts the server over stdio, e.g. "python server.py"')
     parser.add_argument("--url", default=None, help="a running server's Streamable HTTP URL, instead of --run")
     parser.add_argument("--header", action="append", default=[], metavar="KEY=VALUE", help="HTTP header for --url (repeatable)")
@@ -245,7 +246,10 @@ def main(argv: list[str]) -> int:
     if args.env and not args.run:
         parser.error("--env requires --run")
 
-    doctor = json.loads(render_json(analyze_repo(Path(args.path))))
+    # Bug #116: with --url the server's code is usually not here, and scanning the
+    # current directory graded whatever repo the command ran in.
+    path = args.path if args.path is not None else (None if args.url else ".")
+    doctor = json.loads(render_json(analyze_repo(Path(path)))) if path is not None else None
     fuzz = reality = None
     if args.run or args.url:
         try:
@@ -273,7 +277,7 @@ def main(argv: list[str]) -> int:
         reality = reality_dict(build_reality(raw_truth))
 
     d = decide(doctor, fuzz, reality)
-    scores = {"static": doctor.get("percent")}
+    scores = {"static": doctor.get("percent")} if doctor is not None else {}
     if fuzz is not None:
         scores["fuzz"] = fuzz.get("crash_resilience_percent")
     if reality is not None:
@@ -290,6 +294,8 @@ def main(argv: list[str]) -> int:
         print(f"mcp-doctor verdict: {d.verdict} ({d.confidence} confidence) · " + " · ".join(parts))
         if fuzz is None:
             print("Static scan only. Add --run \"<command>\" or --url to also fuzz the running server.")
+        if doctor is None:
+            print("No static scan: pass the server's source path to include it.")
         print()
         print(render_markdown(d))
     if args.fail_on == BLOCK and d.verdict == BLOCK:

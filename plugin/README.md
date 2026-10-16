@@ -13,7 +13,8 @@ Then ask "check my MCP server", or run `/mcp-doctor:mcp-doctor path/to/server`. 
 1. runs the `mcp-doctor` CLI on your server's source (it reads code, never starts the server) and reports a quality grade and a separate security grade, plus the top five findings in terms of what goes wrong for the agent;
 2. shows the mechanical fixes as a diff and applies them when you say yes;
 3. writes the fixes the CLI can't (tool and parameter descriptions, actionable error messages, stdout writes on a stdio server) after reading what each tool actually does, and never describes behavior the code doesn't have;
-4. re-scans and shows the grades before and after.
+4. re-scans and shows the grades before and after;
+5. if you ask whether the server is ready to ship, offers `mcp-doctor verdict --run "<start command>"`, which launches it, calls its read-only tools with bad and valid input, and returns SHIP, FIX-FIRST or BLOCK. It runs only after you say yes, since it starts your server.
 
 Security findings are explained, not silently rewritten.
 
