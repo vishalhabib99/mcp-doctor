@@ -1,0 +1,105 @@
+.check-form {
+  display: flex;
+  gap: 8px;
+  margin: 28px 0 8px;
+}
+
+.check-form input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  padding: 10px 12px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.check-form button {
+  font: inherit;
+  font-weight: 600;
+  padding: 10px 20px;
+  color: #fff;
+  background: var(--grade-a);
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.check-form button:disabled { opacity: 0.6; cursor: wait; }
+
+.examples { color: var(--text-dim); font-size: 0.9em; margin: 0 0 24px; }
+
+.status {
+  padding: 12px 14px;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-dim);
+}
+
+.status.error { color: var(--grade-f); border-color: var(--grade-f); }
+
+.result { margin: 24px 0 40px; }
+.result h2 { margin: 0 0 4px; font-size: 1.3em; overflow-wrap: anywhere; }
+.result .sub { color: var(--text-dim); font-size: 0.9em; margin: 0 0 16px; }
+
+.grades {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.grade-card {
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-alt);
+}
+
+.grade-card .label { color: var(--text-dim); font-size: 0.85em; }
+.grade-card .value { font-size: 2em; font-weight: 700; line-height: 1.2; }
+.grade-card .value small { font-size: 0.5em; font-weight: 400; color: var(--text-dim); margin-left: 6px; }
+.g-A, .g-B { color: var(--grade-a); }
+.g-C, .g-D { color: var(--grade-c); }
+.g-F { color: var(--grade-f); }
+
+.note {
+  padding: 10px 14px;
+  border-left: 3px solid var(--grade-c);
+  background: var(--bg-alt);
+  margin: 12px 0;
+}
+
+.findings { width: 100%; border-collapse: collapse; font-size: 0.9em; }
+.findings th, .findings td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.findings td:first-child { white-space: nowrap; }
+.table-scroll { overflow-x: auto; }
+
+.actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; }
+.actions button, .actions a.btn {
+  font: inherit;
+  font-size: 0.9em;
+  padding: 6px 12px;
+  color: var(--text);
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.result pre {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  font-size: 0.85em;
+}
+
+@media (max-width: 600px) {
+  main { padding: 0 16px 40px; }
+  .check-form { flex-direction: column; }
+}

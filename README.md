@@ -13,7 +13,8 @@
 
 ## Try it in 30 seconds
 
-- **No install:** [open a scan request](https://github.com/vishalhabib99/mcp-doctor/issues/new?template=scan-request.yml) with your server's GitHub URL. A bot replies with the report in a few minutes. It reads the code only and never runs it. Security findings are posted as counts only, since the issue is public.
+- **In your browser:** [check any MCP server](https://vishalhabib99.github.io/mcp-doctor/check/). Paste a GitHub repo, npm or PyPI name and get both grades in seconds. The real mcp-doctor runs in your browser (Pyodide); nothing is uploaded or run.
+- **No install, as a GitHub issue:** [open a scan request](https://github.com/vishalhabib99/mcp-doctor/issues/new?template=scan-request.yml) with your server's GitHub URL. A bot replies with the report in a few minutes. It reads the code only and never runs it. Security findings are posted as counts only, since the issue is public.
 - **CLI:** `pip install mcp-server-lint`, then `mcp-doctor path/to/your/server`
 - **Claude Code:** `/plugin install mcp-doctor --marketplace vishalhabib99/mcp-doctor`, then ask "check my MCP server". Claude scans, explains each finding, and fixes what it can with your OK ([details](#claude-code-plugin))
 - **CI:** `uses: vishalhabib99/mcp-doctor@v1` comments on each PR, suggests one-click fixes on the lines it changes, and can fail a PR that drops below your score ([details](#github-action))

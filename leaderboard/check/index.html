@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Check an MCP Server — mcp-doctor</title>
+  <meta name="description" content="Paste any MCP server's GitHub, npm or PyPI name and get a quality and security grade in seconds. Runs in your browser; nothing to install.">
+  <meta property="og:title" content="Check any MCP server before your agent uses it">
+  <meta property="og:description" content="Quality and security grades for any MCP server, in your browser, free. Powered by mcp-doctor.">
+  <link rel="stylesheet" href="../style.css">
+  <link rel="stylesheet" href="check.css">
+</head>
+<body>
+  <header class="page-header">
+    <h1>Check an MCP server</h1>
+    <p class="tagline">
+      Before your agent connects to a server, see whether it can tell what each tool does,
+      and whether the code has risky patterns. Paste a GitHub repo, an npm package or a PyPI package.
+    </p>
+  </header>
+
+  <main>
+    <form id="check-form" class="check-form" autocomplete="off">
+      <label for="target" class="visually-hidden">MCP server</label>
+      <input id="target" name="target" type="text" required spellcheck="false"
+             placeholder="github.com/owner/repo, owner/repo, an npm or a PyPI package">
+      <button type="submit" id="check-button">Check</button>
+    </form>
+    <p class="examples">
+      Try:
+      <a href="?repo=homeassistant-ai/ha-mcp">homeassistant-ai/ha-mcp</a> ·
+      <a href="?repo=sooperset/mcp-atlassian">sooperset/mcp-atlassian</a> ·
+      <a href="?repo=oraios/serena">oraios/serena</a>
+    </p>
+
+    <div id="status" class="status" role="status" aria-live="polite" hidden></div>
+    <section id="result" class="result" hidden></section>
+
+    <section class="methodology">
+      <h2>How this works</h2>
+      <p>
+        This page runs <a href="https://github.com/vishalhabib99/mcp-doctor">mcp-doctor</a>, the same
+        open-source analyzer as <code>pip install mcp-server-lint</code>, inside your browser. It downloads
+        the repo's source files straight from GitHub and reads them. Nothing is run, nothing is uploaded,
+        and no account is needed.
+      </p>
+      <ul>
+        <li><strong>Quality</strong>: can an agent tell what each tool does and what to pass? Tool descriptions, parameter docs, error handling, README, tests, license.</li>
+        <li><strong>Security</strong>: prompt-injection-prone descriptions, dynamic execution, SSRF-prone requests, unsafe deserialization, hardcoded secrets. Shown as counts only; run the command line version on your own machine for details.</li>
+      </ul>
+      <p>
+        It reads Python, TypeScript and Go servers. Grades are a starting point for a look, not a verdict.
+        A wrong grade? <a href="https://github.com/vishalhabib99/mcp-doctor/issues/new">Open an issue</a>; that's how most of mcp-doctor's fixes started.
+      </p>
+    </section>
+  </main>
+
+  <footer class="page-footer">
+    <p>
+      <a href="../">Leaderboard</a> ·
+      <a href="https://github.com/vishalhabib99/mcp-doctor">mcp-doctor on GitHub</a> ·
+      <a href="https://pypi.org/project/mcp-server-lint/">PyPI</a>
+    </p>
+  </footer>
+
+  <script src="check.js"></script>
+</body>
+</html>

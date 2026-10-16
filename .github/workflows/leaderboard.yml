@@ -34,6 +34,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           ALARMS_FILE: ${{ runner.temp }}/tool-count-alarms.md
         run: python leaderboard/scan.py
+      - name: Stage mcp-doctor for the in-browser check (/check/)
+        run: python leaderboard/check/build.py
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
