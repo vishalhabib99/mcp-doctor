@@ -1,8 +1,10 @@
 """mcp-doctor guard against a fake server that copies five real issues
 (tests/fixtures/guard_server.py), each with a healthy twin that must stay quiet."""
 import json
+import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -14,10 +16,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class Session:
-    def __init__(self, scenario, *opts):
+    def __init__(self, scenario, *opts, journal=None):
         cmd = [sys.executable, "-c", "import sys; from mcp_doctor.cli import main; sys.exit(main())",
                "guard", *opts, "--", sys.executable, str(FIXTURE), scenario]
-        self.p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=ROOT)
+        # Each session gets its own leak journal unless a test shares one on purpose.
+        env = dict(os.environ, MCP_DOCTOR_GUARD_JOURNAL=str(journal or Path(tempfile.mkdtemp()) / "j.jsonl"))
+        self.p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=ROOT, env=env)
         self.n = 0
         self.request("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}})
         self.p.stdin.write(b'{"jsonrpc":"2.0","method":"notifications/initialized"}\n')
@@ -46,8 +50,8 @@ class Session:
 def session():
     opened = []
 
-    def make(scenario, *opts):
-        s = Session(scenario, *opts)
+    def make(scenario, *opts, journal=None):
+        s = Session(scenario, *opts, journal=journal)
         opened.append(s)
         return s
     yield make
@@ -156,3 +160,97 @@ def test_a_wait_that_says_it_was_capped_is_quiet():
     claims = {"content": [{"type": "text", "text": "Waited for 40"}]}
     assert check_wait("browser_wait_for", {"time": 40}, 30.0, honest) == []
     assert len(check_wait("browser_wait_for", {"time": 40}, 30.0, claims)) == 1
+
+
+# ---- leak check ---------------------------------------------------------------
+
+PUBLIC = {"owner": "acme", "repo": "public-site"}
+PRIVATE = {"owner": "acme", "repo": "private-api"}
+PRIVATE_README = ("# private-api (internal only)\n"
+                  "Billing service for enterprise accounts, runs on the prod-west cluster.\n"
+                  "Salary bands and the 2027 hiring plan live in docs/compensation.md, do not share outside the company.\n")
+
+
+def leaks(warns):
+    return [w for w in warns if "prompt-injection" in w]
+
+
+# GitHub MCP (Invariant, 2025): public issue -> private repo -> public PR
+def test_private_repo_text_in_a_public_pr_is_flagged(session):
+    s = session("gh_leak")
+    s.call("get_issue", {**PUBLIC, "issue_number": 1})
+    s.call("get_file_contents", {**PRIVATE, "path": "README.md"})
+    _, warns = s.call("create_pull_request", {**PUBLIC, "title": "Docs", "head": "a", "base": "main",
+                                              "body": "Here is what I found:\n" + PRIVATE_README})
+    assert len(leaks(warns)) == 1 and "acme/private-api" in warns[0] and "acme/public-site" in warns[0]
+
+
+# GitLost (Noma, 2026): public issue -> private file -> public comment
+def test_private_file_in_a_public_comment_is_flagged_and_can_be_held(session):
+    s = session("gh_leak", "--hold-leaks")
+    s.call("get_issue", {**PUBLIC, "issue_number": 1})
+    s.call("get_file_contents", {**PRIVATE, "path": "README.md"})
+    res, warns = s.call("add_issue_comment", {**PUBLIC, "issue_number": 1, "body": PRIVATE_README})
+    assert res["isError"] is True and "held and not sent" in warns[0]
+    stored, _ = s.call("list_issue_comments", {**PUBLIC, "issue_number": 1})
+    assert stored["content"][0]["text"] == "[]"  # the server never got the comment
+
+
+# Supabase MCP (2025): ticket -> tokens table -> token written back out
+def test_secret_from_one_query_written_by_another_is_flagged(session):
+    s = session("sql_leak")
+    s.call("execute_sql", {"query": "select * from support_tickets"})
+    s.call("execute_sql", {"query": "select * from integration_tokens"})
+    _, warns = s.call("execute_sql", {"query": "insert into support_messages(body) values ('stripe: sk_live_" + "Z" * 24 + "')"})
+    assert len(leaks(warns)) == 1 and "secret" in warns[0]
+
+
+def test_outside_content_read_through_another_server_counts(session, tmp_path):
+    journal = tmp_path / "shared.jsonl"
+    session("web", journal=journal).call("fetch", {"url": "https://docs.example"})
+    s = session("gh_leak", journal=journal)
+    s.call("get_file_contents", {**PRIVATE, "path": "README.md"})
+    _, warns = s.call("add_issue_comment", {**PUBLIC, "issue_number": 1, "body": PRIVATE_README})
+    assert len(leaks(warns)) == 1 and "fetch" in warns[0]
+
+
+# normal work that must stay quiet
+def test_quoting_code_from_the_same_repo_is_quiet(session):
+    s = session("gh_leak")
+    s.call("get_issue", {**PUBLIC, "issue_number": 1})
+    build, _ = s.call("get_file_contents", {**PUBLIC, "path": "build.sh"})
+    _, warns = s.call("add_issue_comment", {**PUBLIC, "issue_number": 1, "body": "The failing step:\n" + build["content"][0]["text"]})
+    assert leaks(warns) == []
+
+
+def test_quoting_the_issue_itself_is_quiet(session):
+    s = session("gh_leak")
+    s.call("get_issue", {**PUBLIC, "issue_number": 1})
+    _, warns = s.call("add_issue_comment", {**PUBLIC, "issue_number": 1, "body":
+        "> The docs build is broken on main and the deploy script fails halfway through.\n"
+        "> Leaked public demo key for the sandbox: ghp_PUBLICDEMO000000000000000000000000000\nLooking into it."})
+    assert leaks(warns) == []
+
+
+def test_copying_between_repos_without_outside_content_is_quiet(session):
+    s = session("gh_leak")
+    s.call("get_file_contents", {**PRIVATE, "path": "README.md"})
+    _, warns = s.call("create_pull_request", {"owner": "acme", "repo": "private-api-v2", "title": "Port", "head": "a", "base": "main", "body": PRIVATE_README})
+    assert leaks(warns) == []
+
+
+def test_one_short_shared_line_is_quiet(session):
+    s = session("gh_leak")
+    s.call("get_issue", {**PUBLIC, "issue_number": 1})
+    s.call("get_file_contents", {**PRIVATE, "path": "README.md"})
+    _, warns = s.call("add_issue_comment", {**PUBLIC, "issue_number": 1, "body": "Billing service for enterprise accounts, runs on the prod-west cluster."})
+    assert leaks(warns) == []
+
+
+def test_journal_holds_hashes_not_text(session, tmp_path):
+    journal = tmp_path / "j.jsonl"
+    s = session("gh_leak", journal=journal)
+    s.call("get_file_contents", {**PRIVATE, "path": "README.md"})
+    s.close()
+    raw = journal.read_text()
+    assert "Salary" not in raw and "prod-west" not in raw

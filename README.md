@@ -47,12 +47,15 @@
 | Arguments the tool's schema doesn't have, which the server drops and runs with defaults | [python-sdk#3067](https://github.com/modelcontextprotocol/python-sdk/issues/3067) (still true on `mcp` 1.x: `read_doc(path=...)` returns `topic=''`); [openai-agents-python#5170](https://github.com/openai/openai-agents-python/issues/5170) |
 | A wait that returned early while its result claims the full time | [playwright-mcp#1767](https://github.com/microsoft/playwright-mcp/issues/1767): "Waited for 40" after 30 s on 0.0.82; the fixed release says so and stays quiet |
 | An error message returned as a successful result | `Error: database is locked` without `isError` |
+| **Likely prompt-injection leak:** a secret (key, token) read through one call about to be written by another; or text from one repo about to be written into a different repo after the session read outside content (an issue, ticket, web page) | GitHub MCP (Invariant, 2025): public issue → private repo → public PR; GitLost (Noma, 2026): public issue → private repo in a public comment; Supabase MCP (2025): ticket → tokens table → token written back out |
 
 What it looks like to the agent, same broken `write_file`, same prompt, Claude Code:
 
 > **Without guard:** "Yes, the file was saved. The fs server's write_file tool reported success…"
 >
 > **With guard:** "I can't confirm the file was saved. `write_file` returned 'Successfully wrote to /tmp/q3/report.md', but the result also carried a warning that a read-back of that path failed with 'no such file or directory'."
+
+How the leak check works: every result is fingerprinted as line and secret hashes (never the text) in a journal shared by the guards one client started, so outside content fetched through one server and a write made through another are seen together. It stays quiet on copying within the same repo, on quoting the outside content itself, on copying between repos when no outside content was read, and on a single short shared line. By default it warns; `--hold-leaks` returns an error instead of sending the write. It matches copied text, so a leak the model paraphrases can get past it; in a Claude Code run against an injected issue, Haiku refused the injection itself, so this is a net for when the model is fooled, not a replacement for least-privilege tokens.
 
 How it confirms a write: it pairs the write with a read tool on the same thing (`write_file` → `read_text_file`, `issue_write` → `issue_read`), calls it with the write's own arguments or the id it returned, and checks the written values are there. It tries up to three matching reads and warns only if none confirms the write. It only ever calls tools the server marks `readOnlyHint: true` (or, on a server that declares no annotations, tools named `read_`/`get_`/`fetch_`…); `--no-verify` turns read-backs off. It never blocks a call or changes `isError`. Findings also go to stderr, and to `--log FILE` as JSON lines.
 
