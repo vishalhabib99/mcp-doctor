@@ -4,6 +4,7 @@ turning on PR checks is one command instead of copying YAML from the README."""
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -31,7 +32,14 @@ jobs:
 """
 
 
-def render_workflow(path: str = ".", fail_under: int = 0) -> str:
+def render_workflow(path: str = ".", fail_under: int = 0, run: str | None = None) -> str:
+    runtime = ""
+    if run:
+        # json.dumps gives a double-quoted YAML scalar, safe for any command text.
+        runtime = (
+            f"          run: {json.dumps(run)}   # launch the server: fuzz it and add a SHIP / FIX-FIRST / BLOCK verdict\n"
+            "          fail-on: \"\"   # BLOCK or FIX-FIRST to fail the PR on the verdict\n"
+        )
     return f"""name: mcp-doctor
 on: pull_request
 permissions:
@@ -49,7 +57,7 @@ jobs:
         with:
           path: {path}
           fail-under: {fail_under}   # 0 = report only, never fails the PR
-"""
+{runtime}"""
 
 
 def find_repo_root(start: Path) -> Path | None:
@@ -69,6 +77,9 @@ def main(argv: list[str] | None = None) -> int:
                         "The workflow goes in the enclosing git repo's root, pointed at this path.")
     parser.add_argument("--fail-under", type=int, default=0,
                         help="Fail the PR check below this score percent (default: 0, report only)")
+    parser.add_argument("--run", default=None, metavar="CMD",
+                        help='Also launch the server in CI with this command (e.g. "python server.py"), fuzz it and '
+                        "post a SHIP / FIX-FIRST / BLOCK verdict. Only read-only tools are called.")
     parser.add_argument("--force", action="store_true", help="Overwrite an existing workflow file")
     parser.add_argument("--print", dest="print_only", action="store_true",
                         help="Print the workflow to stdout and write nothing")
@@ -85,7 +96,7 @@ def main(argv: list[str] | None = None) -> int:
         root = target
     rel = target.relative_to(root).as_posix()
     files = {
-        WORKFLOW_REL: render_workflow(path=rel if rel != "." else ".", fail_under=args.fail_under),
+        WORKFLOW_REL: render_workflow(path=rel if rel != "." else ".", fail_under=args.fail_under, run=args.run),
         COMMENT_WORKFLOW_REL: COMMENT_WORKFLOW,
     }
 

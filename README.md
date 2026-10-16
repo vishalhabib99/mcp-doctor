@@ -1,6 +1,14 @@
 # mcp-doctor
 
-**Lint MCP servers for what breaks the agent calling them.** Reads Python, TypeScript and Go source without running it, and grades quality and security separately.
+**Lint, fuzz and guard MCP servers for what breaks the agent calling them.** One tool for a server's whole life: it reads Python, TypeScript and Go source and grades quality and security separately, fixes what's mechanical, launches the server to fuzz it, decides SHIP / FIX-FIRST / BLOCK, and sits in front of it while an agent uses it.
+
+| When | Command | What it answers |
+|---|---|---|
+| Writing it | `mcp-doctor .` · `--fix` · `--diff-against` | Can an agent understand and safely call these tools? What changed since the last release? |
+| Every PR | [GitHub Action](#github-action) · [pre-commit](#pre-commit-hook) | The same, on the lines that changed, with one-click fixes. Add `run:` for a verdict. |
+| Before release | [`fuzz`](#fuzz-and-verdict--launch-the-server-and-check-it) · `fuzz --truth` · `verdict` | Does it fail cleanly on bad input? Is a "success" a real answer? Ship it? |
+| In production | [`guard`](#guard--catch-tool-calls-that-report-success-but-didnt-work) · `guard hook` · `mcp_doctor.session` | Did that call actually work? Is a secret about to leave after a prompt injection? |
+| Anywhere | [browser](https://vishalhabib99.github.io/mcp-doctor/check/) · [issue bot](https://github.com/vishalhabib99/mcp-doctor/issues/new?template=scan-request.yml) · [Claude Code plugin](#claude-code-plugin) | The same checks with nothing to install, or from inside your editor. |
 
 [![CI](https://github.com/vishalhabib99/mcp-doctor/actions/workflows/ci.yml/badge.svg)](https://github.com/vishalhabib99/mcp-doctor/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/mcp-server-lint.svg)](https://pypi.org/project/mcp-server-lint/)
@@ -259,7 +267,17 @@ GitHub only runs a `workflow_run` workflow from the default branch, so fork PRs 
 
 The report also gets written to the job summary either way. `@v1` tracks the latest `v1.x` release; pin an exact tag or commit SHA instead if you need stricter reproducibility. Pinning the action pins the analyser too: it installs mcp-doctor from the action's own checkout, not from `main` (set `version:` to a branch, tag or commit to override). The scan never imports code from the repo it checks: every Python call runs with `-I`, so a `json.py` or `mcp_doctor/` in a PR can't shadow the installed modules, and the actions it uses are pinned by commit.
 
-Want mcp-fuzz's runtime resilience checks and mcp-reality-check's output-fidelity checks in the same PR check, not just this one? [`mcp-trust-check`](https://github.com/vishalhabib99/mcp-trust-check) wraps all three behind a single Action and one combined score.
+**Fuzz and verdict in the same check:** add `run:` (or `url:`) and the Action also launches the server, fuzzes it with bad and valid input, and adds a SHIP / FIX-FIRST / BLOCK verdict to the job summary and the PR comment, with `decision`, `confidence` and `needs-human-review` as outputs:
+
+```yaml
+      - uses: vishalhabib99/mcp-doctor@v1
+        with:
+          run: python server.py   # or url: https://.../mcp, with headers: "Authorization=Bearer ${{ secrets.MCP_TOKEN }}"
+          env: API_KEY=test       # space-separated KEY=VALUE for run
+          fail-on: BLOCK          # or FIX-FIRST; empty (default) never fails on the verdict
+```
+
+Only tools marked `readOnlyHint` are called unless `include-destructive: true`, which belongs only on a sandbox. This replaces the separate mcp-trust-check Action.
 
 ## pre-commit hook
 
@@ -529,6 +547,10 @@ A thirtieth pass closed an already-documented, real known limitation rather than
 - [x] `--fix` for the genuinely mechanical stuff (bare `except:`, fully-undocumented `Args:` stubs) — deliberately does *not* auto-wrap function bodies in try/except; generating a correct wrapper for arbitrary code (preserving return semantics, control flow) needs more judgment than a mechanical pass should take on
 - [x] Go server support — the official `modelcontextprotocol/go-sdk`'s `AddTool` style (explicit and struct-tag-inferred schemas) and `mark3labs/mcp-go`'s older fluent-builder style
 - [x] Claude Code plugin — scan and fix from inside the editor, with an eval suite
+- [x] Runtime checks in the same tool — `fuzz`, `fuzz --truth`, `verdict` and the `session` wrapper (formerly mcp-fuzz, mcp-reality-check and mcp-trust-check), and the Action runs them with `run:`
+- [x] Live guard for agents — `guard` for MCP servers, `guard hook` for Claude Code's own tools
+- [ ] `guard` over HTTP (stdio only today)
+- [ ] `--fix` and `--diff-against` for TypeScript and Go (Python only today)
 
 ## Contributing
 

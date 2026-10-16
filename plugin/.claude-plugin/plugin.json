@@ -1,7 +1,7 @@
 {
   "name": "mcp-doctor",
-  "version": "1.1.2",
-  "description": "Lint the MCP server you're building for what breaks the agent calling it: missing tool descriptions, undocumented parameters, swallowed errors, stdout writes that corrupt stdio, plus a separate security grade. Scans Python, TypeScript and Go source without running it, then fixes what it finds.",
+  "version": "1.2.0",
+  "description": "Lint the MCP server you're building for what breaks the agent calling it: missing tool descriptions, undocumented parameters, swallowed errors, stdout writes that corrupt stdio, plus a separate security grade. Scans Python, TypeScript and Go source without running it and fixes what it finds; with your OK, launches the server, fuzzes it and gives one SHIP / FIX-FIRST / BLOCK verdict.",
   "author": {
     "name": "Vishal Habib"
   },

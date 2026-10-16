@@ -17,7 +17,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: pip install -e '.[runtime]' pytest
+      - run: pip install -e '.[runtime]' pytest pyyaml
       - run: pytest -q
       - name: Dogfood on our own example servers
         run: |
@@ -25,3 +25,24 @@ jobs:
           python -m mcp_doctor.cli examples/bad_server --json
           python -m mcp_doctor.cli examples/good_server_ts --fail-under 90
           python -m mcp_doctor.cli examples/bad_server_ts --json
+
+  action-runtime:
+    # The Action itself, with `run:` set: installs the runtime extra, fuzzes a
+    # real stdio server and must produce a verdict.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: doctor
+        uses: ./
+        with:
+          path: tests/fuzz/fixtures
+          run: python tests/fuzz/fixtures/fixture_server.py
+          comment: "false"
+          suggest-fixes: "false"
+      - name: Verdict was produced
+        env:
+          DECISION: ${{ steps.doctor.outputs.decision }}
+          CONFIDENCE: ${{ steps.doctor.outputs.confidence }}
+        run: |
+          echo "verdict: $DECISION ($CONFIDENCE)"
+          case "$DECISION" in SHIP|FIX-FIRST|BLOCK) ;; *) echo "no verdict"; exit 1;; esac

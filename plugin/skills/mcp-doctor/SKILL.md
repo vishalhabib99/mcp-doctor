@@ -1,13 +1,13 @@
 ---
 name: mcp-doctor
-description: Lint and fix an MCP (Model Context Protocol) server's source for what breaks the agent calling it — missing or vague tool descriptions, undocumented or untyped parameters, swallowed errors, stdout writes that corrupt a stdio transport — plus a separate security grade (tool poisoning, dynamic exec, SSRF, secrets). Use when the user asks to check, lint, audit, grade, review or fix their MCP server or its tools, asks whether their MCP server is "ready" or "good", or has just written or changed MCP tool definitions (FastMCP @mcp.tool, server.tool(...)/registerTool in TypeScript, mcp.NewTool in Go) and wants them checked. Not for using or connecting to someone else's MCP server, and not for general code review of code that isn't an MCP server.
+description: Lint and fix an MCP (Model Context Protocol) server's source for what breaks the agent calling it — missing or vague tool descriptions, undocumented or untyped parameters, swallowed errors, stdout writes that corrupt a stdio transport — plus a separate security grade (tool poisoning, dynamic exec, SSRF, secrets). Use when the user asks to check, lint, audit, grade, review or fix their MCP server or its tools, asks whether their MCP server is "ready", "good" or safe to ship, wants it fuzzed or tested against bad input, or has just written or changed MCP tool definitions (FastMCP @mcp.tool, server.tool(...)/registerTool in TypeScript, mcp.NewTool in Go) and wants them checked. Not for using or connecting to someone else's MCP server, and not for general code review of code that isn't an MCP server.
 argument-hint: "[path to the server, default: current directory]"
 allowed-tools: Bash(mcp-doctor *), Read, Grep, Glob
 ---
 
 # mcp-doctor
 
-Scan an MCP server with the `mcp-doctor` CLI (PyPI package `mcp-server-lint`), explain what it found in terms of what goes wrong for the agent, and fix it with the user's go-ahead. The CLI reads source only — it never starts the server.
+Scan an MCP server with the `mcp-doctor` CLI (PyPI package `mcp-server-lint`), explain what it found in terms of what goes wrong for the agent, and fix it with the user's go-ahead. The scan reads source only and never starts the server. The runtime checks in section 6 do start it, so they run only when the user asks or agrees.
 
 Target path: `$ARGUMENTS` if given, else the current directory. If the current directory holds several servers, ask which one rather than scanning a whole monorepo.
 
@@ -57,6 +57,18 @@ Split fixes into two kinds and say which is which.
 Re-run `MCPD --json <path>` and show the before → after for both grades, e.g. `Quality 51% → 89%`. If something didn't move, say why.
 
 Then offer — once, don't push — to keep it checked on every PR: `MCPD init-action <path>` writes `.github/workflows/mcp-doctor.yml` in report-only mode, plus `mcp-doctor-comment.yml` so PRs from forks get the report too (the user commits them themselves).
+
+## 6. Runtime check — only with a yes
+
+The scan can't see whether the server crashes on bad input or returns a "success" that isn't one. When the user asks if the server is ready to ship, or wants it tested, offer once:
+
+`MCPD verdict <path> --run "<command that starts the server>"`
+
+It launches the server, calls each read-only tool with bad input and with valid input, and returns SHIP, FIX-FIRST or BLOCK with every reason and a confidence level. Ask for the start command rather than guessing it, and run it only after the user says yes: it executes their server. Never add `--include-destructive` unless the user asks for it and confirms the server points at test data, since it calls tools that write or delete.
+
+It needs the MCP SDK. If `mcp-doctor verdict` says so, use `uvx --from 'mcp-server-lint[runtime]' mcp-doctor verdict ...`, or give the user `pip install 'mcp-server-lint[runtime]'`. Report the verdict line and its reasons as given. `mcp-doctor fuzz -- <command>` (bad input) and `mcp-doctor fuzz --truth -- <command>` (valid input) give the detail behind it if the user wants more.
+
+If the user is running an agent against MCP servers rather than building one, the relevant command is `mcp-doctor guard -- <server command>`: mention it, don't set it up unasked.
 
 ## If you think a finding is wrong
 

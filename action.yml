@@ -1,5 +1,5 @@
 name: "mcp-doctor"
-description: "Audit an MCP server implementation for spec conformance and quality issues, and gate PRs on the score."
+description: "Audit an MCP server, fuzz it, and gate PRs on the score or on one release decision: SHIP, FIX-FIRST or BLOCK."
 author: "Vishal Habib"
 branding:
   icon: "activity"
@@ -26,6 +26,30 @@ inputs:
     description: "Also suggest missing `Args:` entries for undocumented parameters. Off by default: the suggestion is a `TODO: describe this parameter.` placeholder, so the report counts those tools instead."
     required: false
     default: "false"
+  run:
+    description: "Command that starts the server over stdio, e.g. `python server.py`. When set (or `url`), the Action also launches the server, fuzzes it with bad and valid input, and posts a SHIP / FIX-FIRST / BLOCK verdict. Only tools marked readOnlyHint are called unless include-destructive is true."
+    required: false
+    default: ""
+  url:
+    description: "A running server's Streamable HTTP URL, instead of `run`."
+    required: false
+    default: ""
+  headers:
+    description: "HTTP headers for `url`, one KEY=VALUE per line (pass secrets through `${{ secrets.X }}`)."
+    required: false
+    default: ""
+  env:
+    description: "Environment variables for `run`, space-separated KEY=VALUE pairs."
+    required: false
+    default: ""
+  include-destructive:
+    description: "Also call tools not marked readOnlyHint. Only against a sandbox."
+    required: false
+    default: "false"
+  fail-on:
+    description: "With `run` or `url`: fail the workflow on this verdict or worse, BLOCK or FIX-FIRST. Empty never fails on the verdict."
+    required: false
+    default: ""
   version:
     description: "Git ref of mcp-doctor to install (branch, tag, or commit). Empty (the default) installs the copy of mcp-doctor this action was checked out at, so pinning the action by commit also pins the analyser."
     required: false
@@ -42,6 +66,16 @@ outputs:
     description: "'false' when no tools were found: the score is then not a grade, and fail-under is not applied (a warning is shown instead)."
     value: ${{ steps.audit.outputs.graded }}
 
+  decision:
+    description: "SHIP, FIX-FIRST or BLOCK when `run` or `url` is set, otherwise empty."
+    value: ${{ steps.verdict.outputs.decision }}
+  confidence:
+    description: "HIGH, MEDIUM or LOW: how much of the server the runtime checks actually called."
+    value: ${{ steps.verdict.outputs.confidence }}
+  needs-human-review:
+    description: "'true' unless the verdict is a HIGH-confidence SHIP."
+    value: ${{ steps.verdict.outputs.needs-human-review }}
+
 runs:
   using: "composite"
   steps:
@@ -56,11 +90,15 @@ runs:
       working-directory: ${{ runner.temp }}
       env:
         VERSION: ${{ inputs.version }}
+        RUNTIME: ${{ inputs.run != '' || inputs.url != '' }}
       run: |
+        # The runtime checks need the MCP SDK, an optional extra.
+        extra=""
+        if [ "$RUNTIME" = "true" ]; then extra="[runtime]"; fi
         if [ -z "$VERSION" ]; then
-          pip install "$GITHUB_ACTION_PATH"
+          pip install "$GITHUB_ACTION_PATH$extra"
         else
-          pip install "git+https://github.com/vishalhabib99/mcp-doctor.git@$VERSION"
+          pip install "mcp-server-lint$extra @ git+https://github.com/vishalhabib99/mcp-doctor.git@$VERSION"
         fi
 
     - name: Run audit
@@ -103,6 +141,52 @@ runs:
         else
           echo "gate_failed=0" >> "$GITHUB_OUTPUT"
         fi
+
+    - name: Fuzz the server and decide
+      id: verdict
+      if: ${{ inputs.run != '' || inputs.url != '' }}
+      shell: bash
+      env:
+        SCAN_PATH: ${{ inputs.path }}
+        RUN_CMD: ${{ inputs.run }}
+        MCP_URL: ${{ inputs.url }}
+        MCP_HEADERS: ${{ inputs.headers }}
+        MCP_ENV: ${{ inputs.env }}
+        DESTRUCTIVE: ${{ inputs.include-destructive }}
+        FAIL_ON: ${{ inputs.fail-on }}
+      run: |
+        if [ -n "$RUN_CMD" ] && [ -n "$MCP_URL" ]; then
+          echo "::error::Set either 'run' (launch a local stdio server) or 'url' (a running HTTP server), not both."
+          exit 1
+        fi
+        ARGS=()
+        if [ -n "$MCP_URL" ]; then
+          ARGS+=(--url "$MCP_URL")
+          while IFS= read -r header; do
+            [ -n "$header" ] && ARGS+=(--header "$header")
+          done <<< "$MCP_HEADERS"
+        else
+          ARGS+=(--run "$RUN_CMD")
+          for kv in $MCP_ENV; do ARGS+=(--env "$kv"); done
+        fi
+        if [ "$DESTRUCTIVE" = "true" ]; then ARGS+=(--include-destructive); fi
+        set +e
+        mcp-doctor verdict "$SCAN_PATH" "${ARGS[@]}" --json > mcp-doctor-verdict.json
+        set -e
+        python -I - <<'PY'
+        import json, os
+        v = json.load(open("mcp-doctor-verdict.json"))
+        scores = " · ".join(f"{k} {x:.0f}%" for k, x in v["scores"].items() if isinstance(x, (int, float)))
+        md = f"### mcp-doctor verdict — {v['verdict']} ({v['confidence']} confidence) · {scores}\n\n" + v["markdown"]
+        open("mcp-doctor-verdict.md", "w").write(md)
+        with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+            f.write(f"decision={v['verdict']}\nconfidence={v['confidence']}\n")
+            f.write(f"needs-human-review={str(v['needs_human_review']).lower()}\n")
+            fail_on = os.environ.get("FAIL_ON", "")
+            failed = (fail_on == "BLOCK" and v["verdict"] == "BLOCK") or (fail_on == "FIX-FIRST" and v["verdict"] in ("BLOCK", "FIX-FIRST"))
+            f.write(f"gate_failed={1 if failed else 0}\n")
+        PY
+        cat mcp-doctor-verdict.md >> "$GITHUB_STEP_SUMMARY"
 
     - name: Suggest fixes on pull request
       id: suggest
@@ -163,6 +247,7 @@ runs:
           echo '```'
           cat mcp-doctor-report.txt
           echo '```'
+          if [ -f mcp-doctor-verdict.md ]; then echo; cat mcp-doctor-verdict.md; fi
           if [ -f mcp-doctor-fixes.md ]; then cat mcp-doctor-fixes.md; fi
         } > mcp-doctor-comment.md
         if gh pr comment "$PR" --repo "$REPO" \
@@ -201,3 +286,13 @@ runs:
       if: ${{ steps.audit.outputs.gate_failed == '1' }}
       shell: bash
       run: exit 1
+
+    - name: Enforce verdict gate
+      if: ${{ steps.verdict.outputs.gate_failed == '1' }}
+      shell: bash
+      env:
+        DECISION: ${{ steps.verdict.outputs.decision }}
+        FAIL_ON: ${{ inputs.fail-on }}
+      run: |
+        echo "::error::mcp-doctor verdict is $DECISION (fail-on: $FAIL_ON)"
+        exit 1

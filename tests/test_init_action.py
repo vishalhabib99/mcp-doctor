@@ -85,3 +85,16 @@ def test_zero_tools_explains_not_graded(tmp_path, capsys):
     (tmp_path / ".git").mkdir()
     assert main(["init-action", str(tmp_path)]) == 0
     assert "Not graded" in capsys.readouterr().out
+
+
+def test_run_adds_runtime_inputs_as_valid_yaml():
+    import pytest
+
+    from mcp_doctor.init_action import render_workflow
+
+    yaml = pytest.importorskip("yaml")
+    text = render_workflow(path=".", run='python server.py --mode "a b"')
+    step = yaml.safe_load(text)["jobs"]["mcp-doctor"]["steps"][1]["with"]
+    assert step["run"] == 'python server.py --mode "a b"'
+    assert step["fail-on"] == ""
+    assert "run:" not in render_workflow(path=".")

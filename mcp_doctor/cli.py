@@ -22,6 +22,31 @@ def _print_skipped(skipped: list[str]) -> None:
     for item in skipped:
         print(f"  {item}", file=sys.stderr)
 
+SUITE_HELP = """\
+the suite, one command each:
+  mcp-doctor [path]                     static scan: quality and security grades (this command)
+  mcp-doctor [path] --fix | --diff      apply or preview the safe mechanical fixes
+  mcp-doctor [path] --diff-against F    breaking changes since a saved --json baseline
+  mcp-doctor fuzz -- <command>          launch the server, call it with bad input  [runtime]
+  mcp-doctor fuzz --truth -- <command>  call it with valid input, check answers are real  [runtime]
+  mcp-doctor verdict [path] --run CMD   one release decision: SHIP, FIX-FIRST or BLOCK
+  mcp-doctor guard -- <command>         put a live check in front of a server an agent uses
+  mcp-doctor guard hook                 the same check on Claude Code's own tools (plugin)
+  mcp-doctor init-action                add the GitHub Action to a repo
+
+[runtime] needs the MCP SDK: pip install 'mcp-server-lint[runtime]'
+each command takes --help. docs: https://github.com/vishalhabib99/mcp-doctor
+"""
+
+
+def _version() -> str:
+    try:
+        from importlib.metadata import version
+
+        return version("mcp-server-lint")
+    except Exception:
+        return "unknown"
+
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
@@ -58,7 +83,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="mcp-doctor",
         description="Audit an MCP server implementation for spec conformance and quality issues.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=SUITE_HELP,
     )
+    parser.add_argument("--version", action="version", version=f"mcp-doctor {_version()}")
     parser.add_argument("path", nargs="?", default=".", help="Path to the repo/server to audit (default: current directory)")
     parser.add_argument("--json", action="store_true", help="Output machine-readable JSON instead of text")
     parser.add_argument("--no-color", action="store_true", help="Disable ANSI color in text output")

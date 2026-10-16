@@ -283,7 +283,7 @@ def main(argv: list[str]) -> int:
             "verdict": d.verdict, "blockers": d.blockers, "fixes": d.fixes, "notes": d.notes,
             "confidence": d.confidence, "confidence_reasons": d.confidence_reasons,
             "needs_human_review": d.needs_human_review, "coverage_percent": d.coverage_percent,
-            "scores": scores,
+            "scores": scores, "markdown": render_markdown(d),
         }, indent=2))
     else:
         parts = [f"{k} {v:.0f}% ({_grade(v)})" for k, v in scores.items() if isinstance(v, (int, float))]
