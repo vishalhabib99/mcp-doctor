@@ -340,6 +340,10 @@ def _collect_tool_array_elements(array_node, src: bytes, consts: dict, depth: in
     something that doesn't resolve to an array literal (e.g. a function call's
     result, built at runtime) is genuinely dynamic and is skipped, not guessed at.
     """
+    if array_node is not None and array_node.type == "call_expression":
+        unwrapped = _element_preserving_map(array_node, src, consts)
+        if unwrapped is not None:
+            array_node, src = unwrapped
     if array_node is None or array_node.type != "array" or depth > 5:
         return []
     out: list[tuple["Node", bytes]] = []
@@ -357,9 +361,64 @@ def _collect_tool_array_elements(array_node, src: bytes, consts: dict, depth: in
             inner = child.children[-1] if child.children else None
             if inner is not None:
                 resolved, resolved_src = _resolve(inner, src, consts)
-                if resolved.type == "array":
+                if resolved.type in ("array", "call_expression"):
                     out.extend(_collect_tool_array_elements(resolved, resolved_src, consts, depth + 1))
     return out
+
+
+def _element_preserving_map(node, src: bytes, consts: dict):
+    """For `[...].map(withAnnotations)`, where the callback returns
+    `{ ...tool, annotations: {...} }`, return the mapped array literal and its
+    src: each element is still one tool, with its own name and description, so
+    the elements can be read as written (bug #117: rajudandigam/agent-inspect,
+    24 tools behind `[...FLAGSHIP_TOOLS, ...LEGACY_TOOLS]`, each array ending in
+    `.map(withReadonlyAnnotations)`, reported 0). Only a callback whose returned
+    object spreads its own parameter counts: a projection to a new shape is
+    handled by `_map_projection_receiver`, and anything else is left unresolved.
+    A callback named by identifier must be a function declared in the same file."""
+    if node is None or node.type != "call_expression":
+        return None
+    func = node.child_by_field_name("function")
+    if func is None or func.type != "member_expression":
+        return None
+    prop = func.child_by_field_name("property")
+    if prop is None or _text(prop, src) != "map":
+        return None
+    args_node = node.child_by_field_name("arguments")
+    if args_node is None:
+        return None
+    call_args = [c for c in args_node.children if c.type not in ("(", ")", ",")]
+    if len(call_args) != 1:
+        return None
+    callback = call_args[0]
+    if callback.type == "identifier":
+        callback = (_FILE_FUNCS.get(id(src)) or {}).get(_text(callback, src))
+        if callback is None:
+            return None
+    if callback.type not in ("arrow_function", "function_expression", "function_declaration"):
+        return None
+    param = callback.child_by_field_name("parameter")
+    if param is None:
+        params = callback.child_by_field_name("parameters")
+        first = next((c for c in params.named_children), None) if params is not None else None
+        param = first.child_by_field_name("pattern") if first is not None and first.type != "identifier" else first
+    if param is None or param.type != "identifier":
+        return None
+    returned, _ = _extract_definition_object(callback, src)
+    if returned is None:
+        return None
+    param_name = _text(param, src)
+    if not any(
+        c.type == "spread_element" and c.named_children
+        and c.named_children[-1].type == "identifier"
+        and _text(c.named_children[-1], src) == param_name
+        for c in returned.children
+    ):
+        return None
+    receiver, receiver_src = _resolve(func.child_by_field_name("object"), src, consts)
+    if receiver is None or receiver.type != "array":
+        return None
+    return receiver, receiver_src
 
 
 def _extract_definition_object(node, src: bytes):
@@ -372,7 +431,7 @@ def _extract_definition_object(node, src: bytes):
         return None, src
     if node.type == "object":
         return node, src
-    if node.type not in ("arrow_function", "function_expression"):
+    if node.type not in ("arrow_function", "function_expression", "function_declaration"):
         return None, src
     body = node.child_by_field_name("body")
     if body is None:
@@ -558,6 +617,8 @@ def _module_exported_consts(module_root, module_src: bytes) -> dict[str, tuple["
 
 # id(src buffer) -> that file's own consts, set per `find_ts_tools` run.
 _FILE_CONSTS: dict[int, dict[str, tuple["Node", bytes]]] = {}
+# Same, for named function declarations (a `.map(fn)` callback, bug #117).
+_FILE_FUNCS: dict[int, dict[str, "Node"]] = {}
 
 
 def _resolve(node, src: bytes, consts: dict[str, tuple["Node", bytes]], depth: int = 0):
@@ -655,7 +716,47 @@ def _resolve_str(node, src: bytes, consts: dict[str, tuple["Node", bytes]]) -> s
     if node is None:
         return None
     resolved, resolved_src = _resolve(node, src, consts)
-    return _string_value(resolved, resolved_src)
+    value = _string_value(resolved, resolved_src)
+    if value is None and resolved is not None and resolved.type == "call_expression":
+        value = _string_wrapper_value(resolved, resolved_src, consts)
+    return value
+
+
+def _string_wrapper_value(call, src: bytes, consts: dict) -> str | None:
+    """`withUntrustedTraceWarning("Read one trace.")`, where the same-file
+    function returns a template like "${description} ${SUFFIX}": the result starts from the
+    literal argument, so return that argument (bug #117, rajudandigam/agent-inspect:
+    14 tools reported as having no description). Only a function whose body is a
+    single `return` of a template or `+` string that uses its first parameter
+    counts; the added text is dropped, same as a template's `${...}` parts, which
+    can only under-count, never invent a description."""
+    func = call.child_by_field_name("function")
+    if func is None or func.type != "identifier":
+        return None
+    decl = (_FILE_FUNCS.get(id(src)) or {}).get(_text(func, src))
+    if decl is None:
+        return None
+    params = decl.child_by_field_name("parameters")
+    first = next(iter(params.named_children), None) if params is not None else None
+    param = first.child_by_field_name("pattern") if first is not None and first.type != "identifier" else first
+    body = decl.child_by_field_name("body")
+    if param is None or param.type != "identifier" or body is None:
+        return None
+    statements = [c for c in body.named_children if c.type != "comment"]
+    if len(statements) != 1 or statements[0].type != "return_statement":
+        return None
+    returned = next(iter(statements[0].named_children), None)
+    if returned is None or returned.type not in ("template_string", "binary_expression"):
+        return None
+    param_name = _text(param, src)
+    if not any(n.type == "identifier" and _text(n, src) == param_name for n in _walk(returned)):
+        return None
+    args_node = call.child_by_field_name("arguments")
+    call_args = [c for c in args_node.children if c.type not in ("(", ")", ",")] if args_node is not None else []
+    if not call_args:
+        return None
+    arg, arg_src = _resolve(call_args[0], src, consts)
+    return _string_value(arg, arg_src)
 
 
 _ZOD_OPTIONAL = {"optional", "nullish", "default", "catch"}
@@ -1175,9 +1276,11 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
     # for the Python side's cross-file Field-alias registry.
     global_consts: dict[str, tuple["Node", bytes]] = {}
     _FILE_CONSTS.clear()
+    _FILE_FUNCS.clear()
     for _f, file_root, file_src in parsed:
         own = _collect_const_objects(file_root, file_src)
         _FILE_CONSTS[id(file_src)] = own
+        _FILE_FUNCS[id(file_src)] = _collect_function_declarations(file_root, file_src)
         for const_name, entry in own.items():
             global_consts.setdefault(const_name, entry)
 

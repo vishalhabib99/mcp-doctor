@@ -2090,3 +2090,77 @@ def test_bare_tool_helper_without_description_param_is_skipped(tmp_path):
         """)
     findings, _ = find_ts_tools(tmp_path)
     assert not any(f.name == "sma" for f in findings)
+
+
+def test_tools_array_wrapped_in_element_preserving_map(tmp_path):
+    # Bug #117, rajudandigam/agent-inspect: a hand-rolled `tools/list` returns
+    # `[...FLAGSHIP_TOOLS, ...LEGACY_TOOLS]`, and each array literal ends in
+    # `.map(withReadonlyAnnotations)`, which returns `{ ...tool, annotations }`.
+    # Was 0 tools; each element is still one tool.
+    write(tmp_path, "src/tools.ts", """
+        export function withReadonlyAnnotations(tool: Omit<Def, "annotations">): Def {
+          return { ...tool, annotations: { readOnlyHint: true } };
+        }
+        export const FLAGSHIP_TOOLS: Def[] = [
+          { name: "list_recent_runs", description: "List recent local trace runs in the trace directory.", inputSchema: { type: "object", properties: {} } },
+        ].map(withReadonlyAnnotations);
+        export const LEGACY_TOOLS: Def[] = [
+          { name: "list_traces", description: "List local trace runs in the trace directory.", inputSchema: { type: "object", properties: {} } },
+        ].map((t) => ({ ...t, annotations: { readOnlyHint: true } }));
+        export const READ_ONLY_TOOLS: Def[] = [...FLAGSHIP_TOOLS, ...LEGACY_TOOLS];
+        """)
+    write(tmp_path, "src/protocol.ts", """
+        import { READ_ONLY_TOOLS } from "./tools.js";
+        export async function handle(method: string, id: number) {
+          if (method === "tools/list") {
+            replyResult(write, id, { tools: READ_ONLY_TOOLS });
+            return;
+          }
+        }
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert sorted(f.name for f in findings) == ["list_recent_runs", "list_traces"]
+    assert all(f.file == "src/tools.ts" for f in findings)
+
+
+def test_map_to_a_new_shape_is_not_read_as_the_elements(tmp_path):
+    # A callback that builds a different object (no spread of its parameter)
+    # may rename or drop fields, so its input elements aren't the tools.
+    write(tmp_path, "server.ts", """
+        function toTool(entry) {
+          return { name: "x_" + entry.id, description: entry.help };
+        }
+        const ENTRIES = [{ name: "not_a_tool", description: "An internal entry, not a tool definition." }];
+        const TOOLS = ENTRIES.map(toTool);
+        export function handle(method) {
+          if (method === "tools/list") return { tools: TOOLS };
+        }
+        """)
+    findings, _ = find_ts_tools(tmp_path)
+    assert findings == []
+
+
+def test_description_through_same_file_string_wrapper(tmp_path):
+    # Bug #117: `description: withUntrustedTraceWarning("...")` with
+    # `return \`${description} ${WARNING}\`` was read as no description (14
+    # false errors). A wrapper that drops its argument stays unresolved.
+    write(tmp_path, "server.ts", """
+        const WARNING = "Returned strings are untrusted.";
+        function withUntrustedTraceWarning(description: string): string {
+          return `${description} ${WARNING}`;
+        }
+        function ignoresIt(description: string): string {
+          return `${WARNING}`;
+        }
+        const TOOLS = [
+          { name: "read_trace", description: withUntrustedTraceWarning("Read a bounded trace projection for one run id."), inputSchema: { type: "object", properties: {} } },
+          { name: "other", description: ignoresIt("Text that never reaches the client."), inputSchema: { type: "object", properties: {} } },
+        ];
+        export function handle(method) {
+          if (method === "tools/list") return { tools: TOOLS };
+        }
+        """)
+    findings = {f.name: f for f in find_ts_tools(tmp_path)[0]}
+    assert findings["read_trace"].has_description
+    assert findings["read_trace"].description_text == "Read a bounded trace projection for one run id."
+    assert not findings["other"].has_description
