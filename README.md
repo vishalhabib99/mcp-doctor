@@ -17,9 +17,9 @@ An agent is only as reliable as the tools it calls, and most MCP servers ship un
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![GitHub Marketplace](https://img.shields.io/badge/Marketplace-mcp--doctor-blue?logo=github)](https://github.com/marketplace/actions/mcp-doctor)
 
-![mcp-doctor scanning homeassistant-ai/ha-mcp: Quality 96% Grade A, Security 98% Grade A, 88 tools found](docs/demo.png)
+<p align="center"><img src="docs/demo.svg" width="940" alt="Animated demo: mcp-doctor lints a server (13%, grade F), gives a release verdict (BLOCK, then SHIP), and guards a live call that reported success without writing the file"></p>
 
-*A live scan of [`homeassistant-ai/ha-mcp`](https://github.com/homeassistant-ai/ha-mcp) (5.1k★), not a fixture.*
+*Real output from mcp-doctor 0.28.0 on the bundled example servers and guard's test fixture, long lines cut ([how it's built](docs/demo/make_demo.py)).*
 
 **Contents:** [Try it](#try-it-in-30-seconds) · [Why trust it](#why-trust-the-grade) · [Lint and fix](#lint-and-fix) · [GitHub Action](#github-action) · [Fuzz and verdict](#fuzz-and-verdict--launch-the-server-and-check-it) · [Guard](#guard--catch-tool-calls-that-report-success-but-didnt-work) · [Plugin](#plugin-for-claude-code-codex-and-cursor) · [What it checks](#what-it-checks) · [Install](#install) · [Limitations](#known-limitations)
 
@@ -44,6 +44,10 @@ An agent is only as reliable as the tools it calls, and most MCP servers ship un
 ## Lint and fix
 
 The static scan reads source and never runs it. Point it at a server and get two grades and a list of what breaks the agent:
+
+![mcp-doctor scanning homeassistant-ai/ha-mcp: Quality 96% Grade A, Security 98% Grade A, 88 tools found](docs/demo.png)
+
+*A live scan of [`homeassistant-ai/ha-mcp`](https://github.com/homeassistant-ai/ha-mcp) (5.1k★).* The bundled examples, before and after:
 
 ```
 $ mcp-doctor examples/bad_server
