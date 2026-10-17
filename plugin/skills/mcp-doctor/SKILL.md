@@ -9,7 +9,7 @@ allowed-tools: Bash(mcp-doctor *), Read, Grep, Glob
 
 Scan an MCP server with the `mcp-doctor` CLI (PyPI package `mcp-server-lint`), explain what it found in terms of what goes wrong for the agent, and fix it with the user's go-ahead. The scan reads source only and never starts the server. The runtime checks in section 6 do start it, so they run only when the user asks or agrees.
 
-Target path: `$ARGUMENTS` if given, else the current directory. If the current directory holds several servers, ask which one rather than scanning a whole monorepo.
+Target path: the path the user gave (`$ARGUMENTS` in Claude Code), else the current directory. If the current directory holds several servers, ask which one rather than scanning a whole monorepo.
 
 ## 1. Pick a runner
 
@@ -21,9 +21,9 @@ Use the first that works, and keep using it for the rest of the session:
 
 Below, `MCPD` means the runner you picked.
 
-Run every CLI call as one plain command — e.g. `mcp-doctor --json path/to/server` — with no `&&`, `;`, pipes, redirects or `cd` around it. The skill pre-approves only plain `mcp-doctor` calls; a chained command, or the `uvx`/`pipx` fallbacks, will ask the user first, which is expected. To look around the repo, use Read/Glob/Grep, not Bash.
+Run every CLI call as one plain command — e.g. `mcp-doctor --json path/to/server` — with no `&&`, `;`, pipes, redirects or `cd` around it. In Claude Code the skill pre-approves only plain `mcp-doctor` calls; a chained command, or the `uvx`/`pipx` fallbacks, will ask the user first, which is expected (Codex and Cursor use their own approval settings). To look around the repo, use your file-reading and search tools, not the shell.
 
-If none works (not installed, no network, or Bash not allowed), say so in your first line and give the user one install line — `pip install mcp-server-lint` — instead of installing anything yourself. You may then read the code and point out problems, but label it plainly as your own reading, not an mcp-doctor score, and never state a grade or percentage you didn't get from the CLI.
+If none works (not installed, no network, or shell commands not allowed), say so in your first line and give the user one install line — `pip install mcp-server-lint` — instead of installing anything yourself. You may then read the code and point out problems, but label it plainly as your own reading, not an mcp-doctor score, and never state a grade or percentage you didn't get from the CLI.
 
 ## 2. Scan
 

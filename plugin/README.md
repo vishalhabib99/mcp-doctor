@@ -1,14 +1,22 @@
-# mcp-doctor for Claude Code
+# mcp-doctor for Claude Code, Codex and Cursor
 
 Lint the MCP server you're building for what breaks the agent calling it, then fix what it finds. Works on Python, TypeScript and Go servers.
 
 Install:
 
-```
-/plugin install mcp-doctor --marketplace vishalhabib99/mcp-doctor
+| Agent | Install |
+|---|---|
+| Claude Code | `/plugin install mcp-doctor --marketplace vishalhabib99/mcp-doctor` |
+| Codex | `codex plugin marketplace add vishalhabib99/mcp-doctor`, then `codex plugin add mcp-doctor@mcp-doctor` |
+| Cursor | copy this folder to `~/.cursor/plugins/local/mcp-doctor` (below), then **Developer: Reload Window** |
+| Any agent that reads skills | copy `skills/*` to `~/.agents/skills/` (Codex and Cursor both read it) |
+
+```bash
+git clone --depth 1 https://github.com/vishalhabib99/mcp-doctor /tmp/mcp-doctor
+mkdir -p ~/.cursor/plugins/local && cp -R /tmp/mcp-doctor/plugin ~/.cursor/plugins/local/mcp-doctor
 ```
 
-Then ask "check my MCP server", or run `/mcp-doctor:mcp-doctor path/to/server`. The skill:
+Then ask "check my MCP server". To call it by name: `/mcp-doctor:mcp-doctor path/to/server` in Claude Code, `$mcp-doctor:mcp-doctor` in Codex; in Cursor type `/` and pick mcp-doctor. The skill:
 
 1. runs the `mcp-doctor` CLI on your server's source (it reads code, never starts the server) and reports a quality grade and a separate security grade, plus the top five findings in terms of what goes wrong for the agent;
 2. shows the mechanical fixes as a diff and applies them when you say yes;
@@ -20,7 +28,7 @@ Security findings are explained, not silently rewritten.
 
 ### Fixing someone else's server: `fix-upstream`
 
-Cloned an open-source MCP server that mcp-doctor flags? Ask "prepare an upstream fix as a PR draft" (or run `/mcp-doctor:fix-upstream path/to/clone`). The skill checks for an existing issue or PR and the repo's contribution rules. It applies one kind of fix (today: optional arguments that reject an explicit null), leaves out fixtures, examples and unregistered functions, and writes a regression test that fails before the fix and passes after. It runs the repo's own tests before and after, then commits on a local branch and writes the PR description. **It never pushes, opens a PR or posts anything**: you review and send it. Big changes (more than ~30 parameters) become an issue draft instead, so the maintainer chooses the scope.
+Cloned an open-source MCP server that mcp-doctor flags? Ask "prepare an upstream fix as a PR draft" (or call the `fix-upstream` skill by name). The skill checks for an existing issue or PR and the repo's contribution rules. It applies one kind of fix (today: optional arguments that reject an explicit null), leaves out fixtures, examples and unregistered functions, and writes a regression test that fails before the fix and passes after. It runs the repo's own tests before and after, then commits on a local branch and writes the PR description. **It never pushes, opens a PR or posts anything**: you review and send it. Big changes (more than ~30 parameters) become an issue draft instead, so the maintainer chooses the scope.
 
 Why trust the patch: replayed on the code from before 15 merged upstream fixes, the patch matched what the maintainers merged in every case. A 19-repo forward test is what added the fixture filter, the size limit and the snapshot-test step.
 

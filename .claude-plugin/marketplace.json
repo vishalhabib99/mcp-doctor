@@ -18,7 +18,7 @@
       "description": "Guard Claude Code's own tools: hold a secret about to be sent out, or a write to .git hooks/config or shell rc files, after the session read outside content.",
       "source": "./plugin-guard",
       "category": "security",
-      "homepage": "https://github.com/vishalhabib99/mcp-doctor#guard-for-coding-agents-claude-code-hooks"
+      "homepage": "https://github.com/vishalhabib99/mcp-doctor#guard-for-coding-agents-claude-code-codex-and-cursor-hooks"
     }
   ]
 }

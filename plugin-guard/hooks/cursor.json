@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "hooks": {
+    "preToolUse": [
+      {
+        "command": "uvx --from 'mcp-server-lint>=0.28.0' mcp-doctor guard hook --client cursor 2>/dev/null || mcp-doctor guard hook --client cursor 2>/dev/null || echo '{\"permission\":\"allow\"}'",
+        "timeout": 30
+      }
+    ],
+    "postToolUse": [
+      {
+        "command": "uvx --from 'mcp-server-lint>=0.28.0' mcp-doctor guard hook --client cursor 2>/dev/null || mcp-doctor guard hook --client cursor 2>/dev/null || echo '{\"permission\":\"allow\"}'",
+        "timeout": 30
+      }
+    ],
+    "beforeShellExecution": [
+      {
+        "command": "uvx --from 'mcp-server-lint>=0.28.0' mcp-doctor guard hook --client cursor 2>/dev/null || mcp-doctor guard hook --client cursor 2>/dev/null || echo '{\"permission\":\"allow\"}'",
+        "timeout": 30
+      }
+    ],
+    "afterShellExecution": [
+      {
+        "command": "uvx --from 'mcp-server-lint>=0.28.0' mcp-doctor guard hook --client cursor 2>/dev/null || mcp-doctor guard hook --client cursor 2>/dev/null || echo '{\"permission\":\"allow\"}'",
+        "timeout": 30
+      }
+    ],
+    "beforeMCPExecution": [
+      {
+        "command": "uvx --from 'mcp-server-lint>=0.28.0' mcp-doctor guard hook --client cursor 2>/dev/null || mcp-doctor guard hook --client cursor 2>/dev/null || echo '{\"permission\":\"allow\"}'",
+        "timeout": 30
+      }
+    ],
+    "afterMCPExecution": [
+      {
+        "command": "uvx --from 'mcp-server-lint>=0.28.0' mcp-doctor guard hook --client cursor 2>/dev/null || mcp-doctor guard hook --client cursor 2>/dev/null || echo '{\"permission\":\"allow\"}'",
+        "timeout": 30
+      }
+    ]
+  }
+}

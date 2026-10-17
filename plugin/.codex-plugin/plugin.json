@@ -1,0 +1,37 @@
+{
+  "name": "mcp-doctor",
+  "version": "1.3.0",
+  "description": "Lint the MCP server you're building for what breaks the agent calling it: missing tool descriptions, undocumented parameters, swallowed errors, stdout writes that corrupt stdio, plus a separate security grade. Scans Python, TypeScript and Go source without running it and fixes what it finds; with your OK, launches the server, fuzzes it and gives one SHIP / FIX-FIRST / BLOCK verdict.",
+  "author": {
+    "name": "Vishal Habib"
+  },
+  "homepage": "https://github.com/vishalhabib99/mcp-doctor",
+  "repository": "https://github.com/vishalhabib99/mcp-doctor",
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "linter",
+    "static-analysis",
+    "agents"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "mcp-doctor",
+    "shortDescription": "Lint, fix and fuzz the MCP server you're building",
+    "developerName": "Vishal Habib",
+    "category": "Coding",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Check my MCP server with mcp-doctor."
+    ],
+    "composerIcon": "./.codex-plugin/icon.png",
+    "logo": "./.codex-plugin/icon.png",
+    "websiteURL": "https://github.com/vishalhabib99/mcp-doctor",
+    "privacyPolicyURL": "https://github.com/vishalhabib99/mcp-doctor/blob/main/plugin/PRIVACY.md",
+    "termsOfServiceURL": "https://github.com/vishalhabib99/mcp-doctor/blob/main/LICENSE"
+  }
+}

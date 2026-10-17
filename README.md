@@ -8,7 +8,7 @@
 | Every PR | [GitHub Action](#github-action) · [pre-commit](#pre-commit-hook) | The same, on the lines that changed, with one-click fixes. Add `run:` for a verdict. |
 | Before release | [`fuzz`](#fuzz-and-verdict--launch-the-server-and-check-it) · `fuzz --truth` · `verdict` | Does it fail cleanly on bad input? Is a "success" a real answer? Ship it? |
 | In production | [`guard`](#guard--catch-tool-calls-that-report-success-but-didnt-work) · `guard hook` · `mcp_doctor.session` | Did that call actually work? Is a secret about to leave after a prompt injection? |
-| Anywhere | [browser](https://vishalhabib99.github.io/mcp-doctor/check/) · [issue bot](https://github.com/vishalhabib99/mcp-doctor/issues/new?template=scan-request.yml) · [Claude Code plugin](#claude-code-plugin) | The same checks with nothing to install, or from inside your editor. |
+| Anywhere | [browser](https://vishalhabib99.github.io/mcp-doctor/check/) · [issue bot](https://github.com/vishalhabib99/mcp-doctor/issues/new?template=scan-request.yml) · [plugin for Claude Code, Codex, Cursor](#plugin-for-claude-code-codex-and-cursor) | The same checks with nothing to install, or from inside your editor. |
 
 [![CI](https://github.com/vishalhabib99/mcp-doctor/actions/workflows/ci.yml/badge.svg)](https://github.com/vishalhabib99/mcp-doctor/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/mcp-server-lint.svg)](https://pypi.org/project/mcp-server-lint/)
@@ -26,7 +26,7 @@
 - **CLI:** `pip install mcp-server-lint`, then `mcp-doctor path/to/your/server`
 - **Fuzz a running server:** `uvx --from 'mcp-server-lint[runtime]' mcp-doctor fuzz -- python server.py`, or `mcp-doctor verdict . --run "python server.py"` for one SHIP / FIX-FIRST / BLOCK decision ([details](#fuzz-and-verdict--launch-the-server-and-check-it))
 - **Running an agent?** Put [`mcp-doctor guard`](#guard--catch-tool-calls-that-report-success-but-didnt-work) in front of any MCP server, and the agent is told when a tool says "success" but the write didn't land, its arguments were ignored, or it didn't do what it claims
-- **Claude Code:** `/plugin install mcp-doctor --marketplace vishalhabib99/mcp-doctor`, then ask "check my MCP server". Claude scans, explains each finding, and fixes what it can with your OK ([details](#claude-code-plugin))
+- **Claude Code, Codex or Cursor:** install the plugin (Claude Code: `/plugin install mcp-doctor --marketplace vishalhabib99/mcp-doctor`; Codex: `codex plugin marketplace add vishalhabib99/mcp-doctor`), then ask "check my MCP server". The agent scans, explains each finding, and fixes what it can with your OK ([details](#plugin-for-claude-code-codex-and-cursor))
 - **CI:** `uses: vishalhabib99/mcp-doctor@v1` comments on each PR, suggests one-click fixes on the lines it changes, and can fail a PR that drops below your score ([details](#github-action))
 
 ## Why trust the grade
@@ -48,6 +48,14 @@
     }
   }
 }
+```
+
+That's the shape for Claude Code (`.mcp.json`) and Cursor (`.cursor/mcp.json` or `~/.cursor/mcp.json`). Codex keeps servers in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.filesystem]
+command = "mcp-doctor"
+args = ["guard", "--", "npx", "-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"]
 ```
 
 | Check | Real issue it catches |
@@ -79,22 +87,32 @@ Checked on real servers before release: filesystem (11 calls: writes, edits, mov
 
 Limits: writes are confirmed only when the server has a matching read tool. Values the server rewrites on the way in (formatting, normalization) can read as missing.
 
-### Guard for coding agents (Claude Code hooks)
+<a id="guard-for-coding-agents-claude-code-hooks"></a>
 
-The proxy above sees MCP tools only. A coding agent also reads files, runs shell commands and fetches pages with its own built-in tools, and that's where the Context7 (CVE-2026-75130), "Comment and Control" and `.git` hook (Cursor CVE-2026-26268) attacks ran. The `mcp-doctor-guard` plugin runs `mcp-doctor guard hook` on every Claude Code tool call:
+### Guard for coding agents (Claude Code, Codex and Cursor hooks)
 
-```
-/plugin install mcp-doctor-guard --marketplace vishalhabib99/mcp-doctor
-```
+The proxy above sees MCP tools only. A coding agent also reads files, runs shell commands and fetches pages with its own built-in tools, and that's where the Context7 (CVE-2026-75130), "Comment and Control" and `.git` hook (Cursor CVE-2026-26268) attacks ran. The `mcp-doctor-guard` plugin runs `mcp-doctor guard hook` on every tool call:
+
+| Agent | Install | What it sees |
+|---|---|---|
+| Claude Code | `/plugin install mcp-doctor-guard --marketplace vishalhabib99/mcp-doctor` | every tool: Bash, Write/Edit, WebFetch/WebSearch, MCP |
+| Codex | `codex plugin marketplace add vishalhabib99/mcp-doctor`, `codex plugin add mcp-doctor-guard@mcp-doctor`, then trust its two hooks in `/hooks` | shell, `apply_patch` edits, MCP; not Codex's hosted web search |
+| Cursor | `cp -R plugin-guard ~/.cursor/plugins/local/mcp-doctor-guard` from a clone of this repo, then **Developer: Reload Window** | shell, file writes, reads, MCP |
 
 | It holds | Attack shape |
 |---|---|
 | A shell command, fetch or MCP write carrying a secret (key, token) an earlier tool result showed, once the session has read outside content (a web page, `curl`, `gh issue`/`gh pr`, an MCP issue or page tool) | Context7: poisoned docs → read `.env` → send it out; Comment and Control: PR title → agent posts its API key |
 | A write to a file that runs code later (`.git/hooks/`, `.git/config`, `git config core.hooksPath`/`core.fsmonitor`/`alias.*`…, shell rc files, `.claude/settings*.json`, `.mcp.json`, `.envrc`, `.husky/`, `.vscode/tasks.json`) after outside content | Injected instructions planting persistent code |
 
-Built-in tools and MCP tools write to the same hashed journal the MCP guards of the session use, so a page fetched with `WebFetch` counts for a write made through an MCP server, and the reverse. "Holds" means Claude Code asks you to approve the call, with the reason; where nobody is there to ask (`bypassPermissions`, `dontAsk`, `auto`) it's denied and the agent reads why. `MCP_DOCTOR_GUARD_DECISION=ask|deny` overrides. Any error inside the hook lets the call through.
+Built-in tools and MCP tools write to the same hashed journal the MCP guards of the session use, so a page fetched with `WebFetch` counts for a write made through an MCP server, and the reverse. "Holds" means the agent asks you to approve the call, with the reason; where it can't ask, the call is denied and the agent reads why:
 
-Live, Claude Code with Haiku in `bypassPermissions`, same prompts with and without the plugin:
+- **Claude Code** asks; in `bypassPermissions`, `dontAsk` and `auto` it denies. `MCP_DOCTOR_GUARD_DECISION=ask|deny` overrides.
+- **Codex** always denies: its hooks can't ask yet (an "ask" lets the call run).
+- **Cursor** asks for shell and MCP calls and denies file writes (its `preToolUse` hook can't ask).
+
+Any error inside the hook lets the call through. Without the plugin, point the agent's own hook config at the same command: `mcp-doctor guard hook --client codex` for every `PreToolUse` and `PostToolUse` in `~/.codex/hooks.json`, or `mcp-doctor guard hook --client cursor` for `preToolUse`, `postToolUse`, `beforeShellExecution`, `afterShellExecution`, `beforeMCPExecution` and `afterMCPExecution` in `~/.cursor/hooks.json` ([`plugin-guard/hooks/`](plugin-guard/hooks/) has both files).
+
+Live, Claude Code with Haiku in `bypassPermissions`, same prompts with and without the plugin (the Codex and Cursor hook formats are tested against the payloads in their docs, not yet in a live session):
 
 | Prompt | Without guard | With guard |
 |---|---|---|
@@ -296,24 +314,27 @@ repos:
 
 It runs when a commit touches `.py`, `.ts`/`.tsx`, `.js`/`.mjs`/`.cjs` or `.go` files and fails the commit if the quality score is under the threshold. A repo where no tools are found gets a warning and passes, same as `--fail-under` on the CLI.
 
-## Claude Code plugin
+<a id="claude-code-plugin"></a>
 
-Run the same scan without leaving Claude Code, and let Claude fix what it finds:
+## Plugin for Claude Code, Codex and Cursor
 
-```
-/plugin install mcp-doctor --marketplace vishalhabib99/mcp-doctor
-```
+Run the same scan without leaving your coding agent, and let it fix what it finds. The same plugin folder carries a manifest for each agent:
 
-(On Claude Code before 2.1.275: `/plugin marketplace add vishalhabib99/mcp-doctor`, then `/plugin install mcp-doctor@mcp-doctor`.)
+| Agent | Install | Call it by name |
+|---|---|---|
+| Claude Code | `/plugin install mcp-doctor --marketplace vishalhabib99/mcp-doctor` (before 2.1.275: `/plugin marketplace add vishalhabib99/mcp-doctor`, then `/plugin install mcp-doctor@mcp-doctor`) | `/mcp-doctor:mcp-doctor path/to/server` |
+| Codex | `codex plugin marketplace add vishalhabib99/mcp-doctor`, then `codex plugin add mcp-doctor@mcp-doctor` | `$mcp-doctor:mcp-doctor` |
+| Cursor | from a clone of this repo: `cp -R plugin ~/.cursor/plugins/local/mcp-doctor`, then **Developer: Reload Window** | type `/`, pick mcp-doctor |
+| Anything that reads Agent Skills | `cp -R plugin/skills/* ~/.agents/skills/` (Codex and Cursor read this folder too) | by skill name |
 
-Then ask "check my MCP server", or run `/mcp-doctor:mcp-doctor path/to/server`. The skill also kicks in when you've just written or changed tool definitions and ask for a check. It:
+Then ask "check my MCP server". The skill also kicks in when you've just written or changed tool definitions and ask for a check. It:
 
 1. runs the CLI (via `uvx`, so nothing to install if you have [uv](https://docs.astral.sh/uv/)) and reports both grades plus the top five findings, in terms of what breaks for the agent;
 2. shows the `--diff` for the mechanical fixes and applies them on your yes;
 3. writes the judgment fixes the CLI can't (tool and parameter descriptions, actionable error messages, stdout writes on a stdio server) after reading what each tool actually does, never inventing behavior;
 4. re-scans and shows before → after, then offers `init-action` to keep it checked on every PR.
 
-**Fixing someone else's server: `fix-upstream`.** In a local clone of a third-party MCP server, run `/mcp-doctor:fix-upstream` (or ask Claude to "draft a PR for this finding"). It turns a null-default finding into a pull-request draft a maintainer can merge: it first checks for an existing issue or PR and the repo's contribution rules, skips fixtures, examples and unregistered functions, writes a regression test that fails before the fix and passes after, and runs the repo's own tests before and after. It stops at a local branch plus a PR description in the repo's template. It never pushes or posts; you review and send. Patches over ~30 parameters become an issue draft instead. On the code from before 15 merged upstream null-default fixes, it changed the same parameters the maintainers merged in all 15 ([v1.19.0 release notes](https://github.com/vishalhabib99/mcp-doctor/releases/tag/v1.19.0)).
+**Fixing someone else's server: `fix-upstream`.** In a local clone of a third-party MCP server, call the `fix-upstream` skill (`/mcp-doctor:fix-upstream` in Claude Code), or ask the agent to "draft a PR for this finding". It turns a null-default finding into a pull-request draft a maintainer can merge: it first checks for an existing issue or PR and the repo's contribution rules, skips fixtures, examples and unregistered functions, writes a regression test that fails before the fix and passes after, and runs the repo's own tests before and after. It stops at a local branch plus a PR description in the repo's template. It never pushes or posts; you review and send. Patches over ~30 parameters become an issue draft instead. On the code from before 15 merged upstream null-default fixes, it changed the same parameters the maintainers merged in all 15 ([v1.19.0 release notes](https://github.com/vishalhabib99/mcp-doctor/releases/tag/v1.19.0)).
 
 Security findings are explained, not silently rewritten. The plugin lives in [`plugin/`](plugin/) and ships with an eval suite in [`plugin/evals/`](plugin/evals/): it checks when the skill should and shouldn't fire, that it reports the real grades, and that it doesn't "fix" a clean server or write tool descriptions the code doesn't back up.
 
@@ -548,9 +569,9 @@ A thirtieth pass closed an already-documented, real known limitation rather than
 - [x] GitHub Action for one-line CI integration
 - [x] `--fix` for the genuinely mechanical stuff (bare `except:`, fully-undocumented `Args:` stubs) — deliberately does *not* auto-wrap function bodies in try/except; generating a correct wrapper for arbitrary code (preserving return semantics, control flow) needs more judgment than a mechanical pass should take on
 - [x] Go server support — the official `modelcontextprotocol/go-sdk`'s `AddTool` style (explicit and struct-tag-inferred schemas) and `mark3labs/mcp-go`'s older fluent-builder style
-- [x] Claude Code plugin — scan and fix from inside the editor, with an eval suite
+- [x] Plugin for Claude Code, Codex and Cursor — scan and fix from inside the editor, with an eval suite (run in Claude Code)
 - [x] Runtime checks in the same tool — `fuzz`, `fuzz --truth`, `verdict` and the `session` wrapper (formerly mcp-fuzz, mcp-reality-check and mcp-trust-check), and the Action runs them with `run:`
-- [x] Live guard for agents — `guard` for MCP servers, `guard hook` for Claude Code's own tools
+- [x] Live guard for agents — `guard` for MCP servers, `guard hook` for Claude Code's, Codex's and Cursor's own tools
 - [x] `guard` over HTTP (`--url`)
 - [x] `--diff-against` for TypeScript and Go
 - [ ] `--fix` for TypeScript and Go: deliberately not planned yet. The mechanical fixes (nullable `None` defaults, bare `except:`) are Python bugs; the only TS candidate is a `TODO` description placeholder, which the Action already leaves off by default

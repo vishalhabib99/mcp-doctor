@@ -9,7 +9,7 @@ allowed-tools: Bash(mcp-doctor *), Read, Grep, Glob
 
 Turn one mcp-doctor finding in someone else's MCP server into a pull-request draft a maintainer is likely to merge. The bar is that the user would send it unchanged. **A wrong PR costs more than no PR**: it wastes a stranger's time and spends the user's reputation. When in doubt, stop and say why.
 
-Target: `$ARGUMENTS` if given, else the current directory. It must be a git clone of a repo the user doesn't own. If it's the user's own server, use the `mcp-doctor` skill instead.
+Target: the path the user gave (`$ARGUMENTS` in Claude Code), else the current directory. It must be a git clone of a repo the user doesn't own. If it's the user's own server, use the `mcp-doctor` skill instead.
 
 Runner: as in the `mcp-doctor` skill (`mcp-doctor`, else `uvx --from mcp-server-lint mcp-doctor`, else `pipx run --spec mcp-server-lint mcp-doctor`), called below `MCPD`. This skill needs `--fix-only`; if `MCPD --help` doesn't list it, ask the user to upgrade `mcp-server-lint` and stop.
 

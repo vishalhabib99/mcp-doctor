@@ -1,4 +1,7 @@
-"""`mcp-doctor guard hook`: guard for a coding agent's own tools, via Claude Code hooks.
+"""`mcp-doctor guard hook`: guard for a coding agent's own tools, via its hooks.
+
+Claude Code, Codex and Cursor each send their own hook events; `--client`
+picks the format (Claude Code when it's left out and the event doesn't say).
 
 The MCP proxy only sees MCP tools. A coding agent also reads files, runs shell
 commands and fetches pages with built-in tools, and that is where the
@@ -16,10 +19,12 @@ the session use, and before a call:
 
 "Holds" means the call goes to the user to approve ("ask"); where nobody is there
 to ask (bypassPermissions, dontAsk, auto) it is denied with the reason, which the
-agent reads. MCP_DOCTOR_GUARD_DECISION=ask|deny overrides. Any error in here
-lets the call through: a guard bug must never cost the agent its work.
+agent reads. MCP_DOCTOR_GUARD_DECISION=ask|deny overrides. Codex hooks can't ask
+(an "ask" lets the call run), so there it is always denied; Cursor asks for shell
+and MCP calls and denies file writes, where its hooks can't ask either. Any error
+in here lets the call through: a guard bug must never cost the agent its work.
 
-    mcp-doctor guard hook    (reads the hook's JSON on stdin)
+    mcp-doctor guard hook [--client claude|codex|cursor]   (reads the hook's JSON on stdin)
 """
 from __future__ import annotations
 
@@ -54,6 +59,13 @@ _GIT_EXEC_KEY = re.compile(
 )
 _FILE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 _UNATTENDED = {"bypassPermissions", "dontAsk", "auto"}
+# Codex sends its file edits as one patch: `*** Add File: path`, `*** Update File: path`.
+_PATCH_PATH = re.compile(r"^\*\*\* (?:Add File|Update File|Move to): (.+)$", re.M)
+_CURSOR_EVENTS = {
+    "preToolUse": "PreToolUse", "beforeShellExecution": "PreToolUse", "beforeMCPExecution": "PreToolUse",
+    "postToolUse": "PostToolUse", "afterShellExecution": "PostToolUse", "afterMCPExecution": "PostToolUse",
+}
+_CURSOR_WEB = re.compile(r"web|fetch|brows", re.I)
 
 
 def mcp_tool(name: str) -> str | None:
@@ -72,6 +84,9 @@ def outside(tool_name: str, tool_input: dict) -> bool:
 
 def exec_target(tool_name: str, tool_input: dict) -> str | None:
     """The run-later file this call writes, if it writes one."""
+    patch = str(tool_input.get("command", "")) if tool_name == "apply_patch" or tool_name in _FILE_TOOLS else ""
+    if "*** Begin Patch" in patch:
+        return next((p.strip() for p in _PATCH_PATH.findall(patch) if _EXEC_PATH.search("/" + p.strip())), None)
     if tool_name in _FILE_TOOLS:
         path = str(tool_input.get("file_path") or tool_input.get("notebook_path") or "")
         return path if _EXEC_PATH.search("/" + path) else None
@@ -127,30 +142,98 @@ def after(event: dict, watch: LeakWatch) -> None:
     watch.record_text(label, scope, text, outside(name, args))
 
 
-def decision(event: dict) -> str:
+def client_of(event: dict, client: str | None = None) -> str:
+    if client in ("claude", "codex", "cursor"):
+        return client
+    if "cursor_version" in event or event.get("hook_event_name") in _CURSOR_EVENTS:
+        return "cursor"
+    if "turn_id" in event or event.get("tool_name") == "apply_patch":
+        return "codex"
+    return "claude"
+
+
+def _json_arg(value: Any) -> Any:
+    """Cursor sends some tool inputs and outputs as JSON strings."""
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except ValueError:
+            return value
+    return value
+
+
+def from_cursor(event: dict) -> dict:
+    """A Cursor hook event in Claude Code's terms: event name, tool name and input."""
+    kind = event.get("hook_event_name", "")
+    if kind in ("beforeShellExecution", "afterShellExecution"):
+        name, args, response = "Bash", {"command": event.get("command", "")}, event.get("output")
+    elif kind in ("beforeMCPExecution", "afterMCPExecution"):
+        server = re.sub(r"\W+", "_", str(event.get("mcp_server_name") or "server"))
+        name = f"mcp__{server}__{event.get('tool_name', '')}"
+        args, response = _json_arg(event.get("tool_input")), _json_arg(event.get("result_json"))
+    else:
+        tool, args, response = str(event.get("tool_name", "")), _json_arg(event.get("tool_input")), _json_arg(event.get("tool_output"))
+        args = args if isinstance(args, dict) else {}
+        if tool == "Shell":
+            name = "Bash"
+        elif tool.startswith("MCP:"):
+            name = f"mcp__cursor__{tool[4:]}"
+        elif _CURSOR_WEB.search(tool):
+            name = "WebFetch"
+        else:
+            name = tool
+        path = next((args[k] for k in ("file_path", "path", "target_file", "filePath", "relative_workspace_path") if args.get(k)), None)
+        if path and "file_path" not in args:
+            args = {**args, "file_path": path}
+    return {"hook_event_name": _CURSOR_EVENTS.get(kind, kind), "tool_name": name,
+            "tool_input": args if isinstance(args, dict) else {}, "tool_response": response, "cursor_event": kind}
+
+
+def decision(event: dict, client: str = "claude") -> str:
+    if client == "codex":
+        return "deny"  # Codex hooks can't ask: an "ask" fails open
+    if client == "cursor":
+        # Cursor asks for shell and MCP calls; on other tools its hooks can't ask.
+        return "ask" if event.get("cursor_event") in ("beforeShellExecution", "beforeMCPExecution") else "deny"
     forced = os.environ.get("MCP_DOCTOR_GUARD_DECISION")
     if forced in ("ask", "deny"):
         return forced
     return "deny" if event.get("permission_mode") in _UNATTENDED else "ask"
 
 
-def run(event: dict, watch: LeakWatch | None = None) -> dict | None:
+def _cursor_permission_hook(event: dict) -> bool:
+    return event.get("hook_event_name") in ("preToolUse", "beforeShellExecution", "beforeMCPExecution")
+
+
+def run(event: dict, watch: LeakWatch | None = None, client: str | None = None) -> dict | None:
+    client = client_of(event, client)
+    allow = {"permission": "allow"} if client == "cursor" and _cursor_permission_hook(event) else None
+    if client == "cursor":
+        if event.get("hook_event_name") == "preToolUse" and str(event.get("tool_name", "")).startswith(("Shell", "MCP:")):
+            return allow  # beforeShellExecution / beforeMCPExecution check these, and can ask
+        event = from_cursor(event)
+    args = event.get("tool_input")
+    if isinstance(args, dict) and isinstance(args.get("command"), list):  # Codex can send argv
+        event = {**event, "tool_input": {**args, "command": " ".join(map(str, args["command"]))}}
     watch = watch or LeakWatch()
     kind = event.get("hook_event_name")
     if kind == "PostToolUse":
         after(event, watch)
         return None
     if kind != "PreToolUse":
-        return None
+        return allow
     findings = before(event, watch)
     if not findings:
-        return None
+        return allow
     for f in findings:
         print(f"[mcp-doctor guard] {event.get('tool_name')}: {f.check}: {f.message}", file=sys.stderr)
+    reason = " ".join(PREFIX + f.message for f in findings)
+    if client == "cursor":
+        return {"permission": decision(event, client), "user_message": reason, "agent_message": reason}
     return {"hookSpecificOutput": {
         "hookEventName": "PreToolUse",
-        "permissionDecision": decision(event),
-        "permissionDecisionReason": " ".join(PREFIX + f.message for f in findings),
+        "permissionDecision": decision(event, client),
+        "permissionDecisionReason": reason,
     }}
 
 
@@ -158,11 +241,20 @@ def main(argv: list[str]) -> int:
     if argv and argv[0] in ("-h", "--help"):
         print(__doc__.strip())
         return 0
+    client = None
+    if "--client" in argv[:-1]:
+        client = argv[argv.index("--client") + 1]
+    elif any(a.startswith("--client=") for a in argv):
+        client = next(a for a in argv if a.startswith("--client="))[len("--client="):]
+    event: Any = None
     try:
-        out = run(json.load(sys.stdin))
+        event = json.load(sys.stdin)
+        out = run(event, client=client)
     except Exception as e:  # never block the agent on our own failure
         print(f"[mcp-doctor guard] hook error: {e!r}", file=sys.stderr)
-        return 0
+        # A Cursor permission hook that prints nothing valid blocks the call.
+        cursor = client == "cursor" or (isinstance(event, dict) and client_of(event, client) == "cursor")
+        out = {"permission": "allow"} if cursor and (not isinstance(event, dict) or _cursor_permission_hook(event)) else None
     if out:
         print(json.dumps(out))
     return 0

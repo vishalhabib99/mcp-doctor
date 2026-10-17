@@ -1,0 +1,20 @@
+{
+  "name": "mcp-doctor-guard",
+  "version": "0.2.0",
+  "description": "mcp-doctor guard for the agent's own tools: holds a secret about to be sent out, or a write to a file that runs code later (.git/hooks, .git/config, shell rc, agent settings), after the session read outside content. Hashes only, no network, nothing leaves your machine.",
+  "author": {
+    "name": "Vishal Habib"
+  },
+  "homepage": "https://github.com/vishalhabib99/mcp-doctor",
+  "repository": "https://github.com/vishalhabib99/mcp-doctor",
+  "license": "MIT",
+  "keywords": [
+    "security",
+    "prompt-injection",
+    "hooks",
+    "agents",
+    "mcp"
+  ],
+  "logo": ".cursor-plugin/icon.png",
+  "hooks": "./hooks/cursor.json"
+}

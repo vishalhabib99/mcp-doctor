@@ -1,0 +1,23 @@
+{
+  "name": "mcp-doctor",
+  "owner": {
+    "name": "Vishal Habib"
+  },
+  "metadata": {
+    "description": "mcp-doctor: lint, fix, fuzz and guard MCP servers from inside Cursor"
+  },
+  "plugins": [
+    {
+      "name": "mcp-doctor",
+      "source": "plugin",
+      "description": "Lint the MCP server you're building for what breaks the agent calling it, fix what it finds, and, with your OK, fuzz it for a SHIP / FIX-FIRST / BLOCK verdict. Python, TypeScript and Go.",
+      "category": "development"
+    },
+    {
+      "name": "mcp-doctor-guard",
+      "source": "plugin-guard",
+      "description": "Guard Cursor's own tools: hold a secret about to be sent out, or a write to .git hooks/config or shell rc files, after the session read outside content.",
+      "category": "security"
+    }
+  ]
+}
