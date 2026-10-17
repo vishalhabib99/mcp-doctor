@@ -1,6 +1,9 @@
 """Example MCP server that fails most of mcp-doctor's checks — used in tests/README as the 'before' case."""
 
-from mcp.server.fastmcp import FastMCP
+try:  # mcp 2.x renamed FastMCP to MCPServer
+    from mcp.server.mcpserver import MCPServer as FastMCP
+except ImportError:  # mcp 1.x
+    from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("bad-example")
 

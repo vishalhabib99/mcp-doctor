@@ -55,30 +55,31 @@ mcp-doctor report
 Quality:  13%  Grade: F  (2 tool(s) found)
 Security: 100%  Grade: A
 
-  [FAIL] do_thing (server.py:9)
+  [FAIL] do_thing (server.py:12)
       ERROR  Tool has no description. An agent cannot decide when to call this.
       WARNING  2/2 parameters have no type annotation.
-      WARNING  Parameters aren't documented in an Args: section — the model only sees names, not intent.
-      WARNING  No try/except — an exception here will raise a raw traceback back through the MCP transport.
-  [FAIL] run (server.py:15)
+      WARNING  Parameters aren't documented — no Args:/:param: docstring section and no per-parameter Field(description=...) — the model only sees …
+      WARNING  No try/except in this function's own body. FastMCP still catches an unhandled exception here and returns a structured error rather …
+  [FAIL] run (server.py:18)
       ERROR  Tool has no description. An agent cannot decide when to call this.
       WARNING  1/1 parameters have no type annotation.
-      WARNING  Parameters aren't documented in an Args: section — the model only sees names, not intent.
+      WARNING  Parameters aren't documented — no Args:/:param: docstring section and no per-parameter Field(description=...) — the model only sees …
       ERROR  Bare 'except:' swallows all errors including cancellation — catch specific exceptions.
 
 Repo-level
   ERROR  No README found.
   WARNING  No LICENSE file — undermines adoption.
   WARNING  No test files found.
-  WARNING  No pyproject.toml/requirements.txt/setup.py — dependencies aren't pinned.
+  WARNING  No pyproject.toml/requirements.txt/setup.py/package.json/go.mod — dependencies aren't pinned.
 ```
+
 ```
 $ mcp-doctor examples/good_server
 mcp-doctor report
 Quality:  100%  Grade: A  (1 tool(s) found)
 Security: 100%  Grade: A
 
-  [OK] get_forecast (server.py:9)
+  [OK] get_forecast (server.py:12)
 ```
 
 ```bash

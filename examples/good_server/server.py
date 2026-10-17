@@ -1,6 +1,9 @@
 """Example MCP server that passes mcp-doctor's checks."""
 
-from mcp.server.fastmcp import FastMCP
+try:  # mcp 2.x renamed FastMCP to MCPServer
+    from mcp.server.mcpserver import MCPServer as FastMCP
+except ImportError:  # mcp 1.x
+    from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("weather")
 
