@@ -1366,7 +1366,15 @@ def _collect_tool_decorator_names(trees: list[tuple[str, ast.Module]]) -> set[st
         n for _, tree in trees for cls in ast.walk(tree) if isinstance(cls, ast.ClassDef)
         for n in cls.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
     ]
-    candidates = [fn for _, fn in top_level] + methods
+    # A factory can live inside the function that builds the server, closing
+    # over it: retentioneering's `def _tool(): def decorator(fn): ...
+    # return mcp.tool()(wrapper)` inside `build_server()` (12 tools, scanned
+    # as one tool named `wrapper` before).
+    nested_defs = [
+        n for _, top in top_level for n in ast.walk(top)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n is not top
+    ]
+    candidates = [fn for _, fn in top_level] + methods + nested_defs
     for fn in candidates:
         if fn.name not in FASTMCP_DECORATOR_NAMES and _returns_registering_closure(fn):
             names.add(fn.name)
@@ -1973,6 +1981,23 @@ def _registration_sites(node: ast.Call, tool_classes: set[str]) -> tuple[ast.exp
     return None
 
 
+def _is_wraps_forwarder(fn: FuncDef) -> bool:
+    """`@wraps(fn) def wrapper(*args, **kwargs)`: the generic forwarder a
+    decorator registers in place of the function it wraps. Its name and
+    signature are the wrapped function's at runtime, so it isn't a tool of
+    its own; the functions decorated with that decorator are."""
+    a = fn.args
+    if a.args or a.posonlyargs or a.kwonlyargs or not (a.vararg or a.kwarg):
+        return False
+    for dec in fn.decorator_list:
+        target = dec.func if isinstance(dec, ast.Call) else dec
+        if (isinstance(target, ast.Name) and target.id == "wraps") or (
+            isinstance(target, ast.Attribute) and target.attr == "wraps"
+        ):
+            return True
+    return False
+
+
 def _find_direct_call_tools(
     tree: ast.Module,
     file: str,
@@ -2073,6 +2098,8 @@ def _find_direct_call_tools(
             resolved = _resolve_function_ref(one_ref, node, tree, file, repo)
             if resolved is not None:
                 fn_node, fn_file = resolved
+                if name_override is None and _is_wraps_forwarder(fn_node):
+                    continue
                 excluded_args = _kwarg_str_list(kw_call, "exclude_args")
                 finding = _analyze_function_as_tool(
                     fn_node, fn_file, description_override or None, alias_registry, name_override,

@@ -3248,3 +3248,66 @@ def test_fastmcp_standalone_tool_decorator_still_counts(tmp_path):
             return x
     """)
     assert [t.name for t in analyze_repo(tmp_path).tools] == ["ping"]
+
+
+def test_decorator_factory_nested_in_the_server_builder_counts(tmp_path):
+    # Bug #120, from retentioneering/retentioneering-tools: a `_tool()`
+    # factory defined inside `build_server()` returns a decorator that
+    # registers a `@wraps(fn)` forwarder with `mcp.tool()(wrapper)`. The 12
+    # decorated functions are the tools; the forwarder was scanned as one
+    # tool named `wrapper`.
+    write(tmp_path, "server.py", """
+        from functools import wraps
+        from mcp.server.fastmcp import FastMCP
+
+        def build_server(session):
+            mcp = FastMCP("x")
+
+            def _tool():
+                def decorator(fn):
+                    @wraps(fn)
+                    def wrapper(*args, **kwargs):
+                        with session.lock:
+                            return fn(*args, **kwargs)
+
+                    return mcp.tool()(wrapper)
+
+                return decorator
+
+            @_tool()
+            def load_data(path: str) -> str:
+                \"\"\"Load a CSV.
+
+                Args:
+                    path: CSV file path.
+                \"\"\"
+                return path
+
+            @_tool()
+            def describe() -> str:
+                \"\"\"Describe the stream.\"\"\"
+                return ""
+
+            return mcp
+    """)
+    assert sorted(t.name for t in analyze_repo(tmp_path).tools) == ["describe", "load_data"]
+
+
+def test_by_hand_registration_of_a_plain_function_still_counts(tmp_path):
+    # Only a `@wraps` forwarder taking just *args/**kwargs is skipped.
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+
+        mcp = FastMCP("x")
+
+        def get_regions(project: str) -> str:
+            \"\"\"List regions.
+
+            Args:
+                project: Project id.
+            \"\"\"
+            return project
+
+        mcp.tool()(get_regions)
+    """)
+    assert [t.name for t in analyze_repo(tmp_path).tools] == ["get_regions"]
