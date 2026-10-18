@@ -113,6 +113,33 @@ def test_report_scores_crash_resilience_without_penalizing_valid_call_errors(fuz
     }
 
 
+
+def test_bare_sdk_error_is_flagged_as_a_hidden_message(fuzz_report):
+    # mcp 2.x keeps an anticipated failure's text after "Error executing tool
+    # <name>" and drops an unexpected exception's. always_crashes raises a
+    # plain RuntimeError, so its valid call comes back bare; its schema
+    # rejections keep their pydantic message and must not be flagged.
+    tool = _tool(fuzz_report, "always_crashes")
+    by_case = {o.case: o for o in tool.outcomes}
+    assert by_case["valid"].detail == "Error executing tool always_crashes"
+    assert by_case["valid"].hidden_message
+    assert not by_case["missing_required"].hidden_message
+    assert not any(o.hidden_message for o in _tool(fuzz_report, "well_behaved").outcomes)
+
+
+def test_hidden_error_messages_are_reported_but_not_scored(fuzz_report):
+    from mcp_doctor.fuzz.report import render_text, to_dict
+
+    report = build_report(fuzz_report)
+    assert report.hidden_errors.tools["always_crashes"] == ["valid"]
+    assert "well_behaved" not in report.hidden_errors.tools
+    assert report.grade == "A"  # unchanged: a hidden message is not a crash
+    text = render_text(report)
+    assert "Hidden error messages:" in text
+    assert "always_crashes — " in text and "error message hidden" in text
+    hidden = {t["name"]: t["cases"] for t in to_dict(report)["hidden_errors"]["tools"]}
+    assert hidden["always_crashes"] == ["valid"]
+
 ENV_REQUIRED_SERVER = str(Path(__file__).parent / "fixtures" / "env_required_server.py")
 
 

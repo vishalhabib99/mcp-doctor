@@ -201,6 +201,16 @@ class CrossResourceSummary:
 
 
 @dataclass
+class HiddenErrorSummary:
+    # Unscored, like SequenceSummary: an error with no message isn't a
+    # crash (the call completed and said it failed), but the model can't
+    # tell a bad argument from a missing record from a server bug, so it
+    # can't recover. `tools` maps each affected tool to the cases
+    # ("valid", "missing_required", "wrong_type") that came back bare.
+    tools: dict[str, list[str]]
+
+
+@dataclass
 class Report:
     server_command: str
     connect_error: str | None
@@ -219,6 +229,7 @@ class Report:
     concurrency: ConcurrencySummary
     sequence: SequenceSummary
     cross_resource: CrossResourceSummary
+    hidden_errors: HiddenErrorSummary = field(default_factory=lambda: HiddenErrorSummary(tools={}))
 
 
 def _grade_for_percent(pct: float) -> str:
@@ -301,6 +312,11 @@ def build_report(
         concurrency=_compute_concurrency(tool_reports),
         sequence=_compute_sequence(raw.sequence_results),
         cross_resource=_compute_cross_resource(raw.cross_resource_results),
+        hidden_errors=HiddenErrorSummary(tools={
+            tool.name: sorted({o.case for o in tool.outcomes if o.hidden_message})
+            for tool in raw.tools
+            if tool.tested and any(o.hidden_message for o in tool.outcomes)
+        }),
     )
 
 
@@ -528,6 +544,14 @@ def render_text(report: Report) -> str:
             f"Cross-resource lifecycle: {cr.pairs_detected} parent/child pair(s) detected, "
             f"{cr.orphaned_child_count} still-readable-after-parent-delete observation(s) — not scored, see below"
         )
+
+    hidden = report.hidden_errors.tools
+    if hidden:
+        lines.append(
+            f"Hidden error messages: {len(hidden)} tool(s) answered an error with only "
+            "\"Error executing tool <name>\", so the model gets no reason — not scored. "
+            "Under mcp 2.x, raise ToolError (or return an is_error result) to send the message."
+        )
     lines.append("")
 
     slow_by_name = {f.name: f for f in report.latency.slow_tools}
@@ -554,7 +578,10 @@ def render_text(report: Report) -> str:
             flags.append("bloated")
         if concurrency_flag:
             flags.append("unsafe under concurrency")
-        marker = "FAIL" if (tool.crashes or tool.timeouts or concurrency_flag) else ("WARN" if (tool.valid_call_issue or slow_flag or bloat_flag) else "ok")
+        hidden_flag = tool.name in hidden
+        if hidden_flag:
+            flags.append("error message hidden")
+        marker = "FAIL" if (tool.crashes or tool.timeouts or concurrency_flag) else ("WARN" if (tool.valid_call_issue or slow_flag or bloat_flag or hidden_flag) else "ok")
         summary = f" — {'; '.join(flags)}" if flags else ""
         lines.append(f"  [{marker}] {tool.name}{summary}")
         for outcome in tool.crashes + tool.timeouts:
@@ -670,6 +697,9 @@ def to_dict(report: Report) -> dict:
                 }
                 for g in report.sequence.groups
             ],
+        },
+        "hidden_errors": {
+            "tools": [{"name": name, "cases": cases} for name, cases in report.hidden_errors.tools.items()],
         },
         "cross_resource": {
             "pairs_detected": report.cross_resource.pairs_detected,

@@ -96,6 +96,12 @@ class CallOutcome:
     # to extract a real resource id from, where a 300-char truncation could
     # cut off the id field on a verbose create response.
     full_text: str = ""
+    # An is_error response that is only the SDK's "Error executing tool
+    # <name>" prefix. The SDK (mcp 2.x) keeps an anticipated failure's text
+    # after that prefix and drops an unexpected exception's, so the model
+    # gets no reason at all. Found on cyberchitta/llm-context.py, whose
+    # "context is stale" and "bad path" messages never reached the model.
+    hidden_message: bool = False
 
 
 @dataclass
@@ -372,7 +378,10 @@ async def _call_with_outcome(
         full_text = "; ".join(
             c.text for c in result.content if isinstance(c, types.TextContent)
         )
-        return CallOutcome(case, property_name, outcome, full_text[:300], response_chars=len(full_text), full_text=full_text)
+        return CallOutcome(
+            case, property_name, outcome, full_text[:300], response_chars=len(full_text), full_text=full_text,
+            hidden_message=full_text.strip() == f"Error executing tool {tool_name}",
+        )
 
     full_text = "; ".join(
         c.text for c in result.content if isinstance(c, types.TextContent)
