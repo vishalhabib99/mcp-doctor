@@ -317,3 +317,41 @@ def test_example_servers():
     bad = analyze_repo(examples / "bad_server_rs")
     assert {i.check for t in bad.tools for i in t.issues} == {"description", "param_docs"}
     assert "secrets" in {i.check for i in bad.repo_issues}
+
+
+def test_grammar_the_runtime_cannot_load_skips_rust(tmp_path, monkeypatch):
+    # Pyodide's tree-sitter rejects ABI-15 grammars ("Incompatible Language
+    # version 15"); that took down the whole /check/ scan of any repo with .rs files.
+    import mcp_doctor.rs_analyzer as rs
+
+    def incompatible(_ptr):
+        raise ValueError("Incompatible Language version 15. Must be between 13 and 14")
+
+    monkeypatch.setattr(rs, "Language", incompatible)
+    write(tmp_path, "Cargo.toml", CARGO)
+    write(tmp_path, "src/main.rs", 'const API_KEY: &str = "sk-live-1234567890abcdef";\n')
+    assert rs.find_rust_tools(tmp_path) == ([], [])
+    assert rs.test_line_ranges(b"fn main() {}") == []
+    assert analyze_repo(tmp_path).tools == []
+
+
+def test_tool_name_from_the_impls_own_name_method(tmp_path):
+    # yvgude/lean-ctx: `tool_def(self.name(), "...", json!(...))` in an
+    # `impl McpTool for X` whose `fn name` returns a literal.
+    tools = server(tmp_path, """
+        impl McpTool for CtxMemoryTool {
+            fn name(&self) -> &'static str {
+                "ctx_memory"
+            }
+            fn tool_def(&self) -> Tool {
+                tool_def(self.name(), "Store and retrieve durable facts.", json!({"type": "object"}))
+            }
+        }
+        impl McpTool for Computed {
+            fn name(&self) -> &'static str { self.inner.name() }
+            fn tool_def(&self) -> Tool {
+                tool_def(self.name(), "Not resolvable statically.", json!({"type": "object"}))
+            }
+        }
+        """)
+    assert set(tools) == {"ctx_memory"}

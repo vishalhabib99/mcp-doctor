@@ -8,7 +8,7 @@ properties of a single snapshot, this is a property of *two* snapshots
 compared — a fundamentally different kind of question, with its own
 `--fail-on-breaking-change` exit code instead of `--fail-under`.
 
-Python, TypeScript and Go since v1.27.0. A tool's parameters are compared only
+Python, TypeScript and Go since v1.27.0, Rust since v1.30.0. A tool's parameters are compared only
 when both runs actually read them (`params_tracked`): a TS/Go tool in a
 baseline written before v1.27.0, or one whose schema couldn't be resolved,
 is skipped rather than compared as if it had no parameters. Type changes aren't

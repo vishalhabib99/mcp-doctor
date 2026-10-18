@@ -551,6 +551,33 @@ def _call_args(call, src: bytes):
     return _text(func, src), args, call
 
 
+def _self_method_string(nodes: list, at, src: bytes) -> str | None:
+    """`self.name()` where the enclosing impl's `fn name(&self) -> &'static str`
+    returns one string literal — yvgude/lean-ctx's `McpTool` trait passes every
+    tool's name to `tool_def` this way."""
+    if len(nodes) != 1 or nodes[0].type != "call_expression":
+        return None
+    func = nodes[0].child_by_field_name("function")
+    args = nodes[0].child_by_field_name("arguments")
+    if (func is None or func.type != "field_expression" or args is None or args.named_child_count
+            or _text(func.child_by_field_name("value"), src) != "self"):
+        return None
+    method = _text(func.child_by_field_name("field"), src)
+    impl = at.parent
+    while impl is not None and impl.type != "impl_item":
+        impl = impl.parent
+    body = impl.child_by_field_name("body") if impl is not None else None
+    for fn in body.named_children if body is not None else []:
+        name = fn.child_by_field_name("name") if fn.type == "function_item" else None
+        if name is None or _text(name, src) != method:
+            continue
+        block = fn.child_by_field_name("body")
+        exprs = [c for c in block.named_children if c.type not in ("line_comment", "block_comment")]
+        if len(exprs) == 1:
+            return _string_value(exprs[0], src)
+    return None
+
+
 def _constructor_finding(call, src: bytes, rel: str, consts: dict[str, str], uses_rmcp: bool) -> ToolFinding | None:
     """rmcp's own `Tool::new(name, description, schema)`, or a project helper
     with the same argument order whose name says tool and whose schema is a
@@ -570,6 +597,8 @@ def _constructor_finding(call, src: bytes, rel: str, consts: dict[str, str], use
     elif not ("tool" in path[-1].lower() and schema_bodies):
         return None
     name = _value_string(args[0], src, consts)
+    if not isinstance(name, str):
+        name = _self_method_string(args[0], node, src)
     if not isinstance(name, str):
         return None
     description = _value_string(args[1], src, consts)
@@ -616,6 +645,16 @@ def _cargo_uses_rmcp(root: Path) -> bool:
     return False
 
 
+def _parser():
+    """None when the installed tree-sitter can't load this grammar version
+    (Pyodide's reads ABI 13-14; tree-sitter-rust 0.24 is ABI 15): Rust is then
+    skipped, not a crash for the whole scan."""
+    try:
+        return Parser(Language(rust_language()))
+    except ValueError:
+        return None
+
+
 def _test_ranges(file_root, src: bytes) -> list[tuple[int, int]]:
     """Byte ranges of `#[cfg(test)]` modules, functions and impls."""
     return [
@@ -628,7 +667,10 @@ def test_line_ranges(src: bytes) -> list[tuple[int, int]]:
     """1-based line ranges of `#[cfg(test)]` code, for the repo-wide secrets scan."""
     if not RUST_AVAILABLE:
         return []
-    file_root = Parser(Language(rust_language())).parse(src).root_node
+    parser = _parser()
+    if parser is None:
+        return []
+    file_root = parser.parse(src).root_node
     ranges = []
     for start, end in _test_ranges(file_root, src):
         ranges.append((src.count(b"\n", 0, start) + 1, src.count(b"\n", 0, end) + 1))
@@ -653,7 +695,9 @@ def find_rust_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
     if not files:
         return [], []
 
-    parser = Parser(Language(rust_language()))
+    parser = _parser()
+    if parser is None:
+        return [], []
     parsed: list[tuple[str, "Node", bytes]] = []
     for f in files:
         try:
