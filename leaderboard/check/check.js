@@ -137,7 +137,7 @@ function render(target, report, meta) {
     html += `<div class="grades">
       ${gradeCard("Quality", report.grade, report.percent, "Can an agent tell what each tool does?")}
       ${gradeCard("Security", report.security_grade, report.security_percent, "Risky patterns in code an agent can reach")}
-      <div class="grade-card"><div class="label">Tools found</div><div class="value">${tools}</div><div class="label">Python · TypeScript · Go</div></div>
+      <div class="grade-card"><div class="label">Tools found</div><div class="value">${tools}</div><div class="label">Python · TypeScript · Go · Rust</div></div>
     </div>`;
     if (tsGap) html += `<div class="note">This repo also has TypeScript files. The in-browser check doesn't read TypeScript tools yet, so those aren't counted here; the command line version does.</div>`;
   }
