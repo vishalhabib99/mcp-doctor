@@ -1428,6 +1428,28 @@ def _returns_registering_closure(fn: FuncDef) -> bool:
     )
 
 
+# Agent frameworks whose own bare `@tool` builds a tool for that framework,
+# not an MCP server: a LangChain `@tool` in opena2a-org/agent-identity-management's
+# examples and a CrewAI `@tool("...")` in ababdotai/awesome-agent-quickstart were
+# graded as MCP tools (2026-10-18 grade check). FastMCP 3's standalone
+# `from fastmcp.tools import tool` still counts.
+_NON_MCP_TOOL_MODULES = (
+    "langchain", "langchain_core", "langchain_community", "langgraph", "crewai", "crewai_tools",
+    "smolagents", "strands", "llama_index", "pydantic_ai", "autogen", "autogen_core",
+    "google.adk", "haystack", "agents", "agno", "phi",
+)
+
+
+def _foreign_tool_names(tree: ast.Module) -> set[str]:
+    """Local names bound to a non-MCP framework's `tool` decorator."""
+    names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            if any(node.module == m or node.module.startswith(m + ".") for m in _NON_MCP_TOOL_MODULES):
+                names.update(a.asname or a.name for a in node.names if a.name == "tool")
+    return names
+
+
 def _find_fastmcp_tools(
     tree: ast.Module,
     file: str,
@@ -1437,10 +1459,14 @@ def _find_fastmcp_tools(
     decorator_names: set[str] = FASTMCP_DECORATOR_NAMES,
 ) -> list[ToolFinding]:
     findings = []
+    foreign = _foreign_tool_names(tree)
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         for dec in node.decorator_list:
+            func = dec.func if isinstance(dec, ast.Call) else dec
+            if isinstance(func, ast.Name) and func.id in foreign:
+                continue
             call = _find_decorator_call(dec, decorator_names)
             if call is None:
                 # bare @mcp.tool with no parens still counts

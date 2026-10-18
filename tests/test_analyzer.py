@@ -2619,12 +2619,17 @@ def test_blank_line_then_dedent_still_ends_args_section(tmp_path):
 
 def test_langchain_tool_runtime_param_is_injected_not_undocumented(tmp_path):
     # Bug #77, from MODSetter/SurfSense: LangChain injects `runtime: ToolRuntime`
-    # and strips it from the schema, like FastMCP's Context.
+    # and strips it from the schema, like FastMCP's Context. Since bug #118 a
+    # LangChain `@tool` isn't an MCP tool at all (SurfSense's live in its chat
+    # agent; its MCP server is the separate FastMCP package surfsense_mcp/), so
+    # the case is a LangChain tool registered on a FastMCP server.
     write(tmp_path, "server.py", """
+        from fastmcp import FastMCP
         from langchain.tools import ToolRuntime
-        from langchain_core.tools import tool
 
-        @tool
+        mcp = FastMCP("x")
+
+        @mcp.tool
         async def send_email(to: str, body: str, runtime: ToolRuntime) -> str:
             \"\"\"Send an email.
 
@@ -3202,3 +3207,44 @@ def test_tool_module_named_like_a_test_without_sdk_import_is_scanned(tmp_path):
     )
     report = analyze_repo(tmp_path)
     assert [t.name for t in report.tools] == ["run_significance_test"]
+
+
+def test_langchain_and_crewai_tool_decorators_are_not_mcp_tools(tmp_path):
+    # Bug #118: a LangChain `@tool` (opena2a-org/agent-identity-management
+    # examples) and a CrewAI `@tool("...")` (ababdotai/awesome-agent-quickstart)
+    # were graded as MCP tools.
+    write(tmp_path, "lc_agent.py", """
+        from langchain_core.tools import tool
+
+        @tool
+        def update_todo(todo_id: int, status: str = None) -> str:
+            \"\"\"Update a todo.\"\"\"
+            return "ok"
+    """)
+    write(tmp_path, "crew_agent.py", """
+        from crewai.tools import tool as crew_tool
+
+        @crew_tool("Image generator")
+        def generate_image(prompt: str) -> str:
+            \"\"\"Generate an image.\"\"\"
+            return "ok"
+    """)
+    assert analyze_repo(tmp_path).tools == []
+
+
+def test_fastmcp_standalone_tool_decorator_still_counts(tmp_path):
+    write(tmp_path, "server.py", """
+        from fastmcp.tools import tool
+        from langchain_core.tools import tool as lc_tool
+
+        @tool
+        def ping(x: str) -> str:
+            \"\"\"Ping.\"\"\"
+            return x
+
+        @lc_tool
+        def not_mcp(x: str) -> str:
+            \"\"\"Not an MCP tool.\"\"\"
+            return x
+    """)
+    assert [t.name for t in analyze_repo(tmp_path).tools] == ["ping"]
