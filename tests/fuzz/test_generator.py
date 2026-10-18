@@ -145,3 +145,85 @@ def test_deeply_nested_schema_does_not_blow_recursion_limit():
     # No assertion on the exact value beyond the depth cutoff — the point is
     # that generation terminates instead of raising RecursionError.
     generate_valid_arguments(schema)
+
+
+# A FastMCP tool taking a Pydantic model gets exactly this shape: the model in
+# `$defs`, the parameter a bare `$ref`. Filling it with "test" made every such
+# tool's valid call fail (batch-5 hunt, fabio-rovai/open-ontologies).
+PYDANTIC_SCHEMA = {
+    "$defs": {
+        "Address": {
+            "properties": {"city": {"type": "string"}, "zip": {"type": "integer"}},
+            "required": ["city", "zip"],
+            "type": "object",
+        },
+        "Person": {
+            "properties": {
+                "name": {"type": "string"},
+                "address": {"$ref": "#/$defs/Address"},
+                "tags": {"default": [], "items": {"$ref": "#/$defs/Address"}, "type": "array"},
+            },
+            "required": ["name", "address"],
+            "type": "object",
+        },
+    },
+    "properties": {"person": {"$ref": "#/$defs/Person"}, "note": {"type": "string"}},
+    "required": ["person", "note"],
+    "type": "object",
+}
+
+
+def test_local_ref_is_resolved_into_a_real_object():
+    args = generate_valid_arguments(PYDANTIC_SCHEMA)
+    assert args["person"] == {"name": "test", "address": {"city": "test", "zip": 1}, "tags": []}
+
+
+def test_wrong_type_variant_covers_a_ref_parameter():
+    names = [name for name, _ in wrong_type_variants(PYDANTIC_SCHEMA)]
+    assert "person" in names
+    args = dict(wrong_type_variants(PYDANTIC_SCHEMA))["person"]
+    assert args["person"] == "not-an-object"
+
+
+def test_single_schema_allof_wrapper_and_sibling_default():
+    schema = {
+        "$defs": {"Mode": {"type": "string", "enum": ["fast", "slow"]}},
+        "properties": {
+            "mode": {"allOf": [{"$ref": "#/$defs/Mode"}], "description": "how"},
+            "level": {"$ref": "#/definitions/Level", "default": 3},
+        },
+        "definitions": {"Level": {"type": "integer"}},
+        "required": ["mode", "level"],
+    }
+    assert generate_valid_arguments(schema) == {"mode": "fast", "level": 3}
+
+
+def test_recursive_model_terminates_with_an_empty_child_list():
+    schema = {
+        "$defs": {
+            "Node": {
+                "properties": {
+                    "label": {"type": "string"},
+                    "children": {"items": {"$ref": "#/$defs/Node"}, "type": "array", "default": []},
+                },
+                "required": ["label", "children"],
+                "type": "object",
+            }
+        },
+        "properties": {"root": {"$ref": "#/$defs/Node"}},
+        "required": ["root"],
+    }
+    assert generate_valid_arguments(schema) == {"root": {"label": "test", "children": []}}
+
+
+def test_unresolvable_or_self_ref_does_not_raise():
+    schema = {
+        "properties": {
+            "a": {"$ref": "#/$defs/Missing"},
+            "b": {"$ref": "https://example.com/schema.json"},
+            "c": {"$ref": "#"},
+        },
+        "required": ["a", "b", "c"],
+    }
+    args = generate_valid_arguments(schema)
+    assert set(args) == {"a", "b", "c"}
