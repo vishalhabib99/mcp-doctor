@@ -35,7 +35,8 @@ from pathlib import Path
 from typing import Union
 
 SECRET_PATTERN = re.compile(
-    r"""(api[_-]?key|secret|token|password|access[_-]?key)\s*=\s*["'](?=[^"']*\d)[A-Za-z0-9_\-/+]{12,}["']""",
+    # The optional `: &str` / `: &'static str` is Rust's `const API_KEY: &str = "..."`.
+    r"""(api[_-]?key|secret|token|password|access[_-]?key)(?:\s*:\s*&(?:'static\s+)?str)?\s*=\s*["'](?=[^"']*\d)[A-Za-z0-9_\-/+]{12,}["']""",
     re.IGNORECASE,
 )
 
@@ -2510,6 +2511,27 @@ def _is_auxiliary_file(path: Path) -> bool:
     return any(part in ("test", "tests", "scripts", "benchmarks") for part in path.parts)
 
 
+_RUST_TEST_ATTR = re.compile(r"#\[(?:cfg\(test\)|test|tokio::test)\b")
+
+
+def _is_rust_test_file(path: Path, root: Path, read: bool = True) -> bool:
+    if path.name == "tests.rs" or path.name.endswith(("_test.rs", "_tests.rs")):
+        return True
+    if any(part in ("tests", "benches") for part in path.relative_to(root).parts[:-1]):
+        return True
+    if not read:
+        return False
+    try:
+        return bool(_RUST_TEST_ATTR.search(path.read_text(errors="ignore")))
+    except OSError:
+        return False
+
+
+def _rust_test_lines(text: str) -> list[tuple[int, int]]:
+    from .rs_analyzer import test_line_ranges
+    return test_line_ranges(text.encode())
+
+
 def _scan_secrets(py_files: list[Path]) -> list[RepoIssue]:
     issues = []
     for f in py_files:
@@ -2519,8 +2541,10 @@ def _scan_secrets(py_files: list[Path]) -> list[RepoIssue]:
             text = f.read_text(errors="ignore")
         except OSError:
             continue
+        # Rust tests live in the same file (`#[cfg(test)] mod tests`), with fake keys.
+        test_lines = _rust_test_lines(text) if f.suffix == ".rs" else ()
         for i, line in enumerate(text.splitlines(), start=1):
-            if SECRET_PATTERN.search(line):
+            if SECRET_PATTERN.search(line) and not any(a <= i <= b for a, b in test_lines):
                 issues.append(RepoIssue(
                     "secrets",
                     f"{f.name}:{i} looks like a hardcoded credential.",
@@ -2538,9 +2562,10 @@ _JS_BUILD_DIRS = {"dist", "build", "out"}  # same as ts_analyzer's skip list (pl
 
 
 def analyze_repo(root: Path) -> Report:
-    # Lazy import: ts_analyzer/go_analyzer/security import ToolFinding/ToolIssue
+    # Lazy import: ts_analyzer/go_analyzer/rs_analyzer/security import ToolFinding/ToolIssue
     # from this module, so importing them at module load time would be circular.
     from .go_analyzer import find_go_tools
+    from .rs_analyzer import find_rust_tools
     from .security import (
         scan_dangerous_exec,
         scan_prompt_injection,
@@ -2629,6 +2654,10 @@ def analyze_repo(root: Path) -> Report:
     tools.extend(go_tools)
     unparseable.extend(go_unparseable)
 
+    rs_tools, rs_unparseable = find_rust_tools(root)
+    tools.extend(rs_tools)
+    unparseable.extend(rs_unparseable)
+
     scan_prompt_injection(tools)
 
     stdio = _runs_over_stdio(trees)
@@ -2655,7 +2684,7 @@ def analyze_repo(root: Path) -> Report:
     # Bug #115: a monorepo of separately published servers (arhancanli/canlicapital:
     # 14 packages, `find_tool` in both mcp-canli and mcp-quant) is many servers, not
     # one, so names are only compared within the nearest package.
-    manifests = ("package.json", "pyproject.toml", "setup.py", "go.mod")
+    manifests = ("package.json", "pyproject.toml", "setup.py", "go.mod", "Cargo.toml")
     package_roots: dict[str, str] = {}
 
     def package_root(rel: str) -> str:
@@ -2673,7 +2702,7 @@ def analyze_repo(root: Path) -> Report:
         # A Python tool and a TS/Go tool of the same name are two servers, not one
         # (dealfluence/adeu ships a Python and a Node server with the same tools).
         lang = Path(t.file).suffix.lstrip(".")
-        lang = "py" if lang == "py" else "go" if lang == "go" else "ts"
+        lang = lang if lang in ("py", "go", "rs") else "ts"
         group = t.file if t.file in standalone_files else f"__default__:{lang}:{package_root(t.file)}"
         seen_by_group.setdefault(group, {}).setdefault(t.name, []).append(t)
 
@@ -2741,10 +2770,19 @@ def analyze_repo(root: Path) -> Report:
     if not any(root.glob("LICENSE*")):
         repo_issues.append(RepoIssue("license", "No LICENSE file — undermines adoption.", "warning"))
 
+    # Rust source, outside build output (target/) and vendored crates.
+    rs_files = _dedupe_by_content(sorted(
+        p for p in root.rglob("*.rs")
+        if not ({"target", "vendor"} & set(p.relative_to(root).parts[:-1])) and in_repo(p)
+        and not any(part.startswith(".") for part in p.relative_to(root).parts[:-1])
+    ))
     has_tests = (
         any(in_repo(p) for pat in ("test_*.py", "*_test.py", "*.test.ts", "*.spec.ts", "*_test.go") for p in root.rglob(pat))
         or (root / "tests").is_dir()
         or any(in_repo(p) for p in root.rglob("__tests__"))
+        # Rust keeps most tests next to the code (`#[cfg(test)] mod tests`), or in
+        # a crate's own tests/ folder, a `tests.rs` or a `*_tests.rs` module.
+        or any(_is_rust_test_file(p, root) for p in rs_files)
     )
     if not has_tests:
         repo_issues.append(RepoIssue("tests", "No test files found.", "warning"))
@@ -2752,8 +2790,10 @@ def analyze_repo(root: Path) -> Report:
     has_py_packaging = (root / "pyproject.toml").exists() or (root / "requirements.txt").exists() or (root / "setup.py").exists()
     has_js_packaging = (root / "package.json").exists()
     has_go_packaging = (root / "go.mod").exists()
-    if not has_py_packaging and not has_js_packaging and not has_go_packaging:
-        repo_issues.append(RepoIssue("packaging", "No pyproject.toml/requirements.txt/setup.py/package.json/go.mod — dependencies aren't pinned.", "warning"))
+    # Cargo.toml versions are caret ranges by default, held to exact versions by Cargo.lock.
+    has_rust_packaging = (root / "Cargo.toml").exists()
+    if not (has_py_packaging or has_js_packaging or has_go_packaging or has_rust_packaging):
+        repo_issues.append(RepoIssue("packaging", "No pyproject.toml/requirements.txt/setup.py/package.json/go.mod/Cargo.toml — dependencies aren't pinned.", "warning"))
     else:
         repo_issues.extend(scan_unpinned_dependencies(root))
 
@@ -2776,7 +2816,8 @@ def analyze_repo(root: Path) -> Report:
         and not _is_auxiliary_file(p)
     ))
     all_files = py_files + ts_js_files + go_files
-    repo_issues.extend(_scan_secrets(all_files))
+    # Rust gets the secrets check only: the exec/SSRF patterns are Python/JS/Go calls.
+    repo_issues.extend(_scan_secrets(all_files + [p for p in rs_files if not _is_rust_test_file(p, root, read=False)]))
     repo_issues.extend(scan_dangerous_exec(all_files))
     repo_issues.extend(scan_ssrf(all_files))
     repo_issues.extend(scan_unsafe_deserialization(py_files))

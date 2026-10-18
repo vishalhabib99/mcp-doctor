@@ -25,6 +25,8 @@ jobs:
           python -m mcp_doctor.cli examples/bad_server --json
           python -m mcp_doctor.cli examples/good_server_ts --fail-under 90
           python -m mcp_doctor.cli examples/bad_server_ts --json
+          python -m mcp_doctor.cli examples/good_server_rs --fail-under 90
+          python -m mcp_doctor.cli examples/bad_server_rs --json
 
   action-runtime:
     # The Action itself, with `run:` set: installs the runtime extra, fuzzes a

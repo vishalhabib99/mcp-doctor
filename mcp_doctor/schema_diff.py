@@ -73,7 +73,7 @@ def compute_schema_diff(baseline: dict, current_tools: list[ToolFinding]) -> lis
         base_tracked = base_tool.get("params_tracked")
         if base_tracked is None:  # baseline from before v1.27.0: only Python was read
             base_tracked = not str(base_tool.get("file", "")).endswith(
-                (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".go"))
+                (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".go", ".rs"))
         if not (base_tracked and current.params_tracked):
             continue
         base_params = set(base_tool.get("param_names", []))

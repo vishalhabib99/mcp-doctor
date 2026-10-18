@@ -49,7 +49,7 @@ def summary(root: Path) -> tuple:
     return d["grade"], d["percent"], d["security_grade"], d["security_percent"], len(d["tools"])
 
 
-@pytest.mark.parametrize("example", ["good_server", "bad_server", "good_server_ts", "bad_server_ts"])
+@pytest.mark.parametrize("example", ["good_server", "bad_server", "good_server_ts", "bad_server_ts", "good_server_rs", "bad_server_rs"])
 def test_browser_view_grades_like_full_checkout(example, tmp_path):
     src = ROOT / "examples" / example
     browser_view(src, tmp_path)

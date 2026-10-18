@@ -1,7 +1,7 @@
 {
   "comment": "Which files the in-browser check downloads. Shared by check.js and tests/test_check_parity.py so the browser and the parity test agree. Every other file in the tree is created empty, so name/glob checks (LICENSE, tests, packaging) still see it.",
-  "content_suffixes": [".py", ".go", ".md", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts"],
-  "content_names": ["requirements.txt", "package.json", "go.mod", "pyproject.toml", "setup.py"],
+  "content_suffixes": [".py", ".go", ".md", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts", ".rs"],
+  "content_names": ["requirements.txt", "package.json", "go.mod", "pyproject.toml", "setup.py", "Cargo.toml"],
   "content_name_prefixes": ["README"],
   "skip_dirs": [".git", "venv", ".venv", "node_modules", "site-packages", ".tox", ".nox", "__pycache__", "vendor"],
   "skip_js_build_dirs": ["dist", "build", "out"],

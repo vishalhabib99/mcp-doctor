@@ -5,4 +5,4 @@
   language: python
   args: ["--fail-under", "70"]
   pass_filenames: false
-  files: \.(py|ts|tsx|js|mjs|cjs|go)$
+  files: \.(py|ts|tsx|js|mjs|cjs|go|rs)$

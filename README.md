@@ -2,7 +2,7 @@
 
 **Full-lifecycle QA for the tools AI agents call (MCP).**
 
-An agent is only as reliable as the tools it calls, and most MCP servers ship unchecked: tools with no description, parameters the model has to guess, errors that crash the session, a "success" that never happened, a prompt injection that walks a secret out the door. mcp-doctor checks a server at every stage, from the first line of code to the live agent call. Python, TypeScript and Go; runs in CI, Claude Code, Codex and Cursor.
+An agent is only as reliable as the tools it calls, and most MCP servers ship unchecked: tools with no description, parameters the model has to guess, errors that crash the session, a "success" that never happened, a prompt injection that walks a secret out the door. mcp-doctor checks a server at every stage, from the first line of code to the live agent call. Python, TypeScript, Go and Rust; runs in CI, Claude Code, Codex and Cursor.
 
 | When | Command | What it answers |
 |---|---|---|
@@ -70,7 +70,7 @@ Repo-level
   ERROR  No README found.
   WARNING  No LICENSE file — undermines adoption.
   WARNING  No test files found.
-  WARNING  No pyproject.toml/requirements.txt/setup.py/package.json/go.mod — dependencies aren't pinned.
+  WARNING  No pyproject.toml/requirements.txt/setup.py/package.json/go.mod/Cargo.toml — dependencies aren't pinned.
 ```
 
 ```
@@ -111,7 +111,7 @@ mcp-doctor . --diff-against baseline.json  # compare against it
 mcp-doctor . --diff-against baseline.json --fail-on-breaking-change  # non-zero exit in CI
 ```
 
-Deliberately doesn't touch the quality/security scores — those are properties of one snapshot, this is a property of two compared, a different kind of question with its own exit code. A **new** tool or a **new optional** parameter is never flagged — nothing an existing caller relied on stopped working. Python, TypeScript and Go (parameter presence and required-ness, not types): Python signatures and schema dicts; TypeScript Zod shapes (`.optional()`, `.nullish()`, `.default()` make a field optional) and raw JSON Schema `required` lists; Go `mcp.Required()` builder options, explicit `InputSchema` `Required` lists, and input structs, where a field is optional only when its `json` tag says `omitempty` or `omitzero`. A tool whose schema can't be read statically, or a TS/Go tool in a baseline saved before v1.27.0, is skipped rather than compared.
+Deliberately doesn't touch the quality/security scores — those are properties of one snapshot, this is a property of two compared, a different kind of question with its own exit code. A **new** tool or a **new optional** parameter is never flagged — nothing an existing caller relied on stopped working. Python, TypeScript and Go (parameter presence and required-ness, not types): Python signatures and schema dicts; TypeScript Zod shapes (`.optional()`, `.nullish()`, `.default()` make a field optional) and raw JSON Schema `required` lists; Go `mcp.Required()` builder options, explicit `InputSchema` `Required` lists, and input structs, where a field is optional only when its `json` tag says `omitempty` or `omitzero`; Rust `Parameters<T>` struct fields, optional when `Option<_>` or `#[serde(default)]`, and `json!` input schemas. A tool whose schema can't be read statically, or a TS/Go tool in a baseline saved before v1.27.0, is skipped rather than compared.
 
 ## GitHub Action
 
@@ -186,7 +186,7 @@ repos:
         # args: ["--fail-under", "80", "path/to/server"]   # default: --fail-under 70 on the repo root
 ```
 
-It runs when a commit touches `.py`, `.ts`/`.tsx`, `.js`/`.mjs`/`.cjs` or `.go` files and fails the commit if the quality score is under the threshold. A repo where no tools are found gets a warning and passes, same as `--fail-under` on the CLI.
+It runs when a commit touches `.py`, `.ts`/`.tsx`, `.js`/`.mjs`/`.cjs`, `.go` or `.rs` files and fails the commit if the quality score is under the threshold. A repo where no tools are found gets a warning and passes, same as `--fail-under` on the CLI.
 
 ## Fuzz and verdict — launch the server and check it
 
@@ -337,7 +337,7 @@ Security findings are explained, not silently rewritten. The plugin lives in [`p
 
 ## What it checks
 
-Audits Python, TypeScript/JavaScript, and Go servers in the same repo. Python detects the FastMCP `@mcp.tool()` decorator style, FastMCP's by-reference forms (`mcp.tool(fn)`, `mcp.tool(...)(fn)`, `mcp.add_tool(fn)`, `Tool.from_function(fn, ...)`, with `fn` followed into the module it's imported from or to a `self.` method), and the low-level SDK's `Tool(name=..., description=..., inputSchema=...)` style; TS/JS detects the official SDK's `server.registerTool(name, config, handler)` and `server.tool(name, description, schema, handler)` styles, including the common pattern where the config object or Zod schema is a same-file `const` reference rather than inline; Go detects the official `modelcontextprotocol/go-sdk`'s generic `mcp.AddTool(server, &mcp.Tool{...}, handler)` (checking parameters documented either via an explicit `InputSchema` or via `json`/`jsonschema` struct tags on the handler's argument type — the SDK's own schema-inference convention) and `mark3labs/mcp-go`'s older `s.AddTool(mcp.NewTool(name, mcp.WithDescription(...), mcp.WithString(...)), handler)` fluent-builder style, where every parameter is declared inline. The same checks apply across languages — a description and per-parameter docs (`Args:`/`Field(description=...)` in Python, `.describe(...)` on each Zod field in TS, a `jsonschema:"..."` struct tag or `mcp.Description(...)` builder call in Go) — except error handling, which isn't checked for Go (see Known limitations: Go's failure model is different enough from Python/TS exceptions that a naive port risked being wrong, not just incomplete).
+Audits Python, TypeScript/JavaScript, Go and Rust servers in the same repo. Python detects the FastMCP `@mcp.tool()` decorator style, FastMCP's by-reference forms (`mcp.tool(fn)`, `mcp.tool(...)(fn)`, `mcp.add_tool(fn)`, `Tool.from_function(fn, ...)`, with `fn` followed into the module it's imported from or to a `self.` method), and the low-level SDK's `Tool(name=..., description=..., inputSchema=...)` style; TS/JS detects the official SDK's `server.registerTool(name, config, handler)` and `server.tool(name, description, schema, handler)` styles, including the common pattern where the config object or Zod schema is a same-file `const` reference rather than inline; Go detects the official `modelcontextprotocol/go-sdk`'s generic `mcp.AddTool(server, &mcp.Tool{...}, handler)` (checking parameters documented either via an explicit `InputSchema` or via `json`/`jsonschema` struct tags on the handler's argument type — the SDK's own schema-inference convention) and `mark3labs/mcp-go`'s older `s.AddTool(mcp.NewTool(name, mcp.WithDescription(...), mcp.WithString(...)), handler)` fluent-builder style, where every parameter is declared inline; Rust detects the official SDK's (`rmcp`) `#[tool]` attribute, read the way its macro reads it (`name`/`description` arguments, else the function name and its `///` doc comments; parameters from the `Parameters<T>` struct, documented by a field's doc comment or `#[schemars(description = ...)]`), plus `Tool::new(name, description, schema)` and hand-written `json!({"name": ..., "inputSchema": ...})` tool lists. The same checks apply across languages — a description and per-parameter docs (`Args:`/`Field(description=...)` in Python, `.describe(...)` on each Zod field in TS, a `jsonschema:"..."` struct tag or `mcp.Description(...)` builder call in Go) — except error handling, which isn't checked for Go (see Known limitations: Go's failure model is different enough from Python/TS exceptions that a naive port risked being wrong, not just incomplete), and the same goes for Rust.
 
 **Per tool**:
 
@@ -401,6 +401,7 @@ From source: `pip install git+https://github.com/vishalhabib99/mcp-doctor.git`.
 - **`--fix` only fixes the fully-undocumented case, Python only.** If a docstring already documents *some* params but not all, `--fix` leaves it alone rather than risk merging into it incorrectly — you'll still see the warning, just not an auto-stub. TS/JS and Go files aren't touched by `--fix` at all yet.
 - **Go: error handling isn't checked at all.** Go has no exception mechanism — a handler communicates failure through its `error` return value, which the SDK already turns into a structured tool error either way — and what a genuinely useful Go-specific check should even look for (a bare `panic` with no `recover`? an ignored error from a called function?) hasn't been researched carefully enough yet to check for without risking a check that's wrong rather than just incomplete.
 - **Go: heavily customized in-house registries built on top of either SDK aren't introspected.** `github/github-mcp-server` (32k★) wraps the official SDK in its own bespoke tool registry (middleware, OAuth-scope gating, generated handlers) rather than calling `mcp.AddTool` directly at any single, simple call site — same category of gap as Python's class-based low-level `Server` registries, and left undone for the same reason: reliably resolving it is a materially bigger undertaking than a scoped fix.
+- **Rust: error handling, stdout writes, dynamic exec and SSRF aren't checked; secrets are.** A handler reports failure through its `Result`, as in Go. A server that builds its tools at runtime (WebAssembly components, plugins, a registry filled from config, as in `microsoft/wassette` and `hyper-mcp`) has no tools to read from source; `fuzz` and `verdict` check those. Of the 20 most-starred Rust MCP servers on 2026-10-18, 6 build their tools that way. A description or parameter type that isn't a literal (`include_str!`, a generic `T::Parameter`) counts as present and isn't checked further.
 - **The description-length heuristic weighs script density via Unicode's East Asian Width property, not a full per-language model.** Fixed (see the thirtieth pass) for CJK and other Wide/Fullwidth scripts, verified on a real repo (`xiaohongshu-mcp`'s Chinese descriptions). A script that packs more meaning per character than Latin but isn't classified Wide/Fullwidth by Unicode (e.g. Arabic, Devanagari, Cyrillic) still counts 1 column per character — a real, narrower residual gap than the one just closed, not yet found misfiring on an actual repo.
 - **`--diff-against` only tracks parameter presence and required-ness, not types.** A parameter that changes type without changing name or required-ness (e.g. `str` → `int`) isn't caught, in any language. A TS/Go tool whose schema is built at runtime or defined in a helper the analyzer doesn't follow isn't compared (on 121 local real repos, 934 of 1,152 TS/Go tools are). Within Python, the raw-schema-dict `Tool(name=..., inputSchema={...})` constructor style is only as complete as the schema is statically resolvable: a dynamic property key or an unresolved `**spread_call()` drops that tool's `required_param_names` back to empty and marks `param_names_complete` false, so `param_removed` detection is skipped entirely for that tool rather than risk a false positive from partial coverage (see analyzer.py's `_find_lowlevel_tools` and schema_diff.py).
 
@@ -416,6 +417,7 @@ From source: `pip install git+https://github.com/vishalhabib99/mcp-doctor.git`.
 - [x] Live guard for agents — `guard` for MCP servers, `guard hook` for Claude Code's, Codex's and Cursor's own tools
 - [x] `guard` over HTTP (`--url`)
 - [x] `--diff-against` for TypeScript and Go
+- [x] Rust server support — the official `rmcp` SDK's `#[tool]` attribute, `Tool::new`, and `json!` tool lists
 - [ ] `--fix` for TypeScript and Go: deliberately not planned yet. The mechanical fixes (nullable `None` defaults, bare `except:`) are Python bugs; the only TS candidate is a `TODO` description placeholder, which the Action already leaves off by default
 
 ## Real-world spot check
