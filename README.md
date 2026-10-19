@@ -36,7 +36,7 @@ An agent is only as reliable as the tools it calls, and most MCP servers ship un
 ## Why trust the grade
 
 - **Recall is measured, misses are published.** A checker that can't see a tool quietly grades it as fine, so tool detection is measured against an independent count: 15,755 of 15,977 tools found across 805 real servers on 5 frameworks. Every miss is listed with its reason in [docs/coverage.md](docs/coverage.md).
-- **121 of its own bugs found and fixed after release** by running it on real servers, up to the 91.3k★ official `modelcontextprotocol/servers` monorepo; a fix ships only when a before/after run on 120+ real repos changes nothing it shouldn't. [The log](docs/dogfooding.md) · [how 69 of them got through](docs/postmortem-69-bugs.md).
+- **123 of its own bugs found and fixed after release** by running it on real servers, up to the 91.3k★ official `modelcontextprotocol/servers` monorepo; a fix ships only when a before/after run on 120+ real repos changes nothing it shouldn't. [The log](docs/dogfooding.md) · [how 69 of them got through](docs/postmortem-69-bugs.md).
 - **Maintainers act on its reports:** fixes merged upstream, among them [ha-mcp](https://github.com/homeassistant-ai/ha-mcp/pull/2327), [telegram-mcp](https://github.com/chigwell/telegram-mcp/pull/266) (111 tools fixed in one PR) and [davinci-resolve-mcp](https://github.com/samuelgursky/davinci-resolve-mcp/pull/274) (shipped as its own release).
 - **Quality and security are graded separately,** so a well-documented A can't hide a security gap. Every audited repo is on the [leaderboard](https://vishalhabib99.github.io/mcp-doctor/) with a dated badge you can add to your README, and re-scans show ▲/▼ drift.
 - **What the first outside users hit, and what changed because of it:** [docs/what-users-taught-me.md](docs/what-users-taught-me.md).
@@ -365,6 +365,8 @@ Audits Python, TypeScript/JavaScript, Go and Rust servers in the same repo. Pyth
 ## Security checks
 
 Scored as a **separate axis** from quality (its own percent/grade) — a repo can be a well-documented A on quality and still have a real security gap, and the two shouldn't be blended into one number that hides which is true. These matter specifically because an MCP tool is invoked autonomously by a model, not a human clicking through a UI: an unvalidated input here is triggered by model-generated tool-call arguments, not a person typing into a form.
+
+What's scanned is the repo's own code. Vendored libraries and minified or built bundles (`vendor/`, `*.min.js`, Next.js `_next/` chunks, hashed chunk names) are skipped by every security check. Benchmark, experiment, archive, docs and fixture folders are skipped by the dynamic-exec, SSRF and deserialization checks, which ask whether an agent can reach the call, but still get the secrets check: a real key committed to `docs/` is still leaked. Such a folder still counts as server code when it sits inside a source folder (`src/tools/docs/`) or holds tools mcp-doctor grades (an MCP server run from `experiments/`).
 
 | Check | What it flags | Precision |
 |---|---|---|

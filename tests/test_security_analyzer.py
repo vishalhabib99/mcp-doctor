@@ -1170,3 +1170,77 @@ def test_read_only_tool_posting_to_a_write_endpoint_still_flagged(tmp_path):
     report = analyze_repo(tmp_path)
     tool = next(t for t in report.tools if t.name == "create_ticket")
     assert any(i.check == "annotation_mismatch" for i in tool.issues)
+
+
+def put(tmp_path: Path, name: str, content: str) -> Path:
+    p = tmp_path / name
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(dedent(content))
+    return p
+
+
+SERVER = """
+    from mcp.server.fastmcp import FastMCP
+    mcp = FastMCP("x")
+
+    @mcp.tool()
+    def ping() -> str:
+        \"\"\"Check that the server is alive.\"\"\"
+        return "pong"
+    """
+
+
+def test_vendored_and_bundled_js_are_not_graded_as_the_servers_code(tmp_path):
+    # codanna's vendored d3.min.js and rustunnel's built Next.js dashboard
+    # chunks each brought SSRF warnings the server's own code didn't have.
+    put(tmp_path, "server.py", SERVER)
+    put(tmp_path, "skills/graph/vendor/sigma.js", "fetch(url)\n")
+    put(tmp_path, "ui/d3.min.js", "fetch(u)\n")
+    put(tmp_path, "assets/_next/static/chunks/main.js", "fetch(u)\n")
+    put(tmp_path, "assets/static/chunks/main-bbec9bd66563fde8.js", "fetch(u)\n")
+    checks = [i.check for i in analyze_repo(tmp_path).repo_issues if i.category == "security"]
+    assert checks == []
+    put(tmp_path, "src/client.js", "fetch(url)\n")  # the server's own code still counts
+    checks = [i.check for i in analyze_repo(tmp_path).repo_issues if i.category == "security"]
+    assert checks == ["ssrf"]
+
+
+def test_benchmark_and_experiment_scripts_are_not_reachable_code(tmp_path):
+    put(tmp_path, "server.py", SERVER)
+    put(tmp_path, "bench/run.py", "import subprocess\nsubprocess.run(cmd, shell=True)\n")
+    put(tmp_path, "architecture/experiments/369/score.py", "import os\nos.system(cmd)\n")
+    put(tmp_path, "_archive/old_client.py", "import requests\nrequests.get(url)\n")
+    put(tmp_path, "docs/measurements/ab.py", "import os\nos.system(cmd)\n")
+    assert [i for i in analyze_repo(tmp_path).repo_issues if i.category == "security"] == []
+    put(tmp_path, "tools/run_shell.py", "import os\nos.system(cmd)\n")  # tools/ is server code
+    assert [i.check for i in analyze_repo(tmp_path).repo_issues if i.category == "security"] == ["dangerous_exec"]
+
+
+def test_secret_in_docs_still_counts(tmp_path):
+    put(tmp_path, "server.py", SERVER)
+    put(tmp_path, "docs/setup.py", 'API_KEY = "sk-live-1234567890abcdef"\n')
+    assert "secrets" in [i.check for i in analyze_repo(tmp_path).repo_issues]
+
+
+def test_manifest_in_a_subfolder_counts_as_packaging(tmp_path):
+    # yvgude/lean-ctx keeps its Cargo.toml in rust/.
+    put(tmp_path, "server.py", SERVER)
+    assert "packaging" in [i.check for i in analyze_repo(tmp_path).repo_issues]
+    put(tmp_path, "rust/Cargo.toml", '[package]\nname = "x"\n')
+    assert "packaging" not in [i.check for i in analyze_repo(tmp_path).repo_issues]
+    put(tmp_path, "node_modules/dep/package.json", "{}")  # someone else's manifest doesn't
+    put(tmp_path, "docs/package.json", "{}")  # nor the docs site's (n98-magerun2)
+    put(tmp_path, "tests/bats/test_helper/bats-assert/package.json", "{}")
+    (tmp_path / "rust/Cargo.toml").unlink()
+    assert "packaging" in [i.check for i in analyze_repo(tmp_path).repo_issues]
+
+
+def test_docs_or_experiments_folder_that_is_server_code_still_counts(tmp_path):
+    put(tmp_path, "server.py", SERVER)
+    # apify-mcp-server: tool code in src/tools/docs/
+    put(tmp_path, "src/tools/docs/fetch_page.py", "import requests\nrequests.get(url)\n")
+    # oaslananka's rhinomcp: an MCP server run from experiments/
+    put(tmp_path, "experiments/builder_mcp.py",
+        dedent(SERVER).replace("ping", "build").replace("alive", "built") + "\nimport os\nos.system(cmd)\n")
+    checks = sorted(i.check for i in analyze_repo(tmp_path).repo_issues if i.category == "security")
+    assert checks == ["dangerous_exec", "ssrf"]

@@ -2511,6 +2511,37 @@ def _is_auxiliary_file(path: Path) -> bool:
     return any(part in ("test", "tests", "scripts", "benchmarks") for part in path.parts)
 
 
+# Third-party or generated code committed into a repo: vendored libraries,
+# minified bundles, Next.js build chunks. Graded as the server's own code, they
+# gave codanna 4 SSRF warnings from d3.min.js/sigma.min.js and rustunnel 3 from
+# its built dashboard (`_next/static/chunks/main-bbec9bd66563fde8.js`).
+_VENDORED_DIRS = {"vendor", "vendored", "_next"}
+_BUNDLE_NAME = re.compile(r"\.(?:min|bundle)\.[cm]?js$|[-.][0-9a-f]{16,}\.[cm]?js$")
+# Folders of scripts no agent can reach: benchmarks, experiments, archived
+# code, docs. Seen on 7 of 17 Rust MCP repos (2026-10-18): biomcp's
+# architecture/experiments/ and lean-ctx's _archive/bench/ set their security
+# grade. Two exceptions keep real server code in: a source folder above it
+# (apify-mcp-server's tools live in src/tools/docs/), and a folder that holds
+# graded tools (oaslananka's rhinomcp runs MCP servers from experiments/).
+_NOT_SERVER_DIRS = {"bench", "benches", "benchmark", "benchmarks", "experiments", "experiment",
+                    "_archive", "archive", "docs", "fixtures"}
+_SOURCE_DIRS = {"src", "lib", "tools", "app", "server", "pkg", "internal"}
+
+
+def _is_vendored(rel: Path) -> bool:
+    return bool(_VENDORED_DIRS & set(rel.parts[:-1])) or bool(_BUNDLE_NAME.search(rel.name))
+
+
+def _not_server_code(rel: Path, tool_files: set[str]) -> bool:
+    for k, part in enumerate(rel.parts[:-1]):
+        if part in _SOURCE_DIRS:
+            return False
+        if part in _NOT_SERVER_DIRS:
+            prefix = Path(*rel.parts[: k + 1])
+            return not any(Path(f).is_relative_to(prefix) for f in tool_files)
+    return False
+
+
 _RUST_TEST_ATTR = re.compile(r"#\[(?:cfg\(test\)|test|tokio::test)\b")
 
 
@@ -2583,7 +2614,8 @@ def analyze_repo(root: Path) -> Report:
     # is_file drops a broken symlink (jiangyi01/SpatialOmicsLab), which crashed the read.
     # sorted: rglob order differs across Python versions (3.13 changed it) and
     # filesystems, and the first of two identical files is the one kept.
-    py_files = _dedupe_by_content(sorted(p for p in root.rglob("*.py") if in_repo(p) and p.is_file()))
+    all_py_files = sorted(p for p in root.rglob("*.py") if in_repo(p) and p.is_file())
+    py_files = _dedupe_by_content(all_py_files)
 
     trees: list[tuple[str, ast.Module]] = []
     unparseable: list[str] = []
@@ -2787,17 +2819,22 @@ def analyze_repo(root: Path) -> Report:
     if not has_tests:
         repo_issues.append(RepoIssue("tests", "No test files found.", "warning"))
 
-    has_py_packaging = (root / "pyproject.toml").exists() or (root / "requirements.txt").exists() or (root / "setup.py").exists()
-    has_js_packaging = (root / "package.json").exists()
-    has_go_packaging = (root / "go.mod").exists()
-    # Cargo.toml versions are caret ranges by default, held to exact versions by Cargo.lock.
-    has_rust_packaging = (root / "Cargo.toml").exists()
-    if not (has_py_packaging or has_js_packaging or has_go_packaging or has_rust_packaging):
+    # A manifest in a subfolder counts too: yvgude/lean-ctx keeps its Cargo.toml
+    # in rust/, zhitongblog/solomd one per crate, and both were told their
+    # dependencies weren't pinned. (Cargo.toml versions are caret ranges, held
+    # to exact versions by Cargo.lock.)
+    manifest_names = ("pyproject.toml", "requirements.txt", "setup.py", "package.json", "go.mod", "Cargo.toml")
+    has_packaging = any((root / m).exists() for m in manifest_names) or any(
+        # not a test helper's or the docs site's own package.json (n98-magerun2)
+        in_repo(p) and not ({"target", "vendor", "test", "tests"} | _NOT_SERVER_DIRS) & set(p.relative_to(root).parts[:-1])
+        for m in manifest_names for p in root.rglob(m)
+    )
+    if not has_packaging:
         repo_issues.append(RepoIssue("packaging", "No pyproject.toml/requirements.txt/setup.py/package.json/go.mod/Cargo.toml — dependencies aren't pinned.", "warning"))
     else:
         repo_issues.extend(scan_unpinned_dependencies(root))
 
-    ts_js_files = _dedupe_by_content(sorted(
+    ts_js_files = sorted(
         p for p in root.rglob("*")
         # Bug #96: .mjs/.cjs/.mts/.cts were left out, so a server written as
         # ESM `.mjs` got no secrets or dangerous-exec checks at all.
@@ -2809,18 +2846,25 @@ def analyze_repo(root: Path) -> Report:
         # chenlinyang/mcp-server-mysql on a 138k-line `.smithery/index.cjs` bundle.
         and not any(part in _JS_BUILD_DIRS or part.startswith(".") for part in p.relative_to(root).parts[:-1])
         and not _is_auxiliary_file(p)
-    ))
-    go_files = _dedupe_by_content(sorted(
+    )
+    go_files = sorted(
         p for p in root.rglob("*.go")
         if "vendor" not in p.relative_to(root).parts[:-1] and in_repo(p)
         and not _is_auxiliary_file(p)
-    ))
-    all_files = py_files + ts_js_files + go_files
+    )
+    # Filter before de-duplicating: a server file identical to a vendored or
+    # benchmark copy must survive as the copy that's kept.
+    own = sorted(p for p in all_py_files + ts_js_files + go_files if not _is_vendored(p.relative_to(root)))
+    all_files = _dedupe_by_content(own)
     # Rust gets the secrets check only: the exec/SSRF patterns are Python/JS/Go calls.
     repo_issues.extend(_scan_secrets(all_files + [p for p in rs_files if not _is_rust_test_file(p, root, read=False)]))
-    repo_issues.extend(scan_dangerous_exec(all_files))
-    repo_issues.extend(scan_ssrf(all_files))
-    repo_issues.extend(scan_unsafe_deserialization(py_files))
+    # Exec, SSRF and deserialization ask whether an agent can reach the call, so
+    # benchmark, experiment, archive and docs scripts are left out of them.
+    tool_files = {t.file for t in tools}
+    reachable = _dedupe_by_content([p for p in own if not _not_server_code(p.relative_to(root), tool_files)])
+    repo_issues.extend(scan_dangerous_exec(reachable))
+    repo_issues.extend(scan_ssrf(reachable))
+    repo_issues.extend(scan_unsafe_deserialization([p for p in reachable if p.suffix == ".py"]))
 
     score = 0
     max_score = 0
