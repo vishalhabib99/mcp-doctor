@@ -51,9 +51,18 @@ def summary(root: Path) -> tuple:
 
 @pytest.mark.parametrize("example", ["good_server", "bad_server", "good_server_ts", "bad_server_ts", "good_server_rs", "bad_server_rs"])
 def test_browser_view_grades_like_full_checkout(example, tmp_path):
+    # Each example is a subfolder of this repo, so the page checks it the way
+    # worker.js lays out a subfolder: under a .git marker, with the LICENSE
+    # files of its parent folders created empty.
     src = ROOT / "examples" / example
-    browser_view(src, tmp_path)
-    assert summary(tmp_path) == summary(src)
+    rel = src.relative_to(ROOT)
+    (tmp_path / ".git").mkdir()
+    for parent in (ROOT, *[ROOT / Path(*rel.parts[:i]) for i in range(1, len(rel.parts))]):
+        for lic in parent.glob("LICENSE*"):
+            (tmp_path / lic.relative_to(ROOT)).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / lic.relative_to(ROOT)).write_bytes(b"")
+    browser_view(src, tmp_path / rel)
+    assert summary(tmp_path / rel) == summary(src)
 
 
 def test_unread_files_still_exist_for_name_checks(tmp_path):

@@ -112,16 +112,30 @@ async function download(target, rules) {
     }
   }
   await Promise.all(Array.from({ length: 12 }, workerLoop));
-  return { files, empty: empty.map(e => e.rel), sha, ref, stars: meta.stargazers_count, language: meta.language };
+  // A subfolder check is laid out like a clone: the folder in place under a
+  // .git marker, plus each LICENSE in a parent folder up to the repo root
+  // (created empty, names are all the check reads), so a monorepo server is
+  // covered by the repo's LICENSE as it is in the CLI.
+  const dirs = prefix.split("/").slice(0, -1).map((_, i, a) => a.slice(0, i).join("/"));
+  const licenses = !prefix ? [] : tree.tree
+    .filter(e => e.type === "blob" && /^LICENSE/.test(e.path.split("/").pop()))
+    .map(e => e.path)
+    .filter(path => dirs.includes(path.split("/").slice(0, -1).join("/")));
+  return { files, empty: empty.map(e => e.rel), prefix, licenses, sha, ref, stars: meta.stargazers_count, language: meta.language };
 }
 
-function writeTree(pyodide, files, empty) {
+// Returns the folder to scan: ROOT, or the subfolder inside it.
+function writeTree(pyodide, files, empty, prefix, licenses) {
   const FS = pyodide.FS;
   if (FS.analyzePath(ROOT).exists) pyodide.runPython(`import shutil; shutil.rmtree("${ROOT}")`);
-  FS.mkdirTree(ROOT);
-  const mk = rel => { const i = rel.lastIndexOf("/"); if (i > 0) FS.mkdirTree(`${ROOT}/${rel.slice(0, i)}`); };
-  for (const f of files) { mk(f.rel); FS.writeFile(`${ROOT}/${f.rel}`, f.data); }
-  for (const rel of empty) { mk(rel); FS.writeFile(`${ROOT}/${rel}`, new Uint8Array()); }
+  const scan = prefix ? `${ROOT}/${prefix.replace(/\/$/, "")}` : ROOT;
+  FS.mkdirTree(scan);
+  FS.mkdirTree(`${ROOT}/.git`);
+  const mk = rel => { const i = rel.lastIndexOf("/"); if (i > 0) FS.mkdirTree(`${scan}/${rel.slice(0, i)}`); };
+  for (const f of files) { mk(f.rel); FS.writeFile(`${scan}/${f.rel}`, f.data); }
+  for (const rel of empty) { mk(rel); FS.writeFile(`${scan}/${rel}`, new Uint8Array()); }
+  for (const path of licenses) FS.writeFile(`${ROOT}/${path}`, new Uint8Array());
+  return scan;
 }
 
 // One check at a time, so every message carries the id of the check it belongs to.
@@ -141,8 +155,8 @@ async function run(data) {
     post("progress", { step: "scan", text: n > 500
       ? `Scanning ${n} source files. A repo this size takes a minute or two in the browser…`
       : `Scanning ${n} source files…` });
-    writeTree(engine.pyodide, repo.files, repo.empty);
-    const report = JSON.parse(engine.pyodide.globals.get("_scan")(ROOT));
+    const scanDir = writeTree(engine.pyodide, repo.files, repo.empty, repo.prefix, repo.licenses);
+    const report = JSON.parse(engine.pyodide.globals.get("_scan")(scanDir));
     const tsFiles = repo.files.some(f => /\.(ts|tsx|mts|cts)$/.test(f.rel) && !/\.d\.[mc]?ts$/.test(f.rel));
     post("done", {
       report,

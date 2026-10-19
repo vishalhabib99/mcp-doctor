@@ -2,6 +2,7 @@
 release and production. Every line is real output, captured 2026-10-17 from
 mcp-doctor 0.28.0 (examples/bad_server, examples/good_server, and guard in front
 of tests/fixtures/guard_server.py fs_broken); long lines are cut with an ellipsis.
+The bad_server score lines were re-captured 2026-10-19 (0.32.1, bug #125).
 
     python docs/demo/make_demo.py   (writes docs/demo.svg)
 """
@@ -20,7 +21,7 @@ SCENES = [
     ("1/3  Build", "Lint the server before an agent ever calls it", 0.0, 8.5, [
         ("$", "mcp-doctor examples/bad_server"),
         [("mcp-doctor report", "dim")],
-        [("Quality:  13%  Grade: ", "fg"), ("F", "red"), ("  (2 tool(s) found)", "dim")],
+        [("Quality:  24%  Grade: ", "fg"), ("F", "red"), ("  (2 tool(s) found)", "dim")],
         [("Security: 100%  Grade: ", "fg"), ("A", "green")],
         [("  [FAIL] ", "red"), ("do_thing (server.py:12)", "fg")],
         [("      ERROR  ", "red"), ("Tool has no description. An agent cannot decide when to call this.", "fg")],
@@ -34,7 +35,7 @@ SCENES = [
     ]),
     ("2/3  Release", "Launch it, fuzz it, and get one decision", 8.5, 18.5, [
         ("$", 'mcp-doctor verdict examples/bad_server --run "python examples/bad_server/server.py"'),
-        [("mcp-doctor verdict: ", "fg"), ("BLOCK", "red"), (" (HIGH confidence) · static 13% (F)", "dim")],
+        [("mcp-doctor verdict: ", "fg"), ("BLOCK", "red"), (" (HIGH confidence) · static 24% (F)", "dim")],
         [("Blockers", "red"), (" (any one of these blocks release):", "dim")],
         [("- fuzz: server never connected (MCPError: Connection closed)", "fg")],
         [("- fuzz --truth: server never connected (MCPError: Connection closed)", "fg")],
@@ -103,7 +104,7 @@ for s, (stage, caption, start, end, lines) in enumerate(SCENES):
     assert t < end - 1.5, f"scene {stage} too long for its window ({t:.1f}s of {end}s)"
 
 svg = f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" role="img"
- aria-label="mcp-doctor demo: lint a server (13%, grade F), get a release verdict (BLOCK, then SHIP), and guard a live call that reported success without writing the file">
+ aria-label="mcp-doctor demo: lint a server (24%, grade F), get a release verdict (BLOCK, then SHIP), and guard a live call that reported success without writing the file">
 <style>
 text{{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;font-size:{FONT}px;white-space:pre}}
 {"".join(css)}

@@ -17,7 +17,7 @@ An agent is only as reliable as the tools it calls, and most MCP servers ship un
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![GitHub Marketplace](https://img.shields.io/badge/Marketplace-mcp--doctor-blue?logo=github)](https://github.com/marketplace/actions/mcp-doctor)
 
-<p align="center"><img src="docs/demo.svg" width="940" alt="Animated demo: mcp-doctor lints a server (13%, grade F), gives a release verdict (BLOCK, then SHIP), and guards a live call that reported success without writing the file"></p>
+<p align="center"><img src="docs/demo.svg" width="940" alt="Animated demo: mcp-doctor lints a server (24%, grade F), gives a release verdict (BLOCK, then SHIP), and guards a live call that reported success without writing the file"></p>
 
 *Real output from mcp-doctor 0.28.0 on the bundled example servers and guard's test fixture, long lines cut ([how it's built](docs/demo/make_demo.py)).*
 
@@ -36,7 +36,7 @@ An agent is only as reliable as the tools it calls, and most MCP servers ship un
 ## Why trust the grade
 
 - **Recall is measured, misses are published.** A checker that can't see a tool quietly grades it as fine, so tool detection is measured against an independent count: 15,755 of 15,977 tools found across 805 real servers on 5 frameworks. Every miss is listed with its reason in [docs/coverage.md](docs/coverage.md).
-- **124 of its own bugs found and fixed after release** by running it on real servers, up to the 91.3k★ official `modelcontextprotocol/servers` monorepo; a fix ships only when a before/after run on 120+ real repos changes nothing it shouldn't. [The log](docs/dogfooding.md) · [how 69 of them got through](docs/postmortem-69-bugs.md).
+- **125 of its own bugs found and fixed after release** by running it on real servers, up to the 91.3k★ official `modelcontextprotocol/servers` monorepo; a fix ships only when a before/after run on 120+ real repos changes nothing it shouldn't. [The log](docs/dogfooding.md) · [how 69 of them got through](docs/postmortem-69-bugs.md).
 - **Maintainers act on its reports:** fixes merged upstream, among them [ha-mcp](https://github.com/homeassistant-ai/ha-mcp/pull/2327), [telegram-mcp](https://github.com/chigwell/telegram-mcp/pull/266) (111 tools fixed in one PR) and [davinci-resolve-mcp](https://github.com/samuelgursky/davinci-resolve-mcp/pull/274) (shipped as its own release).
 - **Quality and security are graded separately,** so a well-documented A can't hide a security gap. Every audited repo is on the [leaderboard](https://vishalhabib99.github.io/mcp-doctor/) with a dated badge you can add to your README, and re-scans show ▲/▼ drift.
 - **What the first outside users hit, and what changed because of it:** [docs/what-users-taught-me.md](docs/what-users-taught-me.md).
@@ -52,7 +52,7 @@ The static scan reads source and never runs it. Point it at a server and get two
 ```
 $ mcp-doctor examples/bad_server
 mcp-doctor report
-Quality:  13%  Grade: F  (2 tool(s) found)
+Quality:  24%  Grade: F  (2 tool(s) found)
 Security: 100%  Grade: A
 
   [FAIL] do_thing (server.py:12)
@@ -68,7 +68,6 @@ Security: 100%  Grade: A
 
 Repo-level
   ERROR  No README found.
-  WARNING  No LICENSE file — undermines adoption.
   WARNING  No test files found.
   WARNING  No pyproject.toml/requirements.txt/setup.py/package.json/go.mod/Cargo.toml — dependencies aren't pinned.
 ```

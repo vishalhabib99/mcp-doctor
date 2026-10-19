@@ -1502,6 +1502,25 @@ def test_missing_readme_and_license_flagged(tmp_path):
     assert "license" in checks
 
 
+def test_license_at_the_git_root_covers_a_subfolder_scan(tmp_path):
+    # rhinomcp/server: the server lives in a subfolder, the LICENSE at the repo root.
+    (tmp_path / ".git").mkdir()
+    write(tmp_path, "LICENSE", "MIT\n")
+    write(tmp_path, "packages/server/server.py", "x = 1\n")
+    report = analyze_repo(tmp_path / "packages" / "server")
+    assert "license" not in {i.check for i in report.repo_issues}
+
+
+def test_license_outside_the_git_repo_does_not_count(tmp_path):
+    write(tmp_path, "LICENSE", "MIT\n")  # e.g. a stray ~/LICENSE above the clone
+    (tmp_path / "repo" / ".git").mkdir(parents=True)
+    write(tmp_path, "repo/server/server.py", "x = 1\n")
+    assert "license" in {i.check for i in analyze_repo(tmp_path / "repo" / "server").repo_issues}
+    # and with no git repo at all, only the scanned folder counts
+    write(tmp_path, "plain/server.py", "x = 1\n")
+    assert "license" in {i.check for i in analyze_repo(tmp_path / "plain").repo_issues}
+
+
 def test_undocumented_tool_missing_from_readme_is_flagged(tmp_path):
     write(tmp_path, "server.py", """
         from mcp.server.fastmcp import FastMCP

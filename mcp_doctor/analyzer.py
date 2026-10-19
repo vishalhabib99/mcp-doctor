@@ -2591,6 +2591,20 @@ def _scan_secrets(py_files: list[Path], root: Path | None = None) -> list[RepoIs
 # Directories that hold installed or generated code, not the repo's own source.
 # Scanning them reports third-party code (pip, typing_extensions, ...) as the
 # server's own findings, and can hide a missing-tests warning.
+def _has_license(root: Path) -> bool:
+    """A LICENSE in the scanned folder, or in a parent up to the enclosing git
+    repo's root: a server scanned as a subfolder of a monorepo (rhinomcp/server,
+    awslabs/mcp's src/*) is covered by the repo's LICENSE. Outside a git repo
+    only the scanned folder counts, so a stray ~/LICENSE never does."""
+    dirs = [root]
+    if not (root / ".git").exists():
+        parents = list(root.parents)
+        git_root = next((i for i, d in enumerate(parents) if (d / ".git").exists()), None)
+        if git_root is not None:
+            dirs += parents[: git_root + 1]
+    return any(p.is_file() for d in dirs for p in d.glob("LICENSE*"))
+
+
 _NON_REPO_DIRS = {".git", "venv", ".venv", "node_modules", "site-packages", ".tox", ".nox", "__pycache__"}
 _JS_BUILD_DIRS = {"dist", "build", "out"}  # same as ts_analyzer's skip list (plus any dot-folder)
 
@@ -2803,7 +2817,7 @@ def analyze_repo(root: Path) -> Report:
                 "warning",
             ))
 
-    if not any(root.glob("LICENSE*")):
+    if not _has_license(root):
         repo_issues.append(RepoIssue("license", "No LICENSE file — undermines adoption.", "warning"))
 
     # Rust source, outside build output (target/) and vendored crates.
