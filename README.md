@@ -21,7 +21,7 @@ An agent is only as reliable as the tools it calls, and most MCP servers ship un
 
 *Real output from mcp-doctor 0.28.0 on the bundled example servers and guard's test fixture, long lines cut ([how it's built](docs/demo/make_demo.py)).*
 
-**Contents:** [Try it](#try-it-in-30-seconds) · [Why trust it](#why-trust-the-grade) · [Lint and fix](#lint-and-fix) · [GitHub Action](#github-action) · [Fuzz and verdict](#fuzz-and-verdict--launch-the-server-and-check-it) · [Guard](#guard--catch-tool-calls-that-report-success-but-didnt-work) · [Plugin](#plugin-for-claude-code-codex-and-cursor) · [What it checks](#what-it-checks) · [Install](#install) · [Limitations](#known-limitations)
+**Contents:** [Try it](#try-it-in-30-seconds) · [Why trust it](#why-trust-the-grade) · [Lint and fix](#lint-and-fix) · [GitHub Action](#github-action) · [pre-commit](#pre-commit-hook) · [Fuzz and verdict](#fuzz-and-verdict--launch-the-server-and-check-it) · [Guard](#guard--catch-tool-calls-that-report-success-but-didnt-work) · [Plugin](#plugin-for-claude-code-codex-and-cursor) · [What it checks](#what-it-checks) · [Security checks](#security-checks) · [Install](#install) · [Limitations](#known-limitations) · [Roadmap](#roadmap)
 
 ## Try it in 30 seconds
 
@@ -192,7 +192,7 @@ Catch it before the push. Add to `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/vishalhabib99/mcp-doctor
-    rev: v1.18.4
+    rev: v1.32.1
     hooks:
       - id: mcp-doctor
         # args: ["--fail-under", "80", "path/to/server"]   # default: --fail-under 70 on the repo root
@@ -307,7 +307,7 @@ In the default and `acceptEdits` modes Claude Code already refuses `.git/hooks` 
 
 ### Runtime gate — the same two checks, applied to live `tools/list` metadata
 
-The static scan never makes a live call to anything; only the runtime commands (`fuzz`, `verdict`, `guard`) do, and only when you run them. `check_tool_registration` keeps the static side that way: it's a pure function over tool metadata your own MCP client already fetched, not a connection of its own. No new dependency, no `mcp` package required.
+`check_tool_registration` runs the description and annotation checks on tool metadata your own MCP client already fetched. It's a pure function: no connection of its own, no new dependency, no `mcp` package required.
 
 ```python
 from mcp_doctor.gate import check_tool_registration
@@ -319,9 +319,7 @@ for tool in tools:
         ...  # missing/vague description, or a real readOnlyHint/destructiveHint conflict
 ```
 
-Narrower than the full static analyzer, honestly: the read-only/mutation-signal-mismatch check (does a tool's own code actually write despite claiming `readOnlyHint: true`) has no live counterpart — an agent discovering tools at runtime has no access to server source, only what the server declares about itself. What's checkable from declared metadata alone: description quality, and whether a tool's own annotations are internally consistent.
-
-**The annotation-contradiction rule here is deliberately not a direct port of the static check.** Dogfooding against the real official `@modelcontextprotocol/server-memory` reference server, before this ever shipped, found the static check's rule — flag `destructiveHint` merely being *present* alongside `readOnlyHint: true`, regardless of its value — miscalibrated for live data: that server explicitly declares all four `ToolAnnotations` fields on every tool as a matter of good, complete practice (`read_graph`: `readOnlyHint=true, destructiveHint=false` — sensible and consistent), which the presence-only rule flagged as contradictory anyway. Presence is a fair proxy for "copy-paste leftover" in source code, where an author who didn't think about a field usually doesn't write it; at the wire level, a careful implementer setting every field explicitly is common, not a bug. Fixed before shipping: the live check requires `destructiveHint` to actually be `true`, not merely set, alongside `readOnlyHint: true` — re-verified clean (0/9 false positives) against the same reference server afterward.
+It checks less than the static scan: without the server's source, it can't tell whether a tool marked `readOnlyHint: true` actually writes. From declared metadata alone it checks description quality and whether a tool's annotations agree with each other. Only `destructiveHint: true` alongside `readOnlyHint: true` is a contradiction; an explicit `false` agrees with read-only. The official `server-memory` sets every annotation field on every tool (`read_graph`: `readOnlyHint=true, destructiveHint=false`), and the check raises 0 false alarms on its 9 tools.
 
 <a id="claude-code-plugin"></a>
 
@@ -349,7 +347,16 @@ Security findings are explained, not silently rewritten. The plugin lives in [`p
 
 ## What it checks
 
-Audits Python, TypeScript/JavaScript, Go and Rust servers in the same repo. Python detects the FastMCP `@mcp.tool()` decorator style, FastMCP's by-reference forms (`mcp.tool(fn)`, `mcp.tool(...)(fn)`, `mcp.add_tool(fn)`, `Tool.from_function(fn, ...)`, with `fn` followed into the module it's imported from or to a `self.` method), and the low-level SDK's `Tool(name=..., description=..., inputSchema=...)` style; TS/JS detects the official SDK's `server.registerTool(name, config, handler)` and `server.tool(name, description, schema, handler)` styles, including the common pattern where the config object or Zod schema is a same-file `const` reference rather than inline; Go detects the official `modelcontextprotocol/go-sdk`'s generic `mcp.AddTool(server, &mcp.Tool{...}, handler)` (checking parameters documented either via an explicit `InputSchema` or via `json`/`jsonschema` struct tags on the handler's argument type — the SDK's own schema-inference convention) and `mark3labs/mcp-go`'s older `s.AddTool(mcp.NewTool(name, mcp.WithDescription(...), mcp.WithString(...)), handler)` fluent-builder style, where every parameter is declared inline; Rust detects the official SDK's (`rmcp`) `#[tool]` attribute, read the way its macro reads it (`name`/`description` arguments, else the function name and its `///` doc comments; parameters from the `Parameters<T>` struct, documented by a field's doc comment or `#[schemars(description = ...)]`), plus `Tool::new(name, description, schema)` and hand-written `json!({"name": ..., "inputSchema": ...})` tool lists. The same checks apply across languages — a description and per-parameter docs (`Args:`/`Field(description=...)` in Python, `.describe(...)` on each Zod field in TS, a `jsonschema:"..."` struct tag or `mcp.Description(...)` builder call in Go) — except error handling, which isn't checked for Go (see Known limitations: Go's failure model is different enough from Python/TS exceptions that a naive port risked being wrong, not just incomplete), and the same goes for Rust.
+Audits Python, TypeScript/JavaScript, Go and Rust servers, including several in the same repo:
+
+| Language | Tool styles it finds |
+|---|---|
+| Python | FastMCP `@mcp.tool()`; its by-reference forms (`mcp.tool(fn)`, `mcp.tool(...)(fn)`, `mcp.add_tool(fn)`, `Tool.from_function(fn, ...)`, with `fn` followed into the module it's imported from or to a `self.` method); the low-level SDK's `Tool(name=..., description=..., inputSchema=...)` |
+| TS/JS | the official SDK's `server.registerTool(name, config, handler)` and `server.tool(name, description, schema, handler)`, including a config object or Zod schema held in a same-file `const` |
+| Go | the official go-sdk's `mcp.AddTool(server, &mcp.Tool{...}, handler)`, with parameters from an explicit `InputSchema` or the `json`/`jsonschema` struct tags on the handler's argument type; `mark3labs/mcp-go`'s `mcp.NewTool(name, mcp.WithDescription(...), mcp.WithString(...))` |
+| Rust | the official `rmcp` SDK's `#[tool]`, read the way its macro reads it (`name`/`description`, else the function name and its `///` doc comments; parameters from the `Parameters<T>` struct, documented by a doc comment or `#[schemars(description = ...)]`); `Tool::new(name, description, schema)`; hand-written `json!({"name": ..., "inputSchema": ...})` tool lists |
+
+The same checks apply in every language: a description, and per-parameter docs (`Args:`/`Field(description=...)` in Python, `.describe(...)` on each Zod field in TS, a `jsonschema:"..."` tag or `mcp.Description(...)` in Go, a doc comment in Rust). Error handling is checked for Python and TS/JS only: Go and Rust handlers report failure through a returned error, and a check that wouldn't be wrong there hasn't been designed yet ([Known limitations](#known-limitations)).
 
 **Per tool**:
 
@@ -413,7 +420,7 @@ From source: `pip install git+https://github.com/vishalhabib99/mcp-doctor.git`.
 - **No local-variable data-flow tracking.** `_resolve` follows a single expression (an identifier to its declaration, a member access, a `||` default, a `.filter()` call) but doesn't track a variable across multiple statements — a reassignment, a `.push(...)`, or a conditional `.map(...)` rewrite later in the same function body isn't seen. A `ListToolsRequestSchema` handler that builds its tool list this way (env-var-gated `.push()`, client-detection-based `.map()` rewrites, as in `n8n-mcp`) reports 0 tools rather than a guessed, possibly-wrong list — correct, but incomplete for that style of server.
 - **The low-level `Server` SDK style (`setRequestHandler(ListToolsRequestSchema, ...)`) is not checked for error handling.** There's no per-tool handler closure in this style — one generic dispatcher, keyed by tool name, serves every tool (and may proxy the real work to an entirely different process, as with a Chrome-extension-backed server), so flagging "no try/catch" per tool would be structurally meaningless. Only description and JSON-Schema `properties[x].description` are checked for this style.
 - **Duplicate-tool-name check has no call-graph or runtime-profile awareness.** It flags any two same-named `registerTool`/`tool`/`addTool` calls found anywhere in the source, even when they're on different server instances or gated behind mutually-exclusive runtime branches (e.g. an env-var-selected profile) that can never both register at once — a real pattern in `firecrawl-mcp-server`. Treat this warning as "worth a human glance," not a guaranteed live conflict.
-- **`--fix` only fixes the fully-undocumented case, Python only.** If a docstring already documents *some* params but not all, `--fix` leaves it alone rather than risk merging into it incorrectly — you'll still see the warning, just not an auto-stub. TS/JS and Go files aren't touched by `--fix` at all yet.
+- **`--fix` is Python only, and only extends Google-style `Args:` sections.** Missing names are appended to an existing `Args:` section, but a docstring that documents parameters as `:param:` or NumPy style is left alone rather than risk merging into it incorrectly; you'll still see the warning, just not an auto-stub. TS/JS, Go and Rust files aren't touched by `--fix`.
 - **Go: error handling isn't checked at all.** Go has no exception mechanism — a handler communicates failure through its `error` return value, which the SDK already turns into a structured tool error either way — and what a genuinely useful Go-specific check should even look for (a bare `panic` with no `recover`? an ignored error from a called function?) hasn't been researched carefully enough yet to check for without risking a check that's wrong rather than just incomplete.
 - **Go: heavily customized in-house registries built on top of either SDK aren't introspected.** `github/github-mcp-server` (32k★) wraps the official SDK in its own bespoke tool registry (middleware, OAuth-scope gating, generated handlers) rather than calling `mcp.AddTool` directly at any single, simple call site — same category of gap as Python's class-based low-level `Server` registries, and left undone for the same reason: reliably resolving it is a materially bigger undertaking than a scoped fix.
 - **Rust: error handling, stdout writes, dynamic exec and SSRF aren't checked; secrets are.** A handler reports failure through its `Result`, as in Go. A server that builds its tools at runtime (WebAssembly components, plugins, a registry filled from config, as in `microsoft/wassette` and `hyper-mcp`) has no tools to read from source; `fuzz` and `verdict` check those. Of the 20 most-starred Rust MCP servers on 2026-10-18, 6 build their tools that way. A description or parameter type that isn't a literal (`include_str!`, a generic `T::Parameter`) counts as present and isn't checked further.
@@ -439,7 +446,7 @@ From source: `pip install git+https://github.com/vishalhabib99/mcp-doctor.git`.
 
 ## Real-world spot check
 
-Every check was tuned on real servers, not only the fixtures in `examples/`: 40+ servers in Python, TypeScript and Go, including official ones from GitHub, Red Hat, Brave and MathWorks. Each pass, the bug it exposed in mcp-doctor and the before and after are in [docs/dogfooding.md](docs/dogfooding.md); newer passes are in [docs/BUILD_LOG.md](docs/BUILD_LOG.md).
+Every check was tuned on real servers, not only the fixtures in `examples/`: tool detection is measured on 805 servers in Python, TypeScript and Go ([coverage](docs/coverage.md)) and on the 20 most-starred Rust servers, every fix is re-run on 120+ real repos before it ships, and the servers include official ones from GitHub, Red Hat, Brave and MathWorks. Each pass, the bug it exposed in mcp-doctor and the before and after are in [docs/dogfooding.md](docs/dogfooding.md); newer passes are in [docs/BUILD_LOG.md](docs/BUILD_LOG.md).
 
 ## Contributing
 
