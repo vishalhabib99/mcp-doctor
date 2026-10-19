@@ -2486,7 +2486,10 @@ _PY_MCP_IMPORT = re.compile(r"^\s*(?:import|from)\s+(?:mcp|fastmcp)\b", re.M)
 _PY_TOOL_DECORATOR = re.compile(r"^\s*@\w+(?:\.\w+)*\.tool\b", re.M)
 
 
-def _is_auxiliary_file(path: Path) -> bool:
+def _is_auxiliary_file(path: Path, root: Path | None = None) -> bool:
+    # Folder names count only inside the scanned repo: a server cloned under
+    # ~/tests/ or ~/scripts/ had every file skipped and 0 tools found (bug #124).
+    parts = path.relative_to(root).parts[:-1] if root else path.parts
     name = path.name
     if name.endswith("_test.go"):
         return True  # enforced by the Go toolchain
@@ -2498,7 +2501,7 @@ def _is_auxiliary_file(path: Path) -> bool:
         # test folder, such a file is source when it imports an MCP server
         # library and holds no tests; a test harness script without pytest
         # functions (pal-mcp-server's communication_simulator_test.py) still isn't.
-        if any(part in ("test", "tests") for part in path.parts):
+        if any(part in ("test", "tests") for part in parts):
             return True
         try:
             text = path.read_text(errors="ignore")
@@ -2508,7 +2511,7 @@ def _is_auxiliary_file(path: Path) -> bool:
         return not (is_server and not _PY_TEST_CONTENT.search(text))
     if name.endswith(_JS_TEST_SUFFIXES):
         return True
-    return any(part in ("test", "tests", "scripts", "benchmarks") for part in path.parts)
+    return any(part in ("test", "tests", "scripts", "benchmarks") for part in parts)
 
 
 # Third-party or generated code committed into a repo: vendored libraries,
@@ -2563,10 +2566,10 @@ def _rust_test_lines(text: str) -> list[tuple[int, int]]:
     return test_line_ranges(text.encode())
 
 
-def _scan_secrets(py_files: list[Path]) -> list[RepoIssue]:
+def _scan_secrets(py_files: list[Path], root: Path | None = None) -> list[RepoIssue]:
     issues = []
     for f in py_files:
-        if _is_auxiliary_file(f):
+        if _is_auxiliary_file(f, root):
             continue
         try:
             text = f.read_text(errors="ignore")
@@ -2620,7 +2623,7 @@ def analyze_repo(root: Path) -> Report:
     trees: list[tuple[str, ast.Module]] = []
     unparseable: list[str] = []
     for f in py_files:
-        if _is_auxiliary_file(f):
+        if _is_auxiliary_file(f, root):
             continue
         try:
             # utf-8-sig: Python runs a file with a leading byte-order mark, but
@@ -2845,26 +2848,26 @@ def analyze_repo(root: Path) -> Report:
         # Tool discovery already skipped them; the security scan graded
         # chenlinyang/mcp-server-mysql on a 138k-line `.smithery/index.cjs` bundle.
         and not any(part in _JS_BUILD_DIRS or part.startswith(".") for part in p.relative_to(root).parts[:-1])
-        and not _is_auxiliary_file(p)
+        and not _is_auxiliary_file(p, root)
     )
     go_files = sorted(
         p for p in root.rglob("*.go")
         if "vendor" not in p.relative_to(root).parts[:-1] and in_repo(p)
-        and not _is_auxiliary_file(p)
+        and not _is_auxiliary_file(p, root)
     )
     # Filter before de-duplicating: a server file identical to a vendored or
     # benchmark copy must survive as the copy that's kept.
     own = sorted(p for p in all_py_files + ts_js_files + go_files if not _is_vendored(p.relative_to(root)))
     all_files = _dedupe_by_content(own)
     # Rust gets the secrets check only: the exec/SSRF patterns are Python/JS/Go calls.
-    repo_issues.extend(_scan_secrets(all_files + [p for p in rs_files if not _is_rust_test_file(p, root, read=False)]))
+    repo_issues.extend(_scan_secrets(all_files + [p for p in rs_files if not _is_rust_test_file(p, root, read=False)], root))
     # Exec, SSRF and deserialization ask whether an agent can reach the call, so
     # benchmark, experiment, archive and docs scripts are left out of them.
     tool_files = {t.file for t in tools}
     reachable = _dedupe_by_content([p for p in own if not _not_server_code(p.relative_to(root), tool_files)])
-    repo_issues.extend(scan_dangerous_exec(reachable))
-    repo_issues.extend(scan_ssrf(reachable))
-    repo_issues.extend(scan_unsafe_deserialization([p for p in reachable if p.suffix == ".py"]))
+    repo_issues.extend(scan_dangerous_exec(reachable, root))
+    repo_issues.extend(scan_ssrf(reachable, root))
+    repo_issues.extend(scan_unsafe_deserialization([p for p in reachable if p.suffix == ".py"], root))
 
     score = 0
     max_score = 0

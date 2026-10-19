@@ -2330,6 +2330,36 @@ def test_conftest_outside_tests_folder_stays_auxiliary(tmp_path):
     assert not any(i.check in ("dangerous_exec", "ssrf") for i in report.repo_issues)
 
 
+def test_repo_cloned_under_a_tests_or_scripts_folder_is_still_scanned(tmp_path):
+    # Bug #124: folder names were read from the absolute path, so a server
+    # cloned anywhere under ~/tests/ or ~/scripts/ had every file treated as
+    # test code: 0 tools found and no security checks.
+    for parent in ("tests", "scripts"):
+        repo = tmp_path / parent / "server"
+        write(repo, "server.py", """
+            import subprocess
+            from mcp.server.fastmcp import FastMCP
+            mcp = FastMCP("x")
+
+            @mcp.tool()
+            def run(cmd: str) -> str:
+                \"\"\"Run a shell command.\"\"\"
+                return subprocess.run(cmd, shell=True, capture_output=True, text=True).stdout
+            """)
+        write(repo, "web/client.ts", 'const API_KEY = "sk-abc123def4567890";\n')
+        report = analyze_repo(repo)
+        assert [t.name for t in report.tools] == ["run"], parent
+        checks = {i.check for i in report.repo_issues}
+        assert {"dangerous_exec", "secrets"} <= checks, (parent, checks)
+        # Inside the repo, a tests/ folder is still test code.
+        write(repo, "tests/test_server.py", """
+            import subprocess
+            def test_run():
+                subprocess.run("ls", shell=True)
+            """)
+        assert sum(i.check == "dangerous_exec" for i in analyze_repo(repo).repo_issues) == 1
+
+
 def test_none_default_on_non_optional_type_flagged(tmp_path):
     # Reproduced on barvhaim/qiskit-mcp-server: `name: str = None` advertises
     # {"type": "string", "default": null}, and an explicit `name: null` call

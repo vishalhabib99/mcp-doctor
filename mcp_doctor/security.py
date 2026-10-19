@@ -177,10 +177,10 @@ def _mask_strings_and_line_comments(line: str) -> str:
     return stripped
 
 
-def scan_dangerous_exec(files: list[Path]) -> list[RepoIssue]:
+def scan_dangerous_exec(files: list[Path], root: Path | None = None) -> list[RepoIssue]:
     issues = []
     for f in files:
-        if _is_auxiliary_file(f):
+        if _is_auxiliary_file(f, root):
             continue
         try:
             text = f.read_text(errors="ignore")
@@ -233,10 +233,10 @@ _HTTP_CALL_WITH_VAR_ARG = [
 ]
 
 
-def scan_ssrf(files: list[Path]) -> list[RepoIssue]:
+def scan_ssrf(files: list[Path], root: Path | None = None) -> list[RepoIssue]:
     issues = []
     for f in files:
-        if _is_auxiliary_file(f):
+        if _is_auxiliary_file(f, root):
             continue
         try:
             text = f.read_text(errors="ignore")
@@ -265,10 +265,10 @@ _YAML_LOAD = re.compile(r"\byaml\.load\s*\(")
 _YAML_SAFE_LOADER = re.compile(r"Loader\s*=\s*yaml\.SafeLoader")
 
 
-def scan_unsafe_deserialization(py_files: list[Path]) -> list[RepoIssue]:
+def scan_unsafe_deserialization(py_files: list[Path], root: Path | None = None) -> list[RepoIssue]:
     issues = []
     for f in py_files:
-        if _is_auxiliary_file(f):
+        if _is_auxiliary_file(f, root):
             continue
         try:
             text = f.read_text(errors="ignore")
