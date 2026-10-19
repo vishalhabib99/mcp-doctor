@@ -14,3 +14,4 @@ leaderboard/badges/
 plugin/evals/results/
 leaderboard/check/py/mcp_doctor/
 leaderboard/check/py/manifest.json
+.venv*/

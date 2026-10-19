@@ -11,6 +11,10 @@ mechanically, without human judgment:
   the file already imports ``Optional`` from typing; inside ``Annotated[...]``
   only the first element is wrapped, so the metadata stays put
 
+With ``--llm`` (``llm_docs.Drafter``), the ``Args:`` entries get drafted
+descriptions instead of TODO placeholders; without it nothing is written
+that a person didn't.
+
 Deliberately does not touch: missing/short descriptions (can't fabricate
 real intent), untyped parameters (can't infer real types), wrapping a
 function body in try/except (too invasive to do safely), or a partial
@@ -23,6 +27,7 @@ import ast
 import functools
 import re
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .analyzer import (
     Report,
@@ -36,6 +41,9 @@ from .analyzer import (
     _is_none_default,
 )
 
+if TYPE_CHECKING:
+    from .llm_docs import Drafter
+
 _DOCSTRING_QUOTE = re.compile(r'^(\s*)(\'\'\'|""")(.*)\2\s*\n?$')
 _CLOSING_QUOTE_ONLY = re.compile(r'^(\s*)(\'\'\'|""")\s*\n?$')
 _CLOSING_QUOTE_TRAILING = re.compile(r'^(.*?)(\'\'\'|""")\s*\n?$')
@@ -43,6 +51,7 @@ _CLOSING_QUOTE_TRAILING = re.compile(r'^(.*?)(\'\'\'|""")\s*\n?$')
 # only a plain Google-style section is safe to append entries to.
 _GOOGLE_ARGS_HEADING = re.compile(r"^\s*(Args|Arguments|Params|Parameters):\s*\n?$")
 _PARTIAL_DOCS_MISSING = re.compile(r"^\d+ of \d+ parameters aren't documented: (.+?) — ")
+_STUB_TEXT = "TODO: describe this parameter."
 
 
 def _indent_of(line: str) -> str:
@@ -98,7 +107,10 @@ def _fully_undocumented_args(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> list
     return [a.arg for a in args]
 
 
-def _apply_args_stub(lines: list[str], fn: ast.FunctionDef | ast.AsyncFunctionDef, arg_names: list[str]) -> bool:
+def _apply_args_stub(
+    lines: list[str], fn: ast.FunctionDef | ast.AsyncFunctionDef, arg_names: list[str],
+    texts: dict[str, str] | None = None,
+) -> bool:
     if not fn.body:
         return False
     doc_expr = fn.body[0]
@@ -109,7 +121,8 @@ def _apply_args_stub(lines: list[str], fn: ast.FunctionDef | ast.AsyncFunctionDe
     end_idx = doc_expr.end_lineno - 1
     indent = _indent_of(lines[start_idx])
 
-    args_block = [f"{indent}Args:\n"] + [f"{indent}    {a}: TODO: describe this parameter.\n" for a in arg_names]
+    texts = texts or {}
+    args_block = [f"{indent}Args:\n"] + [f"{indent}    {a}: {texts.get(a, _STUB_TEXT)}\n" for a in arg_names]
 
     if start_idx == end_idx:
         m = _DOCSTRING_QUOTE.match(lines[start_idx])
@@ -264,7 +277,10 @@ def _missing_from_partial_docs(finding: ToolFinding) -> list[str]:
     return []
 
 
-def _append_to_args_section(lines: list[str], fn: ast.FunctionDef | ast.AsyncFunctionDef, arg_names: list[str]) -> bool:
+def _append_to_args_section(
+    lines: list[str], fn: ast.FunctionDef | ast.AsyncFunctionDef, arg_names: list[str],
+    texts: dict[str, str] | None = None,
+) -> bool:
     if not fn.body:
         return False
     doc_expr = fn.body[0]
@@ -300,7 +316,8 @@ def _append_to_args_section(lines: list[str], fn: ast.FunctionDef | ast.AsyncFun
     if any(re.search(rf"\b{re.escape(a)}\b", section) for a in arg_names):
         return False  # already mentioned in some form the analyzer can't parse — a human should merge it
 
-    new_entries = [f"{entry_indent}{a}: TODO: describe this parameter.\n" for a in arg_names]
+    texts = texts or {}
+    new_entries = [f"{entry_indent}{a}: {texts.get(a, _STUB_TEXT)}\n" for a in arg_names]
     lines[last_idx + 1:last_idx + 1] = new_entries
     return True
 
@@ -310,7 +327,7 @@ FIX_KINDS = ("none-default", "bare-except", "args-stub")
 
 def plan_fixes(
     root: Path, report: Report, doc_stubs: bool = True, only: frozenset[str] | None = None,
-    skipped: list[str] | None = None,
+    skipped: list[str] | None = None, drafter: Drafter | None = None,
 ) -> dict[str, tuple[str, str]]:
     """Compute the safe subset of fixes without writing anything. Returns
     {relative path: (original source, fixed source)} for each file that
@@ -318,7 +335,8 @@ def plan_fixes(
     are TODO placeholders a person still has to write. ``only`` limits the
     fixes to those kinds (see ``FIX_KINDS``), so one upstream PR can carry
     one kind of fix. Parameters left alone on purpose are appended to
-    ``skipped`` as "file: function.param"."""
+    ``skipped`` as "file: function.param". A ``drafter`` (``--llm``) writes
+    each ``Args:`` entry's text in place of the TODO placeholder."""
     kinds = frozenset(FIX_KINDS) if only is None else only
     doc_stubs = doc_stubs and "args-stub" in kinds
     planned: dict[str, tuple[str, str]] = {}
@@ -365,12 +383,17 @@ def plan_fixes(
                 if fn is None:
                     continue
                 missing = _missing_from_partial_docs(t)
-                if missing:
-                    _append_to_args_section(lines, fn, missing)
+                arg_names = missing or _fully_undocumented_args(fn)
+                if not arg_names:
                     continue
-                arg_names = _fully_undocumented_args(fn)
-                if arg_names:
-                    _apply_args_stub(lines, fn, arg_names)
+                insert = _append_to_args_section if missing else _apply_args_stub
+                if not insert(list(lines), fn, arg_names):
+                    continue  # this docstring won't take entries; don't spend model calls on it
+                texts = _drafted_texts(drafter, fn, arg_names, source, tree2)
+                if missing:
+                    _append_to_args_section(lines, fn, missing, texts)
+                else:
+                    _apply_args_stub(lines, fn, arg_names, texts)
             source = "".join(lines)
 
         if source != original:
@@ -380,12 +403,27 @@ def plan_fixes(
     return planned
 
 
+def _drafted_texts(
+    drafter: Drafter | None, fn: ast.FunctionDef | ast.AsyncFunctionDef, arg_names: list[str],
+    source: str, tree: ast.Module,
+) -> dict[str, str]:
+    if drafter is None:
+        return {}
+    texts = {}
+    for name in arg_names:
+        text = drafter.describe(fn, name, source, tree)
+        if text:
+            texts[name] = text
+    return texts
+
+
 def apply_fixes(
     root: Path, report: Report, only: frozenset[str] | None = None, skipped: list[str] | None = None,
+    drafter: Drafter | None = None,
 ) -> list[str]:
     """Apply the safe subset of fixes in place. Returns the relative paths
     of files that were changed."""
-    planned = plan_fixes(root, report, only=only, skipped=skipped)
+    planned = plan_fixes(root, report, only=only, skipped=skipped, drafter=drafter)
     for rel_file, (_, fixed) in planned.items():
         (root / rel_file).write_text(fixed)
     return list(planned)

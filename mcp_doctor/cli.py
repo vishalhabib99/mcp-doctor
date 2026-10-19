@@ -22,10 +22,32 @@ def _print_skipped(skipped: list[str]) -> None:
     for item in skipped:
         print(f"  {item}", file=sys.stderr)
 
+def _print_llm_summary(drafter) -> None:
+    if drafter is None:
+        return
+    print(
+        f"Drafted {drafter.drafted} parameter description(s) with {drafter.model} (local). "
+        "Review each one before you commit it: the model read only the tool's own function.",
+        file=sys.stderr,
+    )
+    if drafter.format_todos:
+        print(
+            f"{len(drafter.format_todos)} need a format the code doesn't show, marked "
+            "'TODO: state the expected format.':",
+            file=sys.stderr,
+        )
+        for item in drafter.format_todos:
+            print(f"  {item}", file=sys.stderr)
+    if drafter.failed:
+        print(f"{len(drafter.failed)} left as 'TODO: describe this parameter.' (no usable draft):", file=sys.stderr)
+        for item in drafter.failed:
+            print(f"  {item}", file=sys.stderr)
+
 SUITE_HELP = """\
 the suite, one command each:
   mcp-doctor [path]                     static scan: quality and security grades (this command)
   mcp-doctor [path] --fix | --diff      apply or preview the safe mechanical fixes
+  mcp-doctor [path] --diff --llm        same, with parameter docs drafted by a local model (Ollama)
   mcp-doctor [path] --diff-against F    breaking changes since a saved --json baseline
   mcp-doctor fuzz -- <command>          launch the server, call it with bad input  [runtime]
   mcp-doctor fuzz --truth -- <command>  call it with valid input, check answers are real  [runtime]
@@ -116,6 +138,19 @@ def main(argv: list[str] | None = None) -> int:
         "(none-default, bare-except, args-stub), e.g. one kind per upstream PR",
     )
     parser.add_argument(
+        "--llm",
+        action="store_true",
+        help="With --fix or --diff: draft the missing parameter descriptions with a local model "
+        "(Ollama) instead of TODO placeholders. Allowed values and defaults come from the code; "
+        "a format the code doesn't show stays a TODO",
+    )
+    parser.add_argument(
+        "--llm-model",
+        metavar="MODEL",
+        default=None,
+        help="Ollama model for --llm (default: $MCP_DOCTOR_LLM_MODEL or qwen3:8b); OLLAMA_HOST sets the server",
+    )
+    parser.add_argument(
         "--diff-against",
         metavar="PATH",
         default=None,
@@ -144,6 +179,25 @@ def main(argv: list[str] | None = None) -> int:
             print("error: --fix-only needs --fix or --diff", file=sys.stderr)
             return 2
 
+    drafter = None
+    if args.llm or args.llm_model:
+        if not (args.fix or args.diff):
+            print("error: --llm needs --fix or --diff", file=sys.stderr)
+            return 2
+        if only is not None and "args-stub" not in only:
+            print("error: --llm drafts args-stub entries; add args-stub to --fix-only", file=sys.stderr)
+            return 2
+        import os
+
+        from .llm_docs import DEFAULT_MODEL, Drafter, LLMUnavailable, check_ollama
+
+        drafter = Drafter(model=args.llm_model or os.environ.get("MCP_DOCTOR_LLM_MODEL") or DEFAULT_MODEL)
+        try:
+            check_ollama(drafter.model)
+        except LLMUnavailable as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
+
     root = Path(args.path).resolve()
     if not root.exists():
         print(f"error: path does not exist: {root}", file=sys.stderr)
@@ -157,7 +211,7 @@ def main(argv: list[str] | None = None) -> int:
         from .fix import plan_fixes
 
         skipped: list[str] = []
-        planned = plan_fixes(root, report, only=only, skipped=skipped)
+        planned = plan_fixes(root, report, only=only, skipped=skipped, drafter=drafter)
         for rel_file, (original, fixed) in planned.items():
             sys.stdout.writelines(difflib.unified_diff(
                 original.splitlines(keepends=True), fixed.splitlines(keepends=True),
@@ -165,19 +219,21 @@ def main(argv: list[str] | None = None) -> int:
             ))
         print(f"{len(planned)} file(s) would change." if planned else "Nothing to fix.", file=sys.stderr)
         _print_skipped(skipped)
+        _print_llm_summary(drafter)
         return 0
 
     if args.fix:
         from .fix import apply_fixes
 
         skipped = []
-        changed = apply_fixes(root, report, only=only, skipped=skipped)
+        changed = apply_fixes(root, report, only=only, skipped=skipped, drafter=drafter)
         if changed:
             print(f"Fixed {len(changed)} file(s): {', '.join(changed)}", file=sys.stderr)
             report = analyze_repo(root)
         else:
             print("Nothing to fix.", file=sys.stderr)
         _print_skipped(skipped)
+        _print_llm_summary(drafter)
 
     schema_changes = []
     if args.diff_against:

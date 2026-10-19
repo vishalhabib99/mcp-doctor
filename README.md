@@ -90,6 +90,7 @@ mcp-doctor . --fail-under 80      # exit 1 if score drops below 80% — wire int
 mcp-doctor . --diff               # preview the safe fixes as a patch (pipe to `git apply`); changes nothing
 mcp-doctor . --fix                # apply safe, mechanical fixes in place, then re-report
 mcp-doctor . --fix --fix-only none-default  # one kind of fix only (none-default, bare-except, args-stub), e.g. one kind per PR
+mcp-doctor . --diff --llm         # same patch, with parameter docs drafted by a local model instead of TODOs
 ```
 
 `--fix` only touches what's safe to fix without human judgment:
@@ -98,7 +99,19 @@ mcp-doctor . --fix --fix-only none-default  # one kind of fix only (none-default
 - **Missing parameter docs:** a tool with no parameter docs gets an `Args:` section with `TODO: describe this parameter.` placeholders; a tool with a Google-style `Args:` section that leaves some out gets the missing names appended to it. A name already mentioned in the section in a form the scanner can't parse (`color_from / color_to: ...`) is left for a human rather than duplicated.
 - **Bare `except:`** narrowed to `except Exception:`.
 
-It never fabricates a real description, guesses at an untyped parameter's type, wraps a function body in try/except, or merges into a `:param:` or NumPy docstring. Every patched file is re-parsed before it's written.
+**`--llm` (opt-in, local):** with `--diff` or `--fix`, the `Args:` entries get real descriptions instead of `TODO` placeholders. What the code proves is written by rule: the values of a `Literal[...]` or same-file `Enum`, and a constant default. A local model ([Ollama](https://ollama.com), default `qwen3:8b`; `--llm-model` or `MCP_DOCTOR_LLM_MODEL` to change it, `OLLAMA_HOST` for the server) reads only the tool's own function and writes what the parameter is for. When an agent would need a format the code doesn't show, the entry says `TODO: state the expected format.` instead of a guess. Nothing leaves your machine. Review the diff before you commit: before building it, qwen3:8b was right on 18 of 20 real undocumented parameters, and on 4 more servers (34 parameters, 2 minutes on a laptop) it got 32 right; the misses were plausible-sounding behavior the code doesn't show.
+
+```
+$ mcp-doctor . --diff --llm
++        Args:
++            contains: Filter family types by substring of name (case-insensitive).
++            limit: Maximum number of family types to return in the list. Defaults to 50.
++            ctx: TODO: describe this parameter.
+```
+
+*(A real run on [mcp-server-for-revit-python](https://github.com/mcp-servers-for-revit/mcp-server-for-revit-python). `ctx` is the SDK's injected `Context`, which an agent never sees, so the model isn't asked about it.)*
+
+Without `--llm`, it never fabricates a real description, guesses at an untyped parameter's type, wraps a function body in try/except, or merges into a `:param:` or NumPy docstring. Every patched file is re-parsed before it's written.
 
 ### Schema/contract diff — catch a breaking change between releases
 
@@ -422,6 +435,7 @@ From source: `pip install git+https://github.com/vishalhabib99/mcp-doctor.git`.
 - [x] `--diff-against` for TypeScript and Go
 - [x] Rust server support — the official `rmcp` SDK's `#[tool]` attribute, `Tool::new`, and `json!` tool lists
 - [x] Python SDK v2 readiness — flag servers that crash on a fresh install of `mcp` 2.x
+- [x] `--fix --llm` — parameter docs drafted by a local model (Ollama) instead of TODO placeholders
 - [ ] `--fix` for TypeScript and Go: deliberately not planned yet. The mechanical fixes (nullable `None` defaults, bare `except:`) are Python bugs; the only TS candidate is a `TODO` description placeholder, which the Action already leaves off by default
 
 ## Real-world spot check
