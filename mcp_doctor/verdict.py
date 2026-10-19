@@ -72,7 +72,11 @@ def decide(doctor: dict | None, fuzz: dict | None, reality: dict | None) -> Deci
         issues = _doctor_issues(doctor)
         sec_errors = [i for i in issues if i.get("category") == "security" and i.get("severity") == "error"]
         sec_warnings = [i for i in issues if i.get("category") == "security" and i.get("severity") != "error"]
-        quality_errors = [i for i in issues if i.get("category") != "security" and i.get("severity") == "error"]
+        quality_errors = [
+            i for i in issues
+            if i.get("category") != "security" and i.get("severity") == "error" and i.get("check") != "sdk_v2"
+        ]
+        sdk_v2 = [i for i in issues if i.get("check") == "sdk_v2"]
         if sec_errors:
             checks = sorted({i["check"] for i in sec_errors})
             blockers.append(f"static scan: {_count(len(sec_errors), 'security error')} ({', '.join(checks)})")
@@ -80,6 +84,8 @@ def decide(doctor: dict | None, fuzz: dict | None, reality: dict | None) -> Deci
             fixes.append(f"static scan: {_count(len(sec_warnings), 'security warning')}")
         if quality_errors:
             fixes.append(f"static scan: {_count(len(quality_errors), 'spec/documentation error')}")
+        if sdk_v2:
+            fixes.append("static scan: a fresh install gets mcp 2.x, which removed an import the server uses (pin 'mcp<2' or migrate)")
 
     if fuzz is not None:
         if fuzz.get("connect_error"):

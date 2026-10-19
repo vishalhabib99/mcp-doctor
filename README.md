@@ -360,6 +360,7 @@ Audits Python, TypeScript/JavaScript, Go and Rust servers in the same repo. Pyth
 - LICENSE exists
 - Tests exist
 - Dependencies are declared (`pyproject.toml` / `requirements.txt` / `setup.py` / `package.json`)
+- Python: the server still starts on a fresh install. `mcp` 2.x removed `mcp.server.fastmcp` (FastMCP is now `MCPServer`), a few other v1 imports and the low-level `@server.list_tools()`-style decorators. A server that uses them and asks for `mcp` with no upper bound (`mcp>=1.6`, `mcp[cli]`) gets 2.x from pip/uvx and fails at start; the report names the line and the fix (pin `mcp<2`, or the v2 rename). Shown as an error, not scored. Runtime-only breaks (`tool.inputSchema` is now `input_schema`) aren't checked
 - Tool names conform to the [spec's Tool Names guidance](https://modelcontextprotocol.io/specification/2026-07-28/server/tools#tool-names) (1–128 chars, `A-Z a-z 0-9 _ - .` only, unique within the server)
 
 ## Security checks
@@ -420,6 +421,7 @@ From source: `pip install git+https://github.com/vishalhabib99/mcp-doctor.git`.
 - [x] `guard` over HTTP (`--url`)
 - [x] `--diff-against` for TypeScript and Go
 - [x] Rust server support — the official `rmcp` SDK's `#[tool]` attribute, `Tool::new`, and `json!` tool lists
+- [x] Python SDK v2 readiness — flag servers that crash on a fresh install of `mcp` 2.x
 - [ ] `--fix` for TypeScript and Go: deliberately not planned yet. The mechanical fixes (nullable `None` defaults, bare `except:`) are Python bugs; the only TS candidate is a `TODO` description placeholder, which the Action already leaves off by default
 
 ## Real-world spot check

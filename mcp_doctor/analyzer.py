@@ -2600,6 +2600,7 @@ def analyze_repo(root: Path) -> Report:
     # from this module, so importing them at module load time would be circular.
     from .go_analyzer import find_go_tools
     from .rs_analyzer import find_rust_tools
+    from .sdk_upgrade import scan_sdk_v2_breakage
     from .security import (
         scan_dangerous_exec,
         scan_prompt_injection,
@@ -2868,6 +2869,8 @@ def analyze_repo(root: Path) -> Report:
     repo_issues.extend(scan_dangerous_exec(reachable, root))
     repo_issues.extend(scan_ssrf(reachable, root))
     repo_issues.extend(scan_unsafe_deserialization([p for p in reachable if p.suffix == ".py"], root))
+    # Not scored: a crash on install is shown as an error, but the grade measures the tools.
+    repo_issues.extend(scan_sdk_v2_breakage(root, trees))
 
     score = 0
     max_score = 0
