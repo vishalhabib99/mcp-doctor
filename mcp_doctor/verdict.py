@@ -96,6 +96,11 @@ def decide(doctor: dict | None, fuzz: dict | None, reality: dict | None) -> Deci
             blockers.append(f"fuzz: run ended early ({fuzz['terminated_early']})")
         if fuzz.get("timeout_count", 0) > 0:
             fixes.append(f"fuzz: {_count(fuzz['timeout_count'], 'timeout')} on bad input")
+        hidden = (fuzz.get("hidden_errors") or {}).get("tools") or []
+        if hidden:
+            # The call completed, but the agent got no reason to act on (mcp 2.x drops an unexpected exception's text).
+            fixes.append(f"fuzz: {_count(len(hidden), 'tool')} answered an error with only \"Error executing tool <name>\" "
+                         f"({', '.join(t['name'] for t in hidden)}); raise ToolError with a message")
         concurrency = (fuzz.get("concurrency") or {}).get("flagged_tools") or []
         if concurrency:
             fixes.append(f"fuzz: {_count(len(concurrency), 'tool')} misbehaved under concurrent calls")

@@ -127,18 +127,36 @@ def test_bare_sdk_error_is_flagged_as_a_hidden_message(fuzz_report):
     assert not any(o.hidden_message for o in _tool(fuzz_report, "well_behaved").outcomes)
 
 
-def test_hidden_error_messages_are_reported_but_not_scored(fuzz_report):
+def test_hidden_error_messages_are_reported_and_a_valid_case_leaves_the_percent_alone(fuzz_report):
     from mcp_doctor.fuzz.report import render_text, to_dict
 
     report = build_report(fuzz_report)
     assert report.hidden_errors.tools["always_crashes"] == ["valid"]
     assert "well_behaved" not in report.hidden_errors.tools
-    assert report.grade == "A"  # unchanged: a hidden message is not a crash
+    assert report.grade == "A"  # a valid-case hidden message stays out of the percent (synthetic input)
+    assert report.hidden_error_count == 0 and report.crash_count == 0
     text = render_text(report)
     assert "Hidden error messages:" in text
     assert "always_crashes — " in text and "error message hidden" in text
     hidden = {t["name"]: t["cases"] for t in to_dict(report)["hidden_errors"]["tools"]}
     assert hidden["always_crashes"] == ["valid"]
+
+def test_hidden_error_on_bad_input_counts_against_crash_resilience():
+    from mcp_doctor.fuzz.engine import CallOutcome, FuzzReport, ToolResult
+    from mcp_doctor.fuzz.report import render_text, to_dict
+
+    bare = "Error executing tool lookup"
+    raw = FuzzReport("srv", tools=[ToolResult("lookup", True, outcomes=[
+        CallOutcome("valid", None, "ok"),
+        CallOutcome("missing_required", "id", "graceful_error", "id is required"),
+        CallOutcome("wrong_type", "id", "graceful_error", bare, hidden_message=True),
+    ])])
+    report = build_report(raw)
+    assert report.hidden_error_count == 1 and report.crash_count == 0
+    assert report.crash_resilience_percent == 50.0 and report.grade == "D"
+    assert "1 hidden error(s) across 2 bad-input calls" in render_text(report)
+    assert to_dict(report)["hidden_error_count"] == 1
+
 
 ENV_REQUIRED_SERVER = str(Path(__file__).parent / "fixtures" / "env_required_server.py")
 

@@ -96,6 +96,14 @@ def test_fix_level_runtime_findings():
         assert decide(_doctor(), _fuzz(), _reality(_tool("a", **flag))).verdict == FIX_FIRST, flag
 
 
+def test_hidden_error_message_needs_a_fix_but_does_not_block():
+    fuzz = _fuzz(hidden_errors={"tools": [{"name": "lookup", "cases": ["valid"]}]})
+    d = decide(_doctor(), fuzz, _reality())
+    assert d.verdict == FIX_FIRST
+    assert any("lookup" in r and "Error executing tool" in r for r in d.fixes)
+    assert decide(_doctor(), _fuzz(hidden_errors={"tools": []}), _reality()).verdict == SHIP
+
+
 def test_blockers_outrank_fixes_and_all_reasons_are_kept():
     d = decide(_doctor(), _fuzz(crash_count=1, timeout_count=1), _reality())
     assert d.verdict == BLOCK

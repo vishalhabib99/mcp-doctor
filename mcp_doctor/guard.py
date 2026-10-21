@@ -32,7 +32,11 @@ client started (same parent process), so a page fetched through one server
 and a write made through another are seen together. --hold-leaks stops a
 flagged write before it reaches the server instead of only warning.
 
-    mcp-doctor guard [--log FILE] [--no-verify] [--hold-leaks] -- <server command> [args...]
+--otel exports one OpenTelemetry span per call carrying guard's verdict
+(confirmed / passed / unconfirmed / flagged / held / error), so it lands in the trace
+store the team already runs; see guard_otel.py.
+
+    mcp-doctor guard [--log FILE] [--no-verify] [--hold-leaks] [--otel URL|FILE] -- <server command> [args...]
 """
 from __future__ import annotations
 
@@ -588,6 +592,9 @@ class Pending:
     args: dict
     started: float
     findings: list[Finding] = field(default_factory=list)
+    rid: Any = None
+    params: Any = None
+    start_ns: int = 0
 
 
 class HttpUpstream:
@@ -687,8 +694,10 @@ class HttpUpstream:
 class Guard:
     def __init__(self, argv: list[str], verify: bool = True, log_path: str | None = None,
                  client_in=None, client_out=None, err=None, hold_leaks: bool = False, journal: str | None = None,
-                 url: str | None = None, headers: dict[str, str] | None = None):
+                 url: str | None = None, headers: dict[str, str] | None = None, otel=None):
         self.argv = argv
+        self.otel = otel  # guard_otel.SpanExporter: one span per call with guard's verdict
+        self.protocol: str | None = None
         self.url = url
         self.upstream: HttpUpstream | None = None
         self.verify = verify
@@ -769,7 +778,7 @@ class Guard:
             if isinstance(msg, dict) and "id" in msg and msg.get("method") == "tools/call":
                 params = msg.get("params") or {}
                 name, args = params.get("name", ""), params.get("arguments") or {}
-                p = Pending(name, args, time.monotonic())
+                p = Pending(name, args, time.monotonic(), rid=msg["id"], params=params, start_ns=time.time_ns())
                 p.findings += check_arguments(self.tools.get(name), args)
                 leak: list[Finding] = []
                 try:
@@ -779,6 +788,7 @@ class Guard:
                     print(f"[mcp-doctor guard] internal error on {name}: {e!r}", file=self.err, flush=True)
                 if leak and self.hold_leaks:
                     self.report(name, leak)
+                    self.export(p, "held", leak)
                     self.to_client({"jsonrpc": "2.0", "id": msg["id"], "result": {"isError": True, "content": [
                         {"type": "text", "text": PREFIX + leak[0].message + " The call was held and not sent (--hold-leaks)."}]}})
                     continue
@@ -829,6 +839,10 @@ class Guard:
             pending = self.pending.pop(rid, None) if "method" not in msg else None
         if is_list:
             self.remember_tools(msg["result"])
+        if isinstance(msg.get("result"), dict) and msg["result"].get("protocolVersion"):
+            self.protocol = str(msg["result"]["protocolVersion"])
+        if pending is not None and not isinstance(msg.get("result"), dict):
+            self.export(pending, "error", [], rpc_error=msg.get("error") if isinstance(msg.get("error"), dict) else {})
         if pending is not None and isinstance(msg.get("result"), dict):
             elapsed = time.monotonic() - pending.started
             threading.Thread(target=self.finish_call, args=(msg, pending, elapsed), daemon=True).start()
@@ -848,6 +862,7 @@ class Guard:
     def finish_call(self, msg: dict, p: Pending, elapsed: float) -> None:
         result = msg["result"]
         findings = list(p.findings)
+        confirmed = False
         try:
             findings += check_wait(p.name, p.args, elapsed, result)
             findings += check_error_text(p.name, result)
@@ -868,6 +883,7 @@ class Guard:
                     found = check_readback(tool, p.args, plan, self.call_server(plan.tool.name, plan.args))
                     if not found:
                         first = None
+                        confirmed = True
                         break  # one read confirms the write: that's enough
                     first = first if first is not None else found
                 findings += first or []
@@ -881,8 +897,37 @@ class Guard:
             ]
             msg = dict(msg, result=result)
         self.to_client(msg)
+        if findings:
+            verdict = "flagged"
+        elif result.get("isError"):
+            verdict = "error"
+        elif confirmed:
+            verdict = "confirmed"
+        else:  # a write nothing could read back isn't the same as a read that passed every check
+            verdict = "unconfirmed" if is_write(self.tools.get(p.name), p.name, self.server_annotates) else "passed"
+        self.export(p, verdict, findings, tool_error=bool(result.get("isError")))
+
+    def export(self, p: Pending, verdict: str, findings: list[Finding], tool_error: bool = False,
+               rpc_error: dict | None = None) -> None:
+        if self.otel is None:
+            return
+        try:
+            up = self.upstream
+            self.otel.span(tool=p.name, request_id=p.rid, params=p.params, start_ns=p.start_ns, end_ns=time.time_ns(),
+                           verdict=verdict, findings=findings, tool_error=tool_error, rpc_error=rpc_error,
+                           session=up.session if up else None, protocol=(up.protocol if up else None) or self.protocol,
+                           server=_host(self.url) if self.url else None)
+        except Exception as e:  # export must never cost the agent its call
+            print(f"[mcp-doctor guard] internal error exporting {p.name}: {e!r}", file=self.err, flush=True)
 
     def run(self) -> int:
+        try:
+            return self._run()
+        finally:
+            if self.otel is not None:
+                self.otel.close()
+
+    def _run(self) -> int:
         if self.upstream is not None:
             self.pump_client()  # until the client closes stdin
             time.sleep(0.2)  # let in-flight replies and their checks finish writing
@@ -901,6 +946,26 @@ class Guard:
         return code
 
 
+def _host(url: str) -> str | None:
+    from urllib.parse import urlparse
+
+    return urlparse(url).hostname
+
+
+def _exporter(target: str | None, transport: str, err):
+    from .cli import _version
+    from .guard_otel import SpanExporter, env_headers, env_target
+
+    if target is None:
+        return None
+    resolved = env_target() if target == "env" else target
+    if not resolved:
+        print("[mcp-doctor guard] --otel without a target needs OTEL_EXPORTER_OTLP_ENDPOINT or "
+              "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT; not exporting", file=err, flush=True)
+        return None
+    return SpanExporter(resolved, err, headers=env_headers(), version=_version(), transport=transport)
+
+
 def main(argv: list[str]) -> int:
     if argv[:1] == ["hook"]:
         from .guard_hook import main as hook_main
@@ -909,7 +974,7 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="mcp-doctor guard",
         description="Run an MCP server behind a check that flags tool calls that reported success but didn't work.",
-        usage="mcp-doctor guard [--log FILE] [--no-verify] [--hold-leaks] -- <server command> [args...]\n"
+        usage="mcp-doctor guard [--log FILE] [--no-verify] [--hold-leaks] [--otel URL|FILE] -- <server command> [args...]\n"
         "       mcp-doctor guard [options] --url https://host/mcp [--header KEY=VALUE ...]",
     )
     parser.add_argument("--url", help="Guard a remote server over Streamable HTTP instead of launching one; "
@@ -919,6 +984,9 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--log", help="Also append each finding to FILE as a JSON line")
     parser.add_argument("--no-verify", action="store_true", help="Don't make read calls to confirm writes")
     parser.add_argument("--hold-leaks", action="store_true", help="Don't send a write flagged as a likely leak; return an error instead")
+    parser.add_argument("--otel", nargs="?", const="env", metavar="URL|FILE",
+                        help="Export one OpenTelemetry span per call with guard's verdict: to an OTLP/HTTP endpoint, "
+                        "a JSON-lines file, or (no value) OTEL_EXPORTER_OTLP_ENDPOINT. Arguments and results are not exported")
     if "--" in argv:
         i = argv.index("--")
         opts, server = argv[:i], argv[i + 1:]
@@ -937,9 +1005,10 @@ def main(argv: list[str]) -> int:
                 parser.error(f"--header expects KEY=VALUE, got {pair!r}")
             headers[key] = value
         return Guard([], verify=not args.no_verify, log_path=args.log, hold_leaks=args.hold_leaks,
-                     url=args.url, headers=headers).run()
+                     url=args.url, headers=headers, otel=_exporter(args.otel, "tcp", sys.stderr)).run()
     if args.header:
         parser.error("--header requires --url")
     if not server:
         parser.error("give the server command after --, e.g. mcp-doctor guard -- npx @modelcontextprotocol/server-filesystem /tmp")
-    return Guard(server, verify=not args.no_verify, log_path=args.log, hold_leaks=args.hold_leaks).run()
+    return Guard(server, verify=not args.no_verify, log_path=args.log, hold_leaks=args.hold_leaks,
+                 otel=_exporter(args.otel, "pipe", sys.stderr)).run()

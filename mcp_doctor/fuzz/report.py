@@ -202,11 +202,15 @@ class CrossResourceSummary:
 
 @dataclass
 class HiddenErrorSummary:
-    # Unscored, like SequenceSummary: an error with no message isn't a
-    # crash (the call completed and said it failed), but the model can't
-    # tell a bad argument from a missing record from a server bug, so it
-    # can't recover. `tools` maps each affected tool to the cases
-    # ("valid", "missing_required", "wrong_type") that came back bare.
+    # Not a crash (the call completed and said it failed), but the model
+    # can't tell a bad argument from a missing record from a server bug, so
+    # it can't recover. On a bad-input call it counts against crash
+    # resilience like a crash does: the input wasn't handled, the exception
+    # just didn't kill the process. On the valid call it stays out of the
+    # percent (synthetic input, see the module docstring) but the verdict
+    # still asks for a fix, since the agent gets no reason either way.
+    # `tools` maps each affected tool to the cases ("valid",
+    # "missing_required", "wrong_type") that came back bare.
     tools: dict[str, list[str]]
 
 
@@ -230,6 +234,7 @@ class Report:
     sequence: SequenceSummary
     cross_resource: CrossResourceSummary
     hidden_errors: HiddenErrorSummary = field(default_factory=lambda: HiddenErrorSummary(tools={}))
+    hidden_error_count: int = 0  # bad-input calls answered with a bare "Error executing tool <name>"
 
 
 def _grade_for_percent(pct: float) -> str:
@@ -254,6 +259,7 @@ def build_report(
     total_bad_input = 0
     total_crashes = 0
     total_timeouts = 0
+    total_hidden = 0
     tested_count = 0
     skipped_count = 0
 
@@ -285,10 +291,12 @@ def build_report(
             elif outcome.outcome == "timeout":
                 tr.timeouts.append(outcome)
                 total_timeouts += 1
+            elif outcome.hidden_message:
+                total_hidden += 1
         tool_reports.append(tr)
 
     if total_bad_input > 0:
-        percent = 100.0 * (1 - (total_crashes + total_timeouts) / total_bad_input)
+        percent = 100.0 * (1 - (total_crashes + total_timeouts + total_hidden) / total_bad_input)
         grade = _grade_for_percent(percent)
     else:
         percent = None
@@ -304,6 +312,7 @@ def build_report(
         total_bad_input_cases=total_bad_input,
         crash_count=total_crashes,
         timeout_count=total_timeouts,
+        hidden_error_count=total_hidden,
         crash_resilience_percent=percent,
         grade=grade,
         latency=_compute_latency(tool_reports, slow_threshold_ms),
@@ -482,8 +491,9 @@ def render_text(report: Report) -> str:
     if report.crash_resilience_percent is not None:
         lines.append(
             f"Crash resilience: {report.crash_resilience_percent:.0f}% ({report.grade}) "
-            f"— {report.crash_count} crash(es), {report.timeout_count} timeout(s) "
-            f"across {report.total_bad_input_cases} bad-input calls"
+            f"— {report.crash_count} crash(es), {report.timeout_count} timeout(s)"
+            + (f", {report.hidden_error_count} hidden error(s)" if report.hidden_error_count else "")
+            + f" across {report.total_bad_input_cases} bad-input calls"
         )
     else:
         lines.append("Crash resilience: n/a (no testable tools had any parameters to fuzz)")
@@ -549,7 +559,8 @@ def render_text(report: Report) -> str:
     if hidden:
         lines.append(
             f"Hidden error messages: {len(hidden)} tool(s) answered an error with only "
-            "\"Error executing tool <name>\", so the model gets no reason — not scored. "
+            "\"Error executing tool <name>\", so the model gets no reason. Counted against crash "
+            "resilience on bad input, and a fix-first item in `verdict`. "
             "Under mcp 2.x, raise ToolError (or return an is_error result) to send the message."
         )
     lines.append("")
@@ -639,6 +650,7 @@ def to_dict(report: Report) -> dict:
         "total_bad_input_cases": report.total_bad_input_cases,
         "crash_count": report.crash_count,
         "timeout_count": report.timeout_count,
+        "hidden_error_count": report.hidden_error_count,
         "crash_resilience_percent": report.crash_resilience_percent,
         "grade": report.grade,
         "latency": {

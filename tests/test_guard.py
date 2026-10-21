@@ -355,3 +355,118 @@ def test_http_unreachable_server_answers_with_an_error(tmp_path):
     out, _ = p.communicate(b'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n', timeout=30)
     msg = json.loads(out.splitlines()[0])
     assert msg["id"] == 1 and "could not reach" in msg["error"]["message"]
+
+
+# --otel: one span per call with guard's verdict, in OTel MCP semantic-convention shape
+def spans_of(path):
+    out = []
+    for line in Path(path).read_text().splitlines():
+        for rs in json.loads(line)["resourceSpans"]:
+            for ss in rs["scopeSpans"]:
+                out += ss["spans"]
+    return out
+
+
+def attr(span, key):
+    for a in span["attributes"]:
+        if a["key"] == key:
+            v = a["value"]
+            return v.get("stringValue", v.get("arrayValue", {}).get("values"))
+    return None
+
+
+def test_otel_span_per_call_carries_the_verdict(session, tmp_path):
+    out = tmp_path / "spans.jsonl"
+    s = session("fs_ok", "--otel", str(out))
+    s.call("write_file", {"path": "/tmp/report.md", "content": "# Report\n"})
+    s.call("list_directory", {"path": "/tmp"})
+    s.call("read_text_file", {"path": "/nope"})
+    s.close()
+    s = session("fs_broken", "--otel", str(out))
+    s.call("write_file", {"path": "/tmp/report.md", "content": "# Report\n"})
+    s.close()
+    spans = spans_of(out)
+    assert [(sp["name"], attr(sp, "mcp_doctor.guard.verdict")) for sp in spans] == [
+        ("tools/call write_file", "confirmed"), ("tools/call list_directory", "passed"),
+        ("tools/call read_text_file", "error"), ("tools/call write_file", "flagged")]
+    ok, listed, err, bad = spans
+    assert attr(ok, "mcp.method.name") == "tools/call" and attr(ok, "gen_ai.tool.name") == "write_file"
+    assert attr(ok, "network.transport") == "pipe" and attr(ok, "mcp.protocol.version") == "2025-06-18"
+    assert ok["kind"] == 3 and ok["status"] == {} and int(ok["endTimeUnixNano"]) >= int(ok["startTimeUnixNano"])
+    assert attr(err, "error.type") == "tool_error" and err["status"]["code"] == 2
+    assert bad["status"]["code"] == 2 and "write_file reported success" in bad["status"]["message"]
+    assert [e["name"] for e in bad["events"]] == ["mcp_doctor.guard.finding"]
+    assert [v["stringValue"] for v in attr(bad, "mcp_doctor.guard.checks")] == [bad["events"][0]["attributes"][0]["value"]["stringValue"]]
+
+
+def test_otel_never_exports_arguments_or_results(session, tmp_path):
+    out = tmp_path / "spans.jsonl"
+    s = session("fs_ok", "--otel", str(out))
+    s.call("write_file", {"path": "/tmp/a.md", "content": "TOP-SECRET-CONTENT"})
+    s.call("read_text_file", {"path": "/tmp/a.md"})
+    s.close()
+    assert "TOP-SECRET-CONTENT" not in out.read_text()
+
+
+def test_otel_span_joins_the_clients_trace(session, tmp_path):
+    out = tmp_path / "spans.jsonl"
+    s = session("fs_ok", "--otel", str(out))
+    tp = "00-" + "ab" * 16 + "-" + "cd" * 8 + "-01"
+    s.request("tools/call", {"name": "list_directory", "arguments": {"path": "/"}, "_meta": {"traceparent": tp}})
+    s.call("list_directory", {"path": "/"})
+    s.close()
+    joined, fresh = spans_of(out)
+    assert joined["traceId"] == "ab" * 16 and joined["parentSpanId"] == "cd" * 8
+    assert "parentSpanId" not in fresh and len(fresh["traceId"]) == 32 and fresh["traceId"] != joined["traceId"]
+
+
+def test_otel_held_leak_is_exported_as_held(session, tmp_path):
+    out = tmp_path / "spans.jsonl"
+    s = session("gh_leak", "--hold-leaks", "--otel", str(out))
+    s.call("get_issue", {**PUBLIC, "issue_number": 1})
+    s.call("get_file_contents", {**PRIVATE, "path": "README.md"})
+    s.call("add_issue_comment", {**PUBLIC, "issue_number": 1, "body": PRIVATE_README})
+    s.close()
+    held = spans_of(out)[-1]
+    assert attr(held, "gen_ai.tool.name") == "add_issue_comment" and attr(held, "mcp_doctor.guard.verdict") == "held"
+    assert held["status"]["code"] == 2
+
+
+def test_otel_posts_to_an_otlp_http_endpoint_from_env(tmp_path):
+    import http.server
+    import threading
+
+    got = []
+
+    class Collector(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            got.append((self.path, self.headers.get("Content-Type"), self.headers.get("Authorization"),
+                        json.loads(self.rfile.read(int(self.headers["Content-Length"])))))
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), Collector)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = f"http://127.0.0.1:{srv.server_port}"
+    os.environ["OTEL_EXPORTER_OTLP_HEADERS"] = "Authorization=Bearer%20t0k"
+    try:
+        s = Session("fs_ok", "--otel")
+        s.call("list_directory", {"path": "/"})
+        s.close()
+    finally:
+        del os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"], os.environ["OTEL_EXPORTER_OTLP_HEADERS"]
+        srv.shutdown()
+    path, ctype, auth, body = got[0]
+    assert path == "/v1/traces" and ctype == "application/json" and auth == "Bearer t0k"
+    span = body["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
+    assert span["name"] == "tools/call list_directory"
+
+
+def test_otel_dead_collector_never_costs_a_call(session):
+    s = session("fs_ok", "--otel", "http://127.0.0.1:9")
+    res, warns = s.call("list_directory", {"path": "/"})
+    assert res["content"][0]["text"] == "[DIR] /" and warns == []
+    assert s.close().count("couldn't export spans") == 1
