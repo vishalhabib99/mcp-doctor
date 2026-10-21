@@ -19,7 +19,7 @@ An agent is only as reliable as the tools it calls, and most MCP servers ship un
 
 <p align="center"><img src="docs/demo.svg" width="940" alt="Animated demo: mcp-doctor lints a server (24%, grade F), gives a release verdict (BLOCK, then SHIP), and guards a live call that reported success without writing the file"></p>
 
-*Real output from mcp-doctor 0.32.1 on the bundled example servers and guard's test fixture, long lines cut ([how it's built](docs/demo/make_demo.py)).*
+*Real output from mcp-doctor 0.33.0 on the bundled example servers and guard's test fixture, long lines cut ([how it's built](docs/demo/make_demo.py)).*
 
 **In use:** [jupyter-mcp-server](https://github.com/datalayer/jupyter-mcp-server/pull/488) (1.3K★) runs the Action on every PR, added after its maintainer asked for it. Fixes from mcp-doctor's findings have been merged upstream in [telegram-mcp](https://github.com/chigwell/telegram-mcp/pull/266) (111 tools in one PR), [davinci-resolve-mcp](https://github.com/samuelgursky/davinci-resolve-mcp/pull/274) (shipped as its own release) and [ha-mcp](https://github.com/homeassistant-ai/ha-mcp/pull/2327) (5.1K★); [56 merged upstream fixes in all](https://github.com/vishalhabib99#-proof-from-outside).
 
@@ -194,7 +194,7 @@ Catch it before the push. Add to `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/vishalhabib99/mcp-doctor
-    rev: v1.32.1
+    rev: v1.33.0
     hooks:
       - id: mcp-doctor
         # args: ["--fail-under", "80", "path/to/server"]   # default: --fail-under 70 on the repo root

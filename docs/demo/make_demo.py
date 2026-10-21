@@ -4,6 +4,7 @@ mcp-doctor 0.28.0 (examples/bad_server, examples/good_server, and guard in front
 of tests/fixtures/guard_server.py fs_broken); long lines are cut with an ellipsis.
 The bad_server score lines were re-captured 2026-10-19 (0.32.1, bug #125), and every
 other line was re-checked against 0.32.1 the same day: unchanged.
+Every line re-checked against 0.33.0 on 2026-10-20: unchanged.
 
     python docs/demo/make_demo.py   (writes docs/demo.svg)
 """
