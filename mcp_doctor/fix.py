@@ -39,6 +39,7 @@ from .analyzer import (
     _get_numpy_documented_params,
     _get_sphinx_documented_params,
     _is_none_default,
+    parse_python,
 )
 
 if TYPE_CHECKING:
@@ -351,7 +352,7 @@ def plan_fixes(
             continue
         original = path.read_text()
         try:
-            tree = ast.parse(original, filename=str(path))
+            tree = parse_python(original, str(path))
         except SyntaxError:
             continue
 
@@ -365,7 +366,7 @@ def plan_fixes(
             )
             if skipped is not None:
                 skipped.extend(f"{rel_file}: {name}" for name in file_skipped)
-            tree = ast.parse(source, filename=str(path))
+            tree = parse_python(source, str(path))
 
         if "bare-except" in kinds:
             source, _ = _fix_bare_except_in_source(source, tree)
@@ -377,7 +378,7 @@ def plan_fixes(
         ) if doc_stubs else []
         if needs_docs:
             lines = source.splitlines(keepends=True)
-            tree2 = ast.parse(source, filename=str(path))
+            tree2 = parse_python(source, str(path))
             for t in needs_docs:
                 fn = _find_function_at_line(tree2, t.line)
                 if fn is None:
@@ -397,7 +398,7 @@ def plan_fixes(
             source = "".join(lines)
 
         if source != original:
-            ast.parse(source, filename=str(path))  # never hand back a file that no longer parses
+            parse_python(source, str(path))  # never hand back a file that no longer parses
             planned[rel_file] = (original, source)
 
     return planned

@@ -952,7 +952,7 @@ def _host(url: str) -> str | None:
     return urlparse(url).hostname
 
 
-def _exporter(target: str | None, transport: str, err):
+def _exporter(target: str | None, transport: str | None, err, timeout: float = 10):
     from .cli import _version
     from .guard_otel import SpanExporter, env_headers, env_target
 
@@ -963,7 +963,7 @@ def _exporter(target: str | None, transport: str, err):
         print("[mcp-doctor guard] --otel without a target needs OTEL_EXPORTER_OTLP_ENDPOINT or "
               "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT; not exporting", file=err, flush=True)
         return None
-    return SpanExporter(resolved, err, headers=env_headers(), version=_version(), transport=transport)
+    return SpanExporter(resolved, err, headers=env_headers(), version=_version(), transport=transport, timeout=timeout)
 
 
 def main(argv: list[str]) -> int:

@@ -24,14 +24,21 @@ agent reads. MCP_DOCTOR_GUARD_DECISION=ask|deny overrides. Codex hooks can't ask
 and MCP calls and denies file writes, where its hooks can't ask either. Any error
 in here lets the call through: a guard bug must never cost the agent its work.
 
-    mcp-doctor guard hook [--client claude|codex|cursor]   (reads the hook's JSON on stdin)
+--otel (or MCP_DOCTOR_GUARD_OTEL=URL|FILE|env, for hooks set up by a plugin)
+exports one OpenTelemetry span per tool call: passed after it ran, held when
+guard stopped it. One trace per agent session; arguments and results are not
+exported. Off by default, so nothing leaves the machine unless asked.
+
+    mcp-doctor guard hook [--client claude|codex|cursor] [--otel URL|FILE]   (reads the hook's JSON on stdin)
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import sys
+import time
 from typing import Any
 
 from .guard import PREFIX, Finding, LeakWatch, _strings, is_external, is_write
@@ -205,9 +212,43 @@ def _cursor_permission_hook(event: dict) -> bool:
     return event.get("hook_event_name") in ("preToolUse", "beforeShellExecution", "beforeMCPExecution")
 
 
-def run(event: dict, watch: LeakWatch | None = None, client: str | None = None) -> dict | None:
+def export(otel, event: dict, verdict: str, findings: list[Finding], session: str | None,
+           call_id: str | None, client: str) -> None:
+    """One span for this tool call, in the agent session's trace."""
+    name, args = event.get("tool_name", ""), event.get("tool_input") or {}
+    inner = mcp_tool(name)
+    end = time.time_ns()
+    ms = event.get("duration_ms")
+    start = end - int(ms * 1e6) if isinstance(ms, (int, float)) and not isinstance(ms, bool) and ms >= 0 else end
+    otel.span(
+        tool=inner or name, request_id=None, params=None, start_ns=start, end_ns=end, verdict=verdict,
+        findings=findings, mcp=inner is not None,
+        trace_id=hashlib.sha256(session.encode()).hexdigest()[:32] if session else None,
+        extra={
+            "gen_ai.tool.call.id": call_id,
+            "gen_ai.conversation.id": session,
+            "mcp_doctor.guard.agent_tool": name if inner else None,
+            "mcp_doctor.guard.client": client,
+            "mcp_doctor.guard.outside_content": outside(name, args) if verdict == "passed" else None,
+        },
+    )
+
+
+def run(event: dict, watch: LeakWatch | None = None, client: str | None = None, otel=None) -> dict | None:
     client = client_of(event, client)
     allow = {"permission": "allow"} if client == "cursor" and _cursor_permission_hook(event) else None
+    session = event.get("session_id") or event.get("conversation_id")
+    call_id = event.get("tool_use_id") or event.get("call_id")
+    session, call_id = (str(v) if v else None for v in (session, call_id))
+
+    def span(verdict: str, findings: list[Finding]) -> None:
+        if otel is None:
+            return
+        try:
+            export(otel, event, verdict, findings, session, call_id, client)
+        except Exception as e:  # export must never cost the agent its call
+            print(f"[mcp-doctor guard] hook export error: {e!r}", file=sys.stderr)
+
     if client == "cursor":
         if event.get("hook_event_name") == "preToolUse" and str(event.get("tool_name", "")).startswith(("Shell", "MCP:")):
             return allow  # beforeShellExecution / beforeMCPExecution check these, and can ask
@@ -219,6 +260,7 @@ def run(event: dict, watch: LeakWatch | None = None, client: str | None = None) 
     kind = event.get("hook_event_name")
     if kind == "PostToolUse":
         after(event, watch)
+        span("passed", [])
         return None
     if kind != "PreToolUse":
         return allow
@@ -227,6 +269,7 @@ def run(event: dict, watch: LeakWatch | None = None, client: str | None = None) 
         return allow
     for f in findings:
         print(f"[mcp-doctor guard] {event.get('tool_name')}: {f.check}: {f.message}", file=sys.stderr)
+    span("held", findings)
     reason = " ".join(PREFIX + f.message for f in findings)
     if client == "cursor":
         return {"permission": decision(event, client), "user_message": reason, "agent_message": reason}
@@ -246,15 +289,30 @@ def main(argv: list[str]) -> int:
         client = argv[argv.index("--client") + 1]
     elif any(a.startswith("--client=") for a in argv):
         client = next(a for a in argv if a.startswith("--client="))[len("--client="):]
+    otel_target = os.environ.get("MCP_DOCTOR_GUARD_OTEL") or None
+    for i, a in enumerate(argv):
+        if a == "--otel":
+            nxt = argv[i + 1] if i + 1 < len(argv) else ""
+            otel_target = nxt if nxt and not nxt.startswith("-") else "env"
+        elif a.startswith("--otel="):
+            otel_target = a[len("--otel="):] or "env"
     event: Any = None
+    otel = None
     try:
+        if otel_target:
+            from .guard import _exporter
+
+            # A hook runs once per call: a slow collector may cost seconds, never the call.
+            otel = _exporter(otel_target, None, sys.stderr, timeout=2)
         event = json.load(sys.stdin)
-        out = run(event, client=client)
+        out = run(event, client=client, otel=otel)
     except Exception as e:  # never block the agent on our own failure
         print(f"[mcp-doctor guard] hook error: {e!r}", file=sys.stderr)
         # A Cursor permission hook that prints nothing valid blocks the call.
         cursor = client == "cursor" or (isinstance(event, dict) and client_of(event, client) == "cursor")
         out = {"permission": "allow"} if cursor and (not isinstance(event, dict) or _cursor_permission_hook(event)) else None
     if out:
-        print(json.dumps(out))
+        print(json.dumps(out), flush=True)
+    if otel is not None:
+        otel.close(timeout=3)
     return 0

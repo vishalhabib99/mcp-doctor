@@ -266,3 +266,67 @@ def test_client_flag_and_detection():
     assert client_of({"hook_event_name": "PreToolUse", "turn_id": "x"}) == "codex"
     assert client_of({"hook_event_name": "beforeShellExecution"}) == "cursor"
     assert client_of({"hook_event_name": "PreToolUse"}, "codex") == "codex"
+
+
+# ---- --otel: one span per tool call, one trace per agent session ----
+
+def _cli_otel(stdin, tmp_path, *args, env_extra=None):
+    env = dict(os.environ, MCP_DOCTOR_GUARD_JOURNAL=str(tmp_path / "cli.jsonl"), **(env_extra or {}))
+    return subprocess.run([sys.executable, "-c", "import sys; from mcp_doctor.cli import main; sys.exit(main())",
+                           "guard", "hook", *args], input=stdin, capture_output=True, text=True, cwd=ROOT, env=env, timeout=30)
+
+
+def _spans(path):
+    return [sp for line in path.read_text().splitlines()
+            for sp in json.loads(line)["resourceSpans"][0]["scopeSpans"][0]["spans"]]
+
+
+def _attr(span, key):
+    for a in span["attributes"]:
+        if a["key"] == key:
+            v = a["value"]
+            return v.get("stringValue", v.get("boolValue", v.get("arrayValue", {}).get("values")))
+    return None
+
+
+def test_otel_hook_exports_passed_and_held_calls_in_one_session_trace(tmp_path):
+    out = tmp_path / "spans.jsonl"
+    base = {"session_id": "sess-1", "permission_mode": "default"}
+    _cli_otel(json.dumps({**base, "hook_event_name": "PostToolUse", "tool_name": "WebFetch", "tool_use_id": "tu1",
+                          "tool_input": {"url": "https://x.io"}, "tool_response": "hi", "duration_ms": 40}),
+              tmp_path, "--otel", str(out))
+    _cli_otel(json.dumps({**base, "hook_event_name": "PostToolUse", "tool_name": "mcp__github__get_issue", "tool_use_id": "tu2",
+                          "tool_input": {"owner": "a", "repo": "b"}, "tool_response": "SECRET-BODY"}),
+              tmp_path, "--otel", str(out))
+    p = _cli_otel(json.dumps({**base, "hook_event_name": "PreToolUse", "tool_name": "Write", "tool_use_id": "tu3",
+                              "tool_input": {"file_path": "/r/.git/hooks/pre-commit", "content": "SECRET-CONTENT"}}),
+                  tmp_path, "--client", "claude", "--otel", str(out))
+    assert json.loads(p.stdout)["hookSpecificOutput"]["permissionDecision"] == "ask"  # export doesn't change the decision
+    fetch, mcp, held = _spans(out)
+    assert [s["name"] for s in (fetch, mcp, held)] == ["execute_tool WebFetch", "tools/call get_issue", "execute_tool Write"]
+    assert [_attr(s, "mcp_doctor.guard.verdict") for s in (fetch, mcp, held)] == ["passed", "passed", "held"]
+    assert len({s["traceId"] for s in (fetch, mcp, held)}) == 1 and _attr(held, "gen_ai.conversation.id") == "sess-1"
+    assert _attr(fetch, "mcp.method.name") is None and _attr(mcp, "mcp.method.name") == "tools/call"
+    assert _attr(mcp, "mcp_doctor.guard.agent_tool") == "mcp__github__get_issue" and _attr(mcp, "gen_ai.tool.call.id") == "tu2"
+    assert _attr(fetch, "mcp_doctor.guard.outside_content") is True
+    assert int(fetch["endTimeUnixNano"]) - int(fetch["startTimeUnixNano"]) == 40_000_000
+    assert held["status"]["code"] == 2 and [e["name"] for e in held["events"]] == ["mcp_doctor.guard.finding"]
+    assert "SECRET" not in out.read_text()
+
+
+def test_otel_hook_is_off_unless_asked_and_env_turns_it_on(tmp_path):
+    out = tmp_path / "spans.jsonl"
+    event = json.dumps({"hook_event_name": "PostToolUse", "tool_name": "Read", "tool_input": {}, "tool_response": "x"})
+    _cli_otel(event, tmp_path, env_extra={"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:9"})
+    assert not out.exists()
+    _cli_otel(event, tmp_path, env_extra={"MCP_DOCTOR_GUARD_OTEL": str(out)})
+    assert [s["name"] for s in _spans(out)] == ["execute_tool Read"]
+
+
+def test_otel_hook_dead_collector_still_answers(tmp_path):
+    p = _cli_otel(json.dumps({"hook_event_name": "afterShellExecution", "command": "ls", "output": "a"}),
+                  tmp_path, "--otel", "http://127.0.0.1:9", "--client", "cursor")
+    assert p.returncode == 0 and p.stdout == ""
+    p = _cli_otel(json.dumps({"hook_event_name": "beforeShellExecution", "command": "ls"}),
+                  tmp_path, "--otel", "http://127.0.0.1:9", "--client", "cursor")
+    assert p.returncode == 0 and json.loads(p.stdout) == {"permission": "allow"}

@@ -20,6 +20,10 @@ an argument, such as the path that didn't get written.
 If the client sent a W3C traceparent in params._meta, the span joins that
 trace, so it shows up under the agent's own tool-call span.
 
+`guard hook` exports through the same class: an agent's built-in tools (Bash,
+Write, WebFetch) get `execute_tool <tool>` spans without the MCP attributes,
+and every call of one agent session shares a trace.
+
 Stdlib only, OTLP/HTTP with JSON bodies. The target is a URL (spans are POSTed
 to <url>/v1/traces) or a file (one ExportTraceServiceRequest per line, the
 format the Collector's otlpjsonfile receiver reads). Export runs on its own
@@ -87,7 +91,7 @@ def env_headers() -> dict[str, str]:
 
 class SpanExporter:
     def __init__(self, target: str, err, headers: dict[str, str] | None = None, version: str = "",
-                 service: str | None = None, transport: str = "pipe"):
+                 service: str | None = None, transport: str | None = "pipe", timeout: float = 10):
         if target.startswith(("http://", "https://")) and not target.rstrip("/").endswith("/v1/traces"):
             target = target.rstrip("/") + "/v1/traces"
         self.target = target
@@ -96,6 +100,7 @@ class SpanExporter:
         self.err = err
         self.version = version
         self.transport = transport
+        self.timeout = timeout
         self.resource = _attrs({
             "service.name": service or os.environ.get("OTEL_SERVICE_NAME") or "mcp-doctor-guard",
             "telemetry.sdk.name": "mcp-doctor", "telemetry.sdk.language": "python", "telemetry.sdk.version": version,
@@ -107,17 +112,23 @@ class SpanExporter:
 
     def span(self, *, tool: str, request_id: Any, params: Any, start_ns: int, end_ns: int, verdict: str,
              findings: list, tool_error: bool = False, rpc_error: dict | None = None,
-             session: str | None = None, protocol: str | None = None, server: str | None = None) -> None:
-        trace_id, parent = parent_of(params)
+             session: str | None = None, protocol: str | None = None, server: str | None = None,
+             mcp: bool = True, trace_id: str | None = None, extra: dict | None = None) -> None:
+        """One span for one call. mcp=False is an agent's built-in tool (no MCP
+        attributes); trace_id puts the span in a given trace when params carry none."""
+        trace, parent = parent_of(params)
+        if trace_id and parent is None:
+            trace = trace_id
         attrs: dict[str, Any] = {
-            "mcp.method.name": "tools/call",
+            "mcp.method.name": "tools/call" if mcp else None,
             "gen_ai.operation.name": "execute_tool",
             "gen_ai.tool.name": tool,
-            "jsonrpc.request.id": str(request_id),
+            "jsonrpc.request.id": str(request_id) if request_id is not None else None,
             "mcp.session.id": session,
             "mcp.protocol.version": protocol,
             "network.transport": self.transport,
             "server.address": server,
+            **(extra or {}),
             "mcp_doctor.guard.verdict": verdict,
             "mcp_doctor.guard.checks": sorted({f.check for f in findings}) or None,
         }
@@ -132,10 +143,11 @@ class SpanExporter:
             status = {"code": _STATUS_ERROR}
         if verdict in ("flagged", "held") and findings:
             status = {"code": _STATUS_ERROR, "message": findings[0].message[:500]}
+        method = "tools/call" if mcp else "execute_tool"
         span = {
-            "traceId": trace_id,
+            "traceId": trace,
             "spanId": secrets.token_hex(8),
-            "name": f"tools/call {tool}" if tool else "tools/call",
+            "name": f"{method} {tool}" if tool else method,
             "kind": _KIND_CLIENT,
             "startTimeUnixNano": str(start_ns),
             "endTimeUnixNano": str(end_ns),
@@ -163,7 +175,7 @@ class SpanExporter:
 
                 req = urllib.request.Request(self.target, data=body, method="POST",
                                              headers={"Content-Type": "application/json", **self.headers})
-                urllib.request.urlopen(req, timeout=10).close()
+                urllib.request.urlopen(req, timeout=self.timeout).close()
             else:
                 with open(self.target, "ab") as f:
                     f.write(body + b"\n")

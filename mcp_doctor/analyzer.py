@@ -30,9 +30,21 @@ import ast
 import hashlib
 import re
 import unicodedata
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Union
+
+
+def parse_python(source: str, filename: str) -> ast.Module:
+    """ast.parse without the warnings Python's compiler prints for the user's
+    code (invalid escape sequences, `is` with a literal, ...) — they went to
+    stderr mid-report and are about the scanned server, not a finding."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", SyntaxWarning)
+        warnings.simplefilter("ignore", DeprecationWarning)  # 3.10/3.11 spelling of invalid escapes
+        return ast.parse(source, filename=filename)
+
 
 SECRET_PATTERN = re.compile(
     # The optional `: &str` / `: &'static str` is Rust's `const API_KEY: &str = "..."`.
@@ -2643,7 +2655,7 @@ def analyze_repo(root: Path) -> Report:
         try:
             # utf-8-sig: Python runs a file with a leading byte-order mark, but
             # ast.parse on a str rejects U+FEFF.
-            tree = ast.parse(f.read_text(encoding="utf-8-sig", errors="ignore"), filename=str(f))
+            tree = parse_python(f.read_text(encoding="utf-8-sig", errors="ignore"), str(f))
         except SyntaxError:
             unparseable.append(str(f.relative_to(root)))
             continue

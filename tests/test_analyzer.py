@@ -430,6 +430,23 @@ def test_file_starting_with_utf8_bom_is_parsed(tmp_path):
     assert not any(i.check == "parse_error" for i in report.repo_issues)
 
 
+def test_compiler_warnings_from_scanned_code_stay_off_stderr(tmp_path):
+    # An invalid escape in the user's code made ast.parse print a SyntaxWarning
+    # (DeprecationWarning before 3.12) to stderr mid-report (rhinomcp utility.py).
+    (tmp_path / "server.py").write_text(
+        "import fastmcp\nmcp = fastmcp.FastMCP('x')\nPAT = '\\d+'\n\n"
+        "@mcp.tool()\ndef ping() -> str:\n    \"\"\"Ping.\"\"\"\n    return 'pong'\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-W", "default", "-c",
+         "import sys; from pathlib import Path; from mcp_doctor.analyzer import analyze_repo; "
+         "print([t.name for t in analyze_repo(Path(sys.argv[1])).tools])", str(tmp_path)],
+        capture_output=True, text=True, cwd=REPO_ROOT,
+    )
+    assert result.stdout.strip() == "['ping']"
+    assert result.stderr == ""
+
+
 def test_no_tools_found_gives_empty_report(tmp_path):
     write(tmp_path, "server.py", "x = 1\n")
     report = analyze_repo(tmp_path)

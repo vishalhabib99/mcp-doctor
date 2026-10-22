@@ -38,7 +38,7 @@ An agent is only as reliable as the tools it calls, and most MCP servers ship un
 ## Why trust the grade
 
 - **Recall is measured, misses are published.** A checker that can't see a tool quietly grades it as fine, so tool detection is measured against an independent count: 15,755 of 15,977 tools found across 805 real servers on 5 frameworks. Every miss is listed with its reason in [docs/coverage.md](docs/coverage.md).
-- **125 of its own bugs found and fixed after release** by running it on real servers, up to the 91.3k★ official `modelcontextprotocol/servers` monorepo; a fix ships only when a before/after run on 120+ real repos changes nothing it shouldn't. [The log](docs/dogfooding.md) · [how 69 of them got through](docs/postmortem-69-bugs.md).
+- **126 of its own bugs found and fixed after release** by running it on real servers, up to the 91.3k★ official `modelcontextprotocol/servers` monorepo; a fix ships only when a before/after run on 120+ real repos changes nothing it shouldn't. [The log](docs/dogfooding.md) · [how 69 of them got through](docs/postmortem-69-bugs.md).
 - **Maintainers act on its reports:** fixes merged upstream, among them [ha-mcp](https://github.com/homeassistant-ai/ha-mcp/pull/2327), [telegram-mcp](https://github.com/chigwell/telegram-mcp/pull/266) (111 tools fixed in one PR) and [davinci-resolve-mcp](https://github.com/samuelgursky/davinci-resolve-mcp/pull/274) (shipped as its own release).
 - **Quality and security are graded separately,** so a well-documented A can't hide a security gap. Every audited repo is on the [leaderboard](https://vishalhabib99.github.io/mcp-doctor/) with a dated badge you can add to your README, and re-scans show ▲/▼ drift.
 - **What the first outside users hit, and what changed because of it:** [docs/what-users-taught-me.md](docs/what-users-taught-me.md).
@@ -194,7 +194,7 @@ Catch it before the push. Add to `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/vishalhabib99/mcp-doctor
-    rev: v1.33.0
+    rev: v1.34.0
     hooks:
       - id: mcp-doctor
         # args: ["--fail-under", "80", "path/to/server"]   # default: --fail-under 70 on the repo root
@@ -273,7 +273,7 @@ Checked on real servers before release: filesystem (11 calls: writes, edits, mov
 
 Limits: writes are confirmed only when the server has a matching read tool. Values the server rewrites on the way in (formatting, normalization) can read as missing.
 
-**Verdicts into your traces (`--otel`):** `mcp-doctor guard --otel http://localhost:4318 -- <server>` (or bare `--otel` to use `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_EXPORTER_OTLP_HEADERS`) sends one OpenTelemetry span per tool call to the trace store you already run: an OTel Collector, Jaeger, Tempo, Langfuse, Phoenix, Datadog. Spans follow the OTel MCP semantic conventions (`tools/call <tool>`, `mcp.method.name`, `gen_ai.tool.name`, `error.type=tool_error`) and add what plain call logging can't: `mcp_doctor.guard.verdict` = `confirmed` (a read found the write), `passed`, `unconfirmed` (a write nothing could read back), `flagged`, `held` or `error`, plus one event per finding. Flagged and held calls get status ERROR, because the server said success and guard found otherwise. If the agent sends a W3C `traceparent` in `params._meta`, the span joins the agent's trace. Arguments and results are never exported. A finding's message can quote a short piece of an argument, such as the path that wasn't written. A file path instead of a URL writes OTLP JSON lines, the format the Collector's `otlpjsonfile` receiver reads. Checked against OpenTelemetry Collector 0.115.0, which parsed the span, its parent trace, status and events. Not yet in `guard hook`.
+**Verdicts into your traces (`--otel`):** `mcp-doctor guard --otel http://localhost:4318 -- <server>` (or bare `--otel` to use `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_EXPORTER_OTLP_HEADERS`) sends one OpenTelemetry span per tool call to the trace store you already run: an OTel Collector, Jaeger, Tempo, Langfuse, Phoenix, Datadog. Spans follow the OTel MCP semantic conventions (`tools/call <tool>`, `mcp.method.name`, `gen_ai.tool.name`, `error.type=tool_error`) and add what plain call logging can't: `mcp_doctor.guard.verdict` = `confirmed` (a read found the write), `passed`, `unconfirmed` (a write nothing could read back), `flagged`, `held` or `error`, plus one event per finding. Flagged and held calls get status ERROR, because the server said success and guard found otherwise. If the agent sends a W3C `traceparent` in `params._meta`, the span joins the agent's trace. Arguments and results are never exported. A finding's message can quote a short piece of an argument, such as the path that wasn't written. A file path instead of a URL writes OTLP JSON lines, the format the Collector's `otlpjsonfile` receiver reads. Checked against OpenTelemetry Collector 0.115.0, which parsed the span, its parent trace, status and events. `guard hook` exports too (below).
 
 <a id="guard-for-coding-agents-claude-code-hooks"></a>
 
@@ -299,6 +299,8 @@ Built-in tools and MCP tools write to the same hashed journal the MCP guards of 
 - **Cursor** asks for shell and MCP calls and denies file writes (its `preToolUse` hook can't ask).
 
 Any error inside the hook lets the call through. Without the plugin, point the agent's own hook config at the same command: `mcp-doctor guard hook --client codex` for every `PreToolUse` and `PostToolUse` in `~/.codex/hooks.json`, or `mcp-doctor guard hook --client cursor` for `preToolUse`, `postToolUse`, `beforeShellExecution`, `afterShellExecution`, `beforeMCPExecution` and `afterMCPExecution` in `~/.cursor/hooks.json` ([`plugin-guard/hooks/`](plugin-guard/hooks/) has both files).
+
+**Hook verdicts into your traces:** add `--otel URL|FILE` to the hook command, or set `MCP_DOCTOR_GUARD_OTEL=URL|FILE|env` for hooks the plugin installed, and each tool call becomes one span: `passed` after it ran, `held` when guard stopped it, with one event per finding. Built-in tools get `execute_tool <tool>` spans, MCP tools the same `tools/call <tool>` spans as the proxy; every call of one agent session shares a trace (`gen_ai.conversation.id`). Off unless asked, so the plugin still sends nothing anywhere by default. Arguments and results are never exported; a slow collector costs at most a few seconds per call, never the call.
 
 Live, Claude Code with Haiku in `bypassPermissions`, same prompts with and without the plugin (the Codex and Cursor hook formats are tested against the payloads in their docs, not yet in a live session):
 
