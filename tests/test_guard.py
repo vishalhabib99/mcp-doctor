@@ -15,9 +15,16 @@ FIXTURE = Path(__file__).parent / "fixtures" / "guard_server.py"
 ROOT = Path(__file__).resolve().parents[1]
 
 
+# A 2026-07-28 client stamps this on every request instead of a handshake.
+ENVELOPE = {"io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": {"name": "t", "version": "0"},
+            "io.modelcontextprotocol/clientCapabilities": {}}
+
+
 class Session:
-    def __init__(self, scenario, *opts, journal=None, http=False):
+    def __init__(self, scenario, *opts, journal=None, http=False, modern=False):
         self.bridge = None
+        self.modern = modern
         if http:
             # The same fake server, reached over Streamable HTTP (guard --url).
             self.bridge = subprocess.Popen([sys.executable, str(FIXTURE.parent / "http_bridge.py"), scenario],
@@ -32,11 +39,16 @@ class Session:
         env = dict(os.environ, MCP_DOCTOR_GUARD_JOURNAL=str(journal or Path(tempfile.mkdtemp()) / "j.jsonl"))
         self.p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=ROOT, env=env)
         self.n = 0
-        self.request("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}})
-        self.p.stdin.write(b'{"jsonrpc":"2.0","method":"notifications/initialized"}\n')
+        if modern:
+            assert "result" in self.request("server/discover", {})
+        else:
+            self.request("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}})
+            self.p.stdin.write(b'{"jsonrpc":"2.0","method":"notifications/initialized"}\n')
         self.tools = self.request("tools/list", {})["result"]["tools"]
 
     def request(self, method, params):
+        if self.modern:
+            params = {**params, "_meta": dict(ENVELOPE)}
         self.n += 1
         self.p.stdin.write((json.dumps({"jsonrpc": "2.0", "id": self.n, "method": method, "params": params}) + "\n").encode())
         self.p.stdin.flush()
@@ -61,8 +73,8 @@ class Session:
 def session():
     opened = []
 
-    def make(scenario, *opts, journal=None, http=False):
-        s = Session(scenario, *opts, journal=journal, http=http)
+    def make(scenario, *opts, journal=None, http=False, modern=False):
+        s = Session(scenario, *opts, journal=journal, http=http, modern=modern)
         opened.append(s)
         return s
     yield make
@@ -470,3 +482,20 @@ def test_otel_dead_collector_never_costs_a_call(session):
     res, warns = s.call("list_directory", {"path": "/"})
     assert res["content"][0]["text"] == "[DIR] /" and warns == []
     assert s.close().count("couldn't export spans") == 1
+
+
+# MCP 2026-07-28 (bug #127): no handshake, so guard's own read-back has to carry the
+# client's _meta envelope, and over HTTP the version/method/name headers. Before the
+# fix a healthy server got "the write may not have happened" on every write, and
+# server/discover through --url failed outright.
+@pytest.mark.parametrize("http", [False, True])
+def test_stateless_client_healthy_write_stays_quiet(session, http):
+    res, warns = session("fs_ok", http=http, modern=True).call("write_file", {"path": "/tmp/report.md", "content": "# Report\n"})
+    assert warns == []
+
+
+@pytest.mark.parametrize("http", [False, True])
+def test_stateless_client_broken_write_caught_for_the_right_reason(session, http):
+    res, warns = session("fs_broken", http=http, modern=True).call("write_file", {"path": "/tmp/report.md", "content": "# Report\n"})
+    assert len(warns) == 1 and "write may not have happened" in warns[0]
+    assert "envelope" not in warns[0]

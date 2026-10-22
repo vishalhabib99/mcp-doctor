@@ -57,6 +57,30 @@ from typing import Any, Callable
 PREFIX = "⚠ mcp-doctor guard: "
 _GUARD_ID = "mcp-doctor-guard-"
 
+# MCP 2026-07-28 drops the handshake: every request carries the client's version
+# and capabilities in params._meta, and over HTTP repeats the version, method and
+# name as headers. Guard's own read-backs must carry the same envelope.
+_VERSION_KEY = "io.modelcontextprotocol/protocolVersion"
+_ENVELOPE_KEYS = (_VERSION_KEY, "io.modelcontextprotocol/clientInfo", "io.modelcontextprotocol/clientCapabilities")
+_NAME_BEARING = {"tools/call": "name", "prompts/get": "name", "resources/read": "uri"}
+
+
+def envelope_of(msg: Any) -> dict | None:
+    """The 2026-07-28 envelope on a request, or None for handshake-era traffic."""
+    meta = (msg.get("params") or {}).get("_meta") if isinstance(msg, dict) and isinstance(msg.get("params"), dict) else None
+    if not isinstance(meta, dict) or _VERSION_KEY not in meta:
+        return None
+    return {k: meta[k] for k in _ENVELOPE_KEYS if k in meta}
+
+
+def _header_value(value: str) -> str:
+    # The spec's sentinel for a value that can't travel as a plain header.
+    if re.fullmatch(r"[\x20-\x7E]*", value) and value == value.strip() and not re.fullmatch(r"=\?base64\?.*\?=", value):
+        return value
+    import base64
+
+    return f"=?base64?{base64.b64encode(value.encode('utf-8')).decode('ascii')}?="
+
 _WRITE_VERBS = {"write", "create", "save", "update", "edit", "add", "set", "append", "put", "upsert"}
 _READ_VERBS = {"read", "get", "fetch", "show", "view", "cat", "list", "describe"}
 _OTHER_VERBS = {"delete", "remove", "move", "rename", "search", "find", "run", "call"}
@@ -613,7 +637,8 @@ class HttpUpstream:
         self.listening = False
         self.closed = False
 
-    def _request(self, method: str, data: bytes | None = None, accept: str = "application/json, text/event-stream"):
+    def _request(self, method: str, data: bytes | None = None, accept: str = "application/json, text/event-stream",
+                 extra: dict[str, str] | None = None):
         import urllib.request
 
         h = {"Accept": accept, **self.headers}
@@ -623,6 +648,7 @@ class HttpUpstream:
             h["Mcp-Session-Id"] = self.session
         if self.protocol:
             h["MCP-Protocol-Version"] = self.protocol
+        h.update(extra or {})
         return urllib.request.urlopen(urllib.request.Request(self.url, data=data, headers=h, method=method), timeout=300)
 
     def _read(self, resp) -> None:
@@ -661,8 +687,16 @@ class HttpUpstream:
             msg = json.loads(data)
         except ValueError:
             msg = None
+        extra: dict[str, str] = {}
+        env = envelope_of(msg)
+        if env is not None:
+            # A 2026-07-28 server routes on these headers and rejects any that disagree with the body.
+            extra = {"MCP-Protocol-Version": str(env[_VERSION_KEY]), "Mcp-Method": str(msg.get("method", ""))}
+            name = msg["params"].get(_NAME_BEARING.get(msg.get("method"), ""))
+            if isinstance(name, str):
+                extra["Mcp-Name"] = _header_value(name)
         try:
-            with self._request("POST", data) as resp:
+            with self._request("POST", data, extra=extra) as resp:
                 self._read(resp)
         except Exception as e:  # a failed POST must still answer a request, or the client hangs
             code = getattr(e, "code", None)
@@ -698,6 +732,7 @@ class Guard:
         self.argv = argv
         self.otel = otel  # guard_otel.SpanExporter: one span per call with guard's verdict
         self.protocol: str | None = None
+        self.envelope: dict | None = None  # the client's 2026-07-28 _meta, copied onto guard's own calls
         self.url = url
         self.upstream: HttpUpstream | None = None
         self.verify = verify
@@ -751,7 +786,10 @@ class Guard:
             rid = f"{_GUARD_ID}{self.next_own}"
             box: queue.Queue = queue.Queue(1)
             self.own[rid] = box
-        self.to_server({"jsonrpc": "2.0", "id": rid, "method": "tools/call", "params": {"name": name, "arguments": args}})
+        params: dict[str, Any] = {"name": name, "arguments": args}
+        if self.envelope:
+            params["_meta"] = dict(self.envelope)
+        self.to_server({"jsonrpc": "2.0", "id": rid, "method": "tools/call", "params": params})
         try:
             msg = box.get(timeout=timeout)
         except queue.Empty:
@@ -775,6 +813,10 @@ class Guard:
                 msg = json.loads(line)
             except ValueError:
                 msg = None
+            env = envelope_of(msg)
+            if env is not None:
+                self.envelope = env
+                self.protocol = str(env[_VERSION_KEY])
             if isinstance(msg, dict) and "id" in msg and msg.get("method") == "tools/call":
                 params = msg.get("params") or {}
                 name, args = params.get("name", ""), params.get("arguments") or {}

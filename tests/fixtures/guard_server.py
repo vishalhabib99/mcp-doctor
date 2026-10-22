@@ -165,12 +165,28 @@ def call(name, a):
     return text(f"unknown tool {name}", True)
 
 
+# MCP 2026-07-28: no handshake, every request carries this envelope in params._meta.
+# Like mcp 2.3.0, the first request picks the era; a modern connection refuses
+# any request without the envelope.
+VERSION_KEY = "io.modelcontextprotocol/protocolVersion"
+CAPS_KEY = "io.modelcontextprotocol/clientCapabilities"
+modern = None
+
 for line in sys.stdin:
     msg = json.loads(line)
     if "id" not in msg:
         continue
     m, p = msg.get("method"), msg.get("params") or {}
-    if m == "initialize":
+    meta = p.get("_meta") if isinstance(p.get("_meta"), dict) else {}
+    if modern is None:
+        modern = m != "initialize" and VERSION_KEY in meta
+    if modern and not (VERSION_KEY in meta and CAPS_KEY in meta):
+        print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32602, "message":
+              f"params._meta must be an object carrying the required {VERSION_KEY!r} and {CAPS_KEY!r} envelope keys"}}), flush=True)
+        continue
+    if m == "server/discover":
+        res = {"supportedVersions": ["2026-07-28"], "capabilities": {"tools": {}}, "serverInfo": {"name": "fake", "version": "0"}}
+    elif m == "initialize":
         res = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}}, "serverInfo": {"name": "fake", "version": "0"}}
     elif m == "tools/list":
         res = {"tools": TOOLS}

@@ -17,6 +17,7 @@ SERVER = subprocess.Popen([sys.executable, str(Path(__file__).parent / "guard_se
 waiting: dict = {}
 lock = threading.Lock()
 SESSION = "test-session-1"
+VERSION_KEY = "io.modelcontextprotocol/protocolVersion"
 
 
 def read_server():
@@ -34,7 +35,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         msg = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        if msg.get("method") != "initialize" and self.headers.get("Mcp-Session-Id") != SESSION:
+        meta = (msg.get("params") or {}).get("_meta") or {}
+        if VERSION_KEY in meta:
+            # 2026-07-28: no session; the version, method and name ride as headers that must match the body.
+            name = (msg.get("params") or {}).get("name")
+            if (self.headers.get("MCP-Protocol-Version") != meta[VERSION_KEY] or self.headers.get("Mcp-Method") != msg.get("method")
+                    or (name is not None and self.headers.get("Mcp-Name") != name)):
+                self.send_response(400)
+                self.end_headers()
+                return
+        elif msg.get("method") != "initialize" and self.headers.get("Mcp-Session-Id") != SESSION:
             self.send_response(400)
             self.end_headers()
             return
