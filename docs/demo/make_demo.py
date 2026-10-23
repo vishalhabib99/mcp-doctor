@@ -5,8 +5,10 @@ of tests/fixtures/guard_server.py fs_broken); long lines are cut with an ellipsi
 The bad_server score lines were re-captured 2026-10-19 (0.32.1, bug #125), and every
 other line was re-checked against 0.32.1 the same day: unchanged.
 Every line re-checked against 0.33.0 on 2026-10-20: unchanged.
-Re-checked against 0.35.0 on 2026-10-23: the lint report now opens with the breakages
-line (captured then); every other line unchanged.
+Re-checked against 0.35.0 on 2026-10-23. Same day, examples/bad_server gained a null-default
+bug (run's `timeout: int = None`) so the lint report opens with a real breakage; scene 1 and
+the BLOCK line were re-captured then (quality 24% -> 22%). Scene 1 leaves out some findings
+to fit (the repo-level ones among them); the README sample has the full report.
 
     python docs/demo/make_demo.py   (writes docs/demo.svg)
 """
@@ -25,22 +27,22 @@ SCENES = [
     ("1/3  Build", "Lint the server before an agent ever calls it", 0.0, 8.5, [
         ("$", "mcp-doctor examples/bad_server"),
         [("mcp-doctor report", "dim")],
-        [("No known agent-breaking issues ", "green"), ("(checked: null defaults, stdout on stdio, mcp 2.x start-up)", "dim")],
-        [("Quality:  24%  Grade: ", "fg"), ("F", "red"), ("  (2 tool(s) found)", "dim")],
+        [("Will break an agent: 1", "red")],
+        [("  run(timeout) (server.py:18): ", "fg"), ("a client that sends the advertised null default gets a validation error, …", "fg")],
+        [("      Fix: ", "green"), ("type it `T | None` (`mcp-doctor --fix` does this). ", "fg"), ("(fixed by maintainers in 20 repos)", "dim")],
+        [("Quality:  22%  Grade: ", "fg"), ("F", "red"), ("  (2 tool(s) found)", "dim")],
         [("Security: 100%  Grade: ", "fg"), ("A", "green")],
         [("  [FAIL] ", "red"), ("do_thing (server.py:12)", "fg")],
         [("      ERROR  ", "red"), ("Tool has no description. An agent cannot decide when to call this.", "fg")],
         [("      WARNING  ", "yellow"), ("2/2 parameters have no type annotation.", "fg")],
-        [("      WARNING  ", "yellow"), ("Parameters aren't documented — … the model only sees names, not intent.", "fg")],
-        [("      WARNING  ", "yellow"), ("No try/except in this function's own body. …", "fg")],
         [("  [FAIL] ", "red"), ("run (server.py:18)", "fg")],
         [("      ERROR  ", "red"), ("Tool has no description. An agent cannot decide when to call this.", "fg")],
+        [("      WARNING  ", "yellow"), ("timeout defaults to None but is typed as a non-optional type, so the schema …", "fg")],
         [("      ERROR  ", "red"), ("Bare 'except:' swallows all errors including cancellation — catch …", "fg")],
-        [("Repo-level  ", "dim"), ("ERROR  ", "red"), ("No README found.", "fg")],
     ]),
     ("2/3  Release", "Launch it, fuzz it, and get one decision", 8.5, 18.5, [
         ("$", 'mcp-doctor verdict examples/bad_server --run "python examples/bad_server/server.py"'),
-        [("mcp-doctor verdict: ", "fg"), ("BLOCK", "red"), (" (HIGH confidence) · static 24% (F)", "dim")],
+        [("mcp-doctor verdict: ", "fg"), ("BLOCK", "red"), (" (HIGH confidence) · static 22% (F)", "dim")],
         [("Blockers", "red"), (" (any one of these blocks release):", "dim")],
         [("- fuzz: server never connected (MCPError: Connection closed)", "fg")],
         [("- fuzz --truth: server never connected (MCPError: Connection closed)", "fg")],
@@ -109,7 +111,7 @@ for s, (stage, caption, start, end, lines) in enumerate(SCENES):
     assert t < end - 1.5, f"scene {stage} too long for its window ({t:.1f}s of {end}s)"
 
 svg = f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" role="img"
- aria-label="mcp-doctor demo: lint a server (no agent-breaking issues, quality 24%, grade F), get a release verdict (BLOCK, then SHIP), and guard a live call that reported success without writing the file">
+ aria-label="mcp-doctor demo: lint a server (1 finding that will break an agent, quality 22%, grade F), get a release verdict (BLOCK, then SHIP), and guard a live call that reported success without writing the file">
 <style>
 text{{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;font-size:{FONT}px;white-space:pre}}
 {"".join(css)}

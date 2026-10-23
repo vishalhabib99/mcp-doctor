@@ -15,7 +15,7 @@ def do_thing(x, y):
 
 
 @mcp.tool()
-def run(cmd):
+def run(cmd, timeout: int = None):
     try:
         return "ran"
     except:

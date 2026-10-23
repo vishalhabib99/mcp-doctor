@@ -17,9 +17,9 @@ An agent is only as reliable as the tools it calls, and most MCP servers ship un
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![GitHub Marketplace](https://img.shields.io/badge/Marketplace-mcp--doctor-blue?logo=github)](https://github.com/marketplace/actions/mcp-doctor)
 
-<p align="center"><img src="docs/demo.svg" width="940" alt="Animated demo: mcp-doctor lints a server (no agent-breaking issues, quality 24%, grade F), gives a release verdict (BLOCK, then SHIP), and guards a live call that reported success without writing the file"></p>
+<p align="center"><img src="docs/demo.svg" width="940" alt="Animated demo: mcp-doctor lints a server (1 finding that will break an agent, quality 22%, grade F), gives a release verdict (BLOCK, then SHIP), and guards a live call that reported success without writing the file"></p>
 
-*Real output from mcp-doctor 0.35.0 on the bundled example servers and guard's test fixture, long lines cut ([how it's built](docs/demo/make_demo.py)).*
+*Real output from mcp-doctor 0.35.0 on the bundled example servers and guard's test fixture, long lines cut and some findings left out ([how it's built](docs/demo/make_demo.py)).*
 
 **In use:** [jupyter-mcp-server](https://github.com/datalayer/jupyter-mcp-server/pull/488) (1.3K★) runs the Action on every PR, added after its maintainer asked for it. Fixes from mcp-doctor's findings have been merged upstream in [telegram-mcp](https://github.com/chigwell/telegram-mcp/pull/266) (111 tools in one PR), [davinci-resolve-mcp](https://github.com/samuelgursky/davinci-resolve-mcp/pull/274) (shipped as its own release) and [ha-mcp](https://github.com/homeassistant-ai/ha-mcp/pull/2327) (5.1K★); [61 merged upstream fixes in 58 repos](https://github.com/vishalhabib99#-proof-from-outside).
 
@@ -75,9 +75,11 @@ When none are found it says so, and names what it looked for: `No known agent-br
 ```
 $ mcp-doctor examples/bad_server
 mcp-doctor report
-No known agent-breaking issues (checked: null defaults, stdout on stdio, mcp 2.x start-up)
+Will break an agent: 1
+  run(timeout) (server.py:18): a client that sends the advertised null default gets a validation error, and the tool never runs.
+      Fix: type it `T | None` (`mcp-doctor --fix` does this). (fixed by maintainers in 20 repos)
 
-Quality:  24%  Grade: F  (2 tool(s) found)
+Quality:  22%  Grade: F  (2 tool(s) found)
 Security: 100%  Grade: A
 
   [FAIL] do_thing (server.py:12)
@@ -87,8 +89,9 @@ Security: 100%  Grade: A
       WARNING  No try/except in this function's own body. FastMCP still catches an unhandled exception here and returns a structured error rather …
   [FAIL] run (server.py:18)
       ERROR  Tool has no description. An agent cannot decide when to call this.
-      WARNING  1/1 parameters have no type annotation.
+      WARNING  1/2 parameters have no type annotation.
       WARNING  Parameters aren't documented — no Args:/:param: docstring section and no per-parameter Field(description=...) — the model only sees …
+      WARNING  timeout defaults to None but is typed as a non-optional type, so the schema advertises `"default": null` on a field whose `type` …
       ERROR  Bare 'except:' swallows all errors including cancellation — catch specific exceptions.
 
 Repo-level
