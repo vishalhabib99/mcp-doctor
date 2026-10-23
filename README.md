@@ -23,7 +23,7 @@ An agent is only as reliable as the tools it calls, and most MCP servers ship un
 
 **In use:** [jupyter-mcp-server](https://github.com/datalayer/jupyter-mcp-server/pull/488) (1.3K★) runs the Action on every PR, added after its maintainer asked for it. Fixes from mcp-doctor's findings have been merged upstream in [telegram-mcp](https://github.com/chigwell/telegram-mcp/pull/266) (111 tools in one PR), [davinci-resolve-mcp](https://github.com/samuelgursky/davinci-resolve-mcp/pull/274) (shipped as its own release) and [ha-mcp](https://github.com/homeassistant-ai/ha-mcp/pull/2327) (5.1K★); [56 merged upstream fixes in all](https://github.com/vishalhabib99#-proof-from-outside).
 
-**Contents:** [Try it](#try-it-in-30-seconds) · [Why trust it](#why-trust-the-grade) · [Lint and fix](#lint-and-fix) · [GitHub Action](#github-action) · [pre-commit](#pre-commit-hook) · [Fuzz and verdict](#fuzz-and-verdict--launch-the-server-and-check-it) · [Guard](#guard--catch-tool-calls-that-report-success-but-didnt-work) · [Plugin](#plugin-for-claude-code-codex-and-cursor) · [What it checks](#what-it-checks) · [Security checks](#security-checks) · [Install](#install) · [Limitations](#known-limitations) · [Roadmap](#roadmap)
+**Contents:** [Try it](#try-it-in-30-seconds) · [Why trust it](#why-trust-the-grade) · [Scan and fix](#lint-and-fix) · [GitHub Action](#github-action) · [pre-commit](#pre-commit-hook) · [Fuzz and verdict](#fuzz-and-verdict--launch-the-server-and-check-it) · [Guard](#guard--catch-tool-calls-that-report-success-but-didnt-work) · [Plugin](#plugin-for-claude-code-codex-and-cursor) · [What it checks](#what-it-checks) · [Security checks](#security-checks) · [Install](#install) · [Limitations](#known-limitations) · [Roadmap](#roadmap)
 
 ## Try it in 30 seconds
 
@@ -35,7 +35,9 @@ An agent is only as reliable as the tools it calls, and most MCP servers ship un
 - **Claude Code, Codex or Cursor:** install the plugin (Claude Code: `/plugin install mcp-doctor --marketplace vishalhabib99/mcp-doctor`; Codex: `codex plugin marketplace add vishalhabib99/mcp-doctor`), then ask "check my MCP server". The agent scans, explains each finding, and fixes what it can with your OK ([details](#plugin-for-claude-code-codex-and-cursor))
 - **CI:** `uses: vishalhabib99/mcp-doctor@v1` comments on each PR, suggests one-click fixes on the lines it changes, and can fail a PR that drops below your score ([details](#github-action))
 
-## Why trust the grade
+<a id="why-trust-the-grade"></a>
+
+## Why trust its findings
 
 - **Recall is measured, misses are published.** A checker that can't see a tool quietly grades it as fine, so tool detection is measured against an independent count: 15,755 of 15,977 tools found across 805 real servers on 5 frameworks. Every miss is listed with its reason in [docs/coverage.md](docs/coverage.md).
 - **127 of its own bugs found and fixed after release** by running it on real servers, up to the 91.5k★ official `modelcontextprotocol/servers` monorepo; a fix ships only when a before/after run on 120+ real repos changes nothing it shouldn't. [The log](docs/dogfooding.md) · [how 69 of them got through](docs/postmortem-69-bugs.md).
@@ -43,7 +45,9 @@ An agent is only as reliable as the tools it calls, and most MCP servers ship un
 - **Quality and security are graded separately,** so a well-documented A can't hide a security gap. Every audited repo is on the [leaderboard](https://vishalhabib99.github.io/mcp-doctor/) with a dated badge you can add to your README, and re-scans show ▲/▼ drift.
 - **What the first outside users hit, and what changed because of it:** [docs/what-users-taught-me.md](docs/what-users-taught-me.md).
 
-## Lint and fix
+<a id="lint-and-fix"></a>
+
+## Scan the code and fix it in place
 
 The static scan reads source and never runs it. Point it at a server and get two grades and a list of what breaks the agent:
 
@@ -114,7 +118,9 @@ $ mcp-doctor . --diff --llm
 
 Without `--llm`, it never fabricates a real description, guesses at an untyped parameter's type, wraps a function body in try/except, or merges into a `:param:` or NumPy docstring. Every patched file is re-parsed before it's written.
 
-### Schema/contract diff — catch a breaking change between releases
+<a id="schemacontract-diff--catch-a-breaking-change-between-releases"></a>
+
+### Catch breaking changes between releases
 
 Everything else here scores a single snapshot. This compares two: save a `--json` run as a baseline, then re-run later against `--diff-against` that file to catch a tool that's gone, a parameter that's gone, or a parameter that's newly required — the three ways a schema change breaks an agent that already learned the old shape without anyone noticing, since none of them show up in a normal diff review the way a removed function would.
 
@@ -127,7 +133,9 @@ mcp-doctor . --diff-against baseline.json --fail-on-breaking-change  # non-zero 
 
 Deliberately doesn't touch the quality/security scores — those are properties of one snapshot, this is a property of two compared, a different kind of question with its own exit code. A **new** tool or a **new optional** parameter is never flagged — nothing an existing caller relied on stopped working. Python, TypeScript and Go (parameter presence and required-ness, not types): Python signatures and schema dicts; TypeScript Zod shapes (`.optional()`, `.nullish()`, `.default()` make a field optional) and raw JSON Schema `required` lists; Go `mcp.Required()` builder options, explicit `InputSchema` `Required` lists, and input structs, where a field is optional only when its `json` tag says `omitempty` or `omitzero`; Rust `Parameters<T>` struct fields, optional when `Option<_>` or `#[serde(default)]`, and `json!` input schemas. A tool whose schema can't be read statically, or a TS/Go tool in a baseline saved before v1.27.0, is skipped rather than compared.
 
-## GitHub Action
+<a id="github-action"></a>
+
+## Check every PR with the GitHub Action
 
 Gate PRs on server quality without installing anything yourself:
 
@@ -187,7 +195,9 @@ The report also gets written to the job summary either way. `@v1` tracks the lat
 
 Only tools marked `readOnlyHint` are called unless `include-destructive: true`, which belongs only on a sandbox. This replaces the separate mcp-trust-check Action.
 
-## pre-commit hook
+<a id="pre-commit-hook"></a>
+
+## Check before you commit (pre-commit hook)
 
 Catch it before the push. Add to `.pre-commit-config.yaml`:
 
@@ -202,7 +212,9 @@ repos:
 
 It runs when a commit touches `.py`, `.ts`/`.tsx`, `.js`/`.mjs`/`.cjs`, `.go` or `.rs` files and fails the commit if the quality score is under the threshold. A repo where no tools are found gets a warning and passes, same as `--fail-under` on the CLI.
 
-## Fuzz and verdict — launch the server and check it
+<a id="fuzz-and-verdict--launch-the-server-and-check-it"></a>
+
+## Fuzz the running server and get a ship verdict
 
 The static scan reads code. These run the server and call it, so they need the MCP SDK (Python 3.10+): `pip install 'mcp-server-lint[runtime]'`, or with no install, `uvx --from 'mcp-server-lint[runtime]' mcp-doctor fuzz -- ...`.
 
@@ -221,7 +233,9 @@ mcp-doctor verdict . --run "python server.py"  # one decision: SHIP, FIX-FIRST o
 
 For agents, the same checks run per call inside a live session: `from mcp_doctor.session import GuardedSession` decides each call ACT, ESCALATE or BLOCK, with an operator-written `Policy`, a hash-chained `AuditLog` and checksum-backed PII detection (formerly the mcp-trust-check package).
 
-## Guard — catch tool calls that report success but didn't work
+<a id="guard--catch-tool-calls-that-report-success-but-didnt-work"></a>
+
+## Guard live calls: catch fake successes and leaked secrets
 
 `mcp-doctor guard` runs any stdio MCP server behind a check. Every message passes through unchanged; after each `tools/call` it looks for a "success" that isn't one and, if it finds one, adds a warning to the result the agent reads, so the agent can retry or tell you instead of saying "done".
 
@@ -277,7 +291,9 @@ Limits: writes are confirmed only when the server has a matching read tool. Valu
 
 <a id="guard-for-coding-agents-claude-code-hooks"></a>
 
-### Guard for coding agents (Claude Code, Codex and Cursor hooks)
+<a id="guard-for-coding-agents-claude-code-codex-and-cursor-hooks"></a>
+
+### Guard the coding agent's own tools (Claude Code, Codex, Cursor)
 
 The proxy above sees MCP tools only. A coding agent also reads files, runs shell commands and fetches pages with its own built-in tools, and that's where the Context7 (CVE-2026-75130), "Comment and Control" and `.git` hook (Cursor CVE-2026-26268) attacks ran. The `mcp-doctor-guard` plugin runs `mcp-doctor guard hook` on every tool call:
 
@@ -311,7 +327,9 @@ Live, Claude Code with Haiku in `bypassPermissions`, same prompts with and witho
 
 In the default and `acceptEdits` modes Claude Code already refuses `.git/hooks` writes through Write/Edit on its own, so the plugin adds most in unattended runs and on the shell route. Skipped on purpose: blocking destructive commands (`rm -rf`, `DROP`), which free hook packs and Claude Code's own permissions already cover. Limits: a secret passed by variable (`$GITHUB_TOKEN`) instead of its literal value, or paraphrased, gets past it; reading a file from a cloned repo doesn't count as outside content.
 
-### Runtime gate — the same two checks, applied to live `tools/list` metadata
+<a id="runtime-gate--the-same-two-checks-applied-to-live-toolslist-metadata"></a>
+
+### Check live tool metadata from your own client
 
 `check_tool_registration` runs the description and annotation checks on tool metadata your own MCP client already fetched. It's a pure function: no connection of its own, no new dependency, no `mcp` package required.
 
@@ -329,7 +347,9 @@ It checks less than the static scan: without the server's source, it can't tell 
 
 <a id="claude-code-plugin"></a>
 
-## Plugin for Claude Code, Codex and Cursor
+<a id="plugin-for-claude-code-codex-and-cursor"></a>
+
+## Scan and fix from Claude Code, Codex or Cursor
 
 Run the same scan without leaving your coding agent, and let it fix what it finds. The same plugin folder carries a manifest for each agent:
 
@@ -351,7 +371,9 @@ Then ask "check my MCP server". The skill also kicks in when you've just written
 
 Security findings are explained, not silently rewritten. The plugin lives in [`plugin/`](plugin/) and ships with an eval suite in [`plugin/evals/`](plugin/evals/): it checks when the skill should and shouldn't fire, that it reports the real grades, and that it doesn't "fix" a clean server or write tool descriptions the code doesn't back up.
 
-## What it checks
+<a id="what-it-checks"></a>
+
+## What it checks, in every language
 
 Audits Python, TypeScript/JavaScript, Go and Rust servers, including several in the same repo:
 
@@ -388,7 +410,9 @@ The same checks apply in every language: a description, and per-parameter docs (
 - Python: the server still starts on a fresh install. `mcp` 2.x removed `mcp.server.fastmcp` (FastMCP is now `MCPServer`), a few other v1 imports and the low-level `@server.list_tools()`-style decorators. A server that uses them and asks for `mcp` with no upper bound (`mcp>=1.6`, `mcp[cli]`) gets 2.x from pip/uvx and fails at start; the report names the line and the fix (pin `mcp<2`, or the v2 rename). Shown as an error, not scored. Runtime-only breaks (`tool.inputSchema` is now `input_schema`) aren't checked
 - Tool names conform to the [spec's Tool Names guidance](https://modelcontextprotocol.io/specification/2026-07-28/server/tools#tool-names) (1–128 chars, `A-Z a-z 0-9 _ - .` only, unique within the server)
 
-## Security checks
+<a id="security-checks"></a>
+
+## Security checks, scored separately
 
 Scored separately from quality, so a well-documented A can't hide a security gap. It matters more for MCP than for a web form: the input comes from model-generated tool calls, not a person. Only the repo's own code is scanned; vendored libraries and built bundles are skipped.
 
@@ -447,7 +471,9 @@ Each one in full, with the real repos behind it: [docs/limitations.md](docs/limi
 - [x] `--fix --llm` — parameter docs drafted by a local model (Ollama) instead of TODO placeholders
 - [ ] `--fix` for TypeScript and Go: deliberately not planned yet. The mechanical fixes (nullable `None` defaults, bare `except:`) are Python bugs; the only TS candidate is a `TODO` description placeholder, which the Action already leaves off by default
 
-## Real-world spot check
+<a id="real-world-spot-check"></a>
+
+## Tested on real servers, not just fixtures
 
 Every check was tuned on real servers, not only the fixtures in `examples/`: tool detection is measured on 805 servers in Python, TypeScript and Go ([coverage](docs/coverage.md)) and on the 20 most-starred Rust servers, every fix is re-run on 120+ real repos before it ships, and the servers include official ones from GitHub, Red Hat, Brave and MathWorks. Each pass, the bug it exposed in mcp-doctor and the before and after are in [docs/dogfooding.md](docs/dogfooding.md); newer passes are in [docs/BUILD_LOG.md](docs/BUILD_LOG.md).
 
