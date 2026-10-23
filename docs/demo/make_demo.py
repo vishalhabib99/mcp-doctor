@@ -5,6 +5,8 @@ of tests/fixtures/guard_server.py fs_broken); long lines are cut with an ellipsi
 The bad_server score lines were re-captured 2026-10-19 (0.32.1, bug #125), and every
 other line was re-checked against 0.32.1 the same day: unchanged.
 Every line re-checked against 0.33.0 on 2026-10-20: unchanged.
+Re-checked against 0.35.0 on 2026-10-23: the lint report now opens with the breakages
+line (captured then); every other line unchanged.
 
     python docs/demo/make_demo.py   (writes docs/demo.svg)
 """
@@ -23,6 +25,7 @@ SCENES = [
     ("1/3  Build", "Lint the server before an agent ever calls it", 0.0, 8.5, [
         ("$", "mcp-doctor examples/bad_server"),
         [("mcp-doctor report", "dim")],
+        [("No known agent-breaking issues ", "green"), ("(checked: null defaults, stdout on stdio, mcp 2.x start-up)", "dim")],
         [("Quality:  24%  Grade: ", "fg"), ("F", "red"), ("  (2 tool(s) found)", "dim")],
         [("Security: 100%  Grade: ", "fg"), ("A", "green")],
         [("  [FAIL] ", "red"), ("do_thing (server.py:12)", "fg")],
@@ -106,7 +109,7 @@ for s, (stage, caption, start, end, lines) in enumerate(SCENES):
     assert t < end - 1.5, f"scene {stage} too long for its window ({t:.1f}s of {end}s)"
 
 svg = f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" role="img"
- aria-label="mcp-doctor demo: lint a server (24%, grade F), get a release verdict (BLOCK, then SHIP), and guard a live call that reported success without writing the file">
+ aria-label="mcp-doctor demo: lint a server (no agent-breaking issues, quality 24%, grade F), get a release verdict (BLOCK, then SHIP), and guard a live call that reported success without writing the file">
 <style>
 text{{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;font-size:{FONT}px;white-space:pre}}
 {"".join(css)}
@@ -115,7 +118,7 @@ text{{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",m
 <rect width="{W}" height="{H}" rx="12" fill="{C["bg"]}"/>
 <rect width="{W}" height="58" rx="12" fill="{C["bar"]}"/><rect y="46" width="{W}" height="12" fill="{C["bar"]}"/>
 <circle cx="26" cy="29" r="6.5" fill="#ff5f57"/><circle cx="48" cy="29" r="6.5" fill="#febc2e"/><circle cx="70" cy="29" r="6.5" fill="#28c840"/>
-<text x="{W // 2}" y="34" text-anchor="middle" fill="{C["dim"]}" font-size="13">mcp-doctor · full-lifecycle QA for the tools AI agents call</text>
+<text x="{W // 2}" y="34" text-anchor="middle" fill="{C["dim"]}" font-size="13">mcp-doctor · evals and guardrails for AI agents and the MCP tools they call</text>
 <line x1="0" y1="{H - 40}" x2="{W}" y2="{H - 40}" stroke="{C["bar"]}" stroke-width="2"/>
 {"".join(body)}
 </svg>
