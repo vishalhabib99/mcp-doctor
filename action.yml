@@ -47,7 +47,7 @@ inputs:
     required: false
     default: "false"
   fail-on:
-    description: "With `run` or `url`: fail the workflow on this verdict or worse, BLOCK or FIX-FIRST. Empty never fails on the verdict."
+    description: "Fail the workflow on any of these, comma-separated: `breakages` (any finding that will break an agent: null defaults, stdout on stdio, mcp 2.x start-up), and with `run` or `url` a verdict of `BLOCK` or `FIX-FIRST` (or worse). Empty (the default) never fails on these."
     required: false
     default: ""
   version:
@@ -56,6 +56,9 @@ inputs:
     default: ""
 
 outputs:
+  breakages:
+    description: "Number of findings that will break an agent calling the server (0 = none of the known kinds)."
+    value: ${{ steps.audit.outputs.breakages }}
   score:
     description: "Score percent (0-100)."
     value: ${{ steps.audit.outputs.score }}
@@ -107,6 +110,7 @@ runs:
       env:
         SCAN_PATH: ${{ inputs.path }}
         FAIL_UNDER: ${{ inputs.fail-under }}
+        FAIL_ON: ${{ inputs.fail-on }}
       run: |
         set +e
         mcp-doctor "$SCAN_PATH" --no-color > mcp-doctor-report.txt
@@ -120,6 +124,11 @@ runs:
         echo "score=$score" >> "$GITHUB_OUTPUT"
         echo "grade=$grade" >> "$GITHUB_OUTPUT"
         echo "graded=$graded" >> "$GITHUB_OUTPUT"
+        breakages=$(python -I -c "import json;print(json.load(open('mcp-doctor-report.json')).get('breakage_count', 0))")
+        echo "breakages=$breakages" >> "$GITHUB_OUTPUT"
+        case ",${FAIL_ON// /}," in
+          *,breakages,*) [ "$breakages" != "0" ] && echo "breakages_failed=1" >> "$GITHUB_OUTPUT" ;;
+        esac
 
         {
           echo "## mcp-doctor report"
@@ -183,7 +192,8 @@ runs:
             f.write(f"decision={v['verdict']}\nconfidence={v['confidence']}\n")
             f.write(f"needs-human-review={str(v['needs_human_review']).lower()}\n")
             fail_on = os.environ.get("FAIL_ON", "")
-            failed = (fail_on == "BLOCK" and v["verdict"] == "BLOCK") or (fail_on == "FIX-FIRST" and v["verdict"] in ("BLOCK", "FIX-FIRST"))
+            tokens = {t.strip() for t in fail_on.split(",")}
+            failed = ("BLOCK" in tokens and v["verdict"] == "BLOCK") or ("FIX-FIRST" in tokens and v["verdict"] in ("BLOCK", "FIX-FIRST"))
             f.write(f"gate_failed={1 if failed else 0}\n")
         PY
         cat mcp-doctor-verdict.md >> "$GITHUB_STEP_SUMMARY"
@@ -235,13 +245,19 @@ runs:
         GRADED: ${{ steps.audit.outputs.graded }}
         SCORE: ${{ steps.audit.outputs.score }}
         GRADE: ${{ steps.audit.outputs.grade }}
+        BREAKAGES: ${{ steps.audit.outputs.breakages }}
       run: |
         {
           echo "<!-- mcp-doctor-report -->"
-          if [ "$GRADED" = "true" ]; then
-            echo "### mcp-doctor report — Score: $SCORE% ($GRADE)"
+          if [ "$BREAKAGES" != "0" ]; then
+            heading="$BREAKAGES finding(s) will break an agent"
           else
-            echo "### mcp-doctor report — Not graded (0 tools found)"
+            heading="No known agent-breaking issues"
+          fi
+          if [ "$GRADED" = "true" ]; then
+            echo "### mcp-doctor — $heading · Score: $SCORE% ($GRADE)"
+          else
+            echo "### mcp-doctor — $heading · Not graded (0 tools found)"
           fi
           echo
           echo '```'
@@ -286,6 +302,15 @@ runs:
       if: ${{ steps.audit.outputs.gate_failed == '1' }}
       shell: bash
       run: exit 1
+
+    - name: Enforce breakage gate
+      if: ${{ steps.audit.outputs.breakages_failed == '1' }}
+      shell: bash
+      env:
+        BREAKAGES: ${{ steps.audit.outputs.breakages }}
+      run: |
+        echo "::error::mcp-doctor found $BREAKAGES finding(s) that will break an agent (fail-on: breakages)"
+        exit 1
 
     - name: Enforce verdict gate
       if: ${{ steps.verdict.outputs.gate_failed == '1' }}

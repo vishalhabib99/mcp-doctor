@@ -40,7 +40,8 @@ An agent is only as reliable as the tools it calls, and most MCP servers ship un
 ## Why trust its findings
 
 - **Recall is measured, misses are published.** A checker that can't see a tool quietly grades it as fine, so tool detection is measured against an independent count: 15,755 of 15,977 tools found across 805 real servers on 5 frameworks. Every miss is listed with its reason in [docs/coverage.md](docs/coverage.md).
-- **127 of its own bugs found and fixed after release** by running it on real servers, up to the 91.5k★ official `modelcontextprotocol/servers` monorepo; a fix ships only when a before/after run on 120+ real repos changes nothing it shouldn't. [The log](docs/dogfooding.md) · [how 69 of them got through](docs/postmortem-69-bugs.md).
+- **Breakages first, grades second.** Every report opens with what will break an agent calling the server, from checks maintainers have already acted on: an optional argument that rejects the `null` its own schema advertises (fixed by maintainers in 20 repos), stray stdout on a stdio server (3 repos), a server that won't start on a fresh install of `mcp` 2.x. Before the fix, 17 of the 19 such bugs maintainers merged showed up this way, while the grade gave most of those repos an A. On 20 repos it had never seen, the lines checked by hand were 96% right (53 of 55 read in full, plus 16 of 16 sampled from two repos with hundreds). The grades still follow, for everything else.
+- **131 of its own bugs found and fixed after release** by running it on real servers, up to the 91.5k★ official `modelcontextprotocol/servers` monorepo; a fix ships only when a before/after run on 120+ real repos changes nothing it shouldn't. [The log](docs/dogfooding.md) · [how 69 of them got through](docs/postmortem-69-bugs.md).
 - **Maintainers act on its reports:** fixes merged upstream, among them [ha-mcp](https://github.com/homeassistant-ai/ha-mcp/pull/2327), [telegram-mcp](https://github.com/chigwell/telegram-mcp/pull/266) (111 tools fixed in one PR) and [davinci-resolve-mcp](https://github.com/samuelgursky/davinci-resolve-mcp/pull/274) (shipped as its own release).
 - **Quality and security are graded separately,** so a well-documented A can't hide a security gap. Every audited repo is on the [leaderboard](https://vishalhabib99.github.io/mcp-doctor/) with a dated badge you can add to your README, and re-scans show ▲/▼ drift.
 - **What the first outside users hit, and what changed because of it:** [docs/what-users-taught-me.md](docs/what-users-taught-me.md).
@@ -49,7 +50,23 @@ An agent is only as reliable as the tools it calls, and most MCP servers ship un
 
 ## Scan the code and fix it in place
 
-The static scan reads source and never runs it. Point it at a server and get two grades and a list of what breaks the agent:
+The static scan reads source and never runs it. Point it at a server and it leads with what will break an agent, then two grades and every finding:
+
+```
+$ mcp-doctor .
+mcp-doctor report
+Will break an agent: 3
+  search(limit) (server.py:5): a client that sends the advertised null default gets a validation error, and the tool never runs.
+      Fix: type it `T | None` (`mcp-doctor --fix` does this). (fixed by maintainers in 20 repos)
+  search (server.py:12): stray stdout on stdio corrupts the JSON-RPC stream: calls time out (Python) or the client logs parse errors (Node).
+      Fix: write to stderr or use logging. (fixed by maintainers in 3 repos)
+  server.py:1: a fresh install gets mcp 2.x and the server fails to start.
+      Fix: pin `mcp<2`, or migrate the removed import. (removed in mcp 2.x; fails on import)
+
+Quality:  34%  Grade: F  (1 tool(s) found)
+```
+
+When none are found it says so, and names what it looked for: `No known agent-breaking issues (checked: null defaults, stdout on stdio, mcp 2.x start-up)`. `--json` lists them under `breakages`, with `breakage_count`.
 
 ![mcp-doctor scanning homeassistant-ai/ha-mcp: Quality 96% Grade A, Security 98% Grade A, 88 tools found](docs/demo.png)
 
@@ -58,6 +75,8 @@ The static scan reads source and never runs it. Point it at a server and get two
 ```
 $ mcp-doctor examples/bad_server
 mcp-doctor report
+No known agent-breaking issues (checked: null defaults, stdout on stdio, mcp 2.x start-up)
+
 Quality:  24%  Grade: F  (2 tool(s) found)
 Security: 100%  Grade: A
 
@@ -81,6 +100,8 @@ Repo-level
 ```
 $ mcp-doctor examples/good_server
 mcp-doctor report
+No known agent-breaking issues (checked: null defaults, stdout on stdio, mcp 2.x start-up)
+
 Quality:  100%  Grade: A  (1 tool(s) found)
 Security: 100%  Grade: A
 
@@ -158,7 +179,10 @@ jobs:
           fail-under: 70        # default: 0 (report only, don't fail the build)
           comment: true          # default: true — posts/updates a PR comment with the report
           suggest-fixes: true    # default: true — one-click fix suggestions on the PR's lines
+          # fail-on: breakages   # fail the check on any finding that will break an agent
 ```
+
+The PR comment's headline is the breakage count (`2 finding(s) will break an agent · Score: 91% (A)`), and the count is the `breakages` output. `fail-on: breakages` fails the check when it's above 0; it combines with the verdict values below (`fail-on: breakages, BLOCK`).
 
 **Fix suggestions:** on a pull request, the safe fixes from `--fix` (a `None` default typed as nullable, a bare `except:`) are posted as GitHub suggestion blocks on the lines the PR changes, so accepting one is a click. Missing `Args:` entries aren't suggested by default, because `--fix` can only add a `TODO: describe this parameter.` placeholder; the report counts those tools instead. Set `suggest-doc-stubs: true` to get the placeholders as suggestions too. GitHub only allows suggestions inside the PR's diff, so fixes on other lines are counted in the report comment with the full patch, ready for `git apply`. A re-run never posts the same suggestion twice. **PRs from forks:** GitHub gives a fork's PR a read-only token, so the scan can't comment there. It saves the report and suggestions as a 3-day artifact instead, and a second workflow posts them once the scan finishes. That workflow gets the write token, never checks out the PR's code, looks the PR up from GitHub's event rather than the artifact, rebuilds each suggestion field by field and defuses `@mentions`. `init-action` writes it; by hand it's:
 
@@ -204,7 +228,7 @@ Catch it before the push. Add to `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/vishalhabib99/mcp-doctor
-    rev: v1.34.1
+    rev: v1.35.0
     hooks:
       - id: mcp-doctor
         # args: ["--fail-under", "80", "path/to/server"]   # default: --fail-under 70 on the repo root

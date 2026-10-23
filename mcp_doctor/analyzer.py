@@ -1471,6 +1471,44 @@ def _foreign_tool_names(tree: ast.Module) -> set[str]:
     return names
 
 
+def _disables_tool(node: ast.AST) -> bool:
+    """A dict literal with `"enabled": False` anywhere inside (a conditional like
+    `{} if V3 else {"enabled": False}` counts: on v3 the same tools are hidden by
+    a later call instead)."""
+    for d in ast.walk(node):
+        if isinstance(d, ast.Dict):
+            for k, v in zip(d.keys, d.values):
+                if (isinstance(k, ast.Constant) and k.value == "enabled"
+                        and isinstance(v, ast.Constant) and v.value is False):
+                    return True
+    return False
+
+
+def _collect_disabled_kwargs(trees: list[tuple[str, ast.Module]]) -> set[str]:
+    """Module-level names bound to tool kwargs that hide the tool, splatted as
+    `@mcp.tool(**DISABLED_TOOL_KWARGS)` (manykarim/rf-mcp: 12 tools registered
+    but filtered from tools/list)."""
+    names: set[str] = set()
+    for _, tree in trees:
+        for node in tree.body:
+            target = node.targets[0] if isinstance(node, ast.Assign) and len(node.targets) == 1 else (
+                node.target if isinstance(node, ast.AnnAssign) and node.value is not None else None)
+            if isinstance(target, ast.Name) and _disables_tool(node.value):
+                names.add(target.id)
+    return names
+
+
+def _decorator_disables(call: ast.Call, disabled_kwargs: set[str]) -> bool:
+    """`@mcp.tool(enabled=False)` or `@mcp.tool(**NAME)` with NAME hiding the tool:
+    registered, but never listed to an agent."""
+    for kw in call.keywords:
+        if kw.arg == "enabled" and isinstance(kw.value, ast.Constant) and kw.value.value is False:
+            return True
+        if kw.arg is None and isinstance(kw.value, ast.Name) and kw.value.id in disabled_kwargs:
+            return True
+    return False
+
+
 def _find_fastmcp_tools(
     tree: ast.Module,
     file: str,
@@ -1478,6 +1516,7 @@ def _find_fastmcp_tools(
     error_handling_registry: dict[str, bool] | None = None,
     plain_string_ok: bool = True,
     decorator_names: set[str] = FASTMCP_DECORATOR_NAMES,
+    disabled_kwargs: set[str] = frozenset(),
 ) -> list[ToolFinding]:
     findings = []
     foreign = _foreign_tool_names(tree)
@@ -1498,6 +1537,8 @@ def _find_fastmcp_tools(
                     node, file, alias_registry=alias_registry, error_handling_registry=error_handling_registry,
                     plain_string_ok=plain_string_ok,
                 ))
+                break
+            if _decorator_disables(call, disabled_kwargs):
                 break
             description_override = _kwarg_str(call, "description")
             if description_override is None:
@@ -1653,6 +1694,24 @@ def _runs_over_stdio(trees: list[tuple[str, ast.Module]]) -> bool:
                        for a in [*node.args, *(k.value for k in node.keywords)] for c in ast.walk(a)):
                     return True
     return False
+
+
+_NETWORK_TRANSPORTS = {"sse", "http", "streamable-http", "streamable_http"}
+
+
+def _runs_over_network_only(tree: ast.Module) -> bool:
+    """This file starts its server with an explicit network transport and never
+    mentions stdio: `mcp.run(transport="sse")`. Its tools' stdout is harmless even
+    when some other file in the repo looks like stdio (Zerone-Laboratories/RIGEL:
+    a GLib `loop.run()` elsewhere read as FastMCP's default stdio run)."""
+    literals = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "run":
+            if not node.args and not node.keywords:
+                return False  # FastMCP's bare run() is stdio
+            for a in [*node.args, *(k.value for k in node.keywords)]:
+                literals.update(c.value for c in ast.walk(a) if isinstance(c, ast.Constant) and isinstance(c.value, str))
+    return bool(literals & _NETWORK_TRANSPORTS) and "stdio" not in literals
 
 
 _AGENT_FRAMEWORKS = ("langchain", "langchain_core", "langgraph", "strands", "pydantic_ai", "crewai",
@@ -2684,10 +2743,12 @@ def analyze_repo(root: Path) -> Report:
     custom_tool_classes = _repo_tool_subclasses(trees)
     class_tool_bases = _repo_class_tool_bases(trees)
     class_tool_skip_names = _func_metadata_skip_names(trees)
+    disabled_kwargs = _collect_disabled_kwargs(trees)
     tools: list[ToolFinding] = []
     for rel, tree in trees:
         tools.extend(_find_fastmcp_tools(
             tree, rel, alias_registry, error_handling_registry, plain_string_ok, decorator_names,
+            disabled_kwargs,
         ))
         tools.extend(_find_direct_call_tools(
             tree, rel, alias_registry, error_handling_registry, plain_string_ok,
@@ -2724,8 +2785,9 @@ def analyze_repo(root: Path) -> Report:
 
     stdio = _runs_over_stdio(trees)
     agent_files = {rel for rel, tree in trees if _agent_framework_file(rel, tree)}
+    network_files = {rel for rel, tree in trees if _runs_over_network_only(tree)}
     for t in tools:
-        if not stdio or t.file in agent_files:
+        if not stdio or t.file in agent_files or t.file in network_files:
             t.issues = [i for i in t.issues if i.check != "stdout_write"]
 
     repo_issues: list[RepoIssue] = []

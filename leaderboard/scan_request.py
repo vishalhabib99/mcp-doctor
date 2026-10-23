@@ -94,6 +94,10 @@ def parse_request(body: str) -> dict:
     return {"owner": owner, "repo": repo, "subdir": subdir, "leaderboard": leaderboard}
 
 
+# Same list as mcp_doctor.breakages.CHECKED (this script reads the --json output, not the package).
+BREAKAGES_CHECKED = "null defaults, stdout on stdio, mcp 2.x start-up"
+
+
 def summarize(report: dict) -> dict:
     """Pull what the public comment may show out of a full --json report."""
     all_issues = list(report.get("repo_issues", []))
@@ -113,6 +117,7 @@ def summarize(report: dict) -> dict:
         "tool_count": len(report.get("tools", [])),
         "quality_issues": quality,
         "security_counts": Counter(i.get("severity", "warning") for i in security),
+        "breakages": report.get("breakages", []),
     }
 
 
@@ -138,7 +143,21 @@ def render_comment(req: dict, summary: dict) -> str:
             "and Go servers. If this repo does have tools, reply here: that's a mcp-doctor bug worth fixing.",
         ]
     else:
+        breakages = summary.get("breakages", [])
+        if breakages:
+            lines += [f"**Will break an agent: {len(breakages)}**", ""]
+            for b in breakages[:MAX_QUALITY_ROWS]:
+                # A list item, not a table cell: no | escaping (it would show inside `T | None`).
+                one = lambda text: str(text).replace("\n", " ")
+                where = f"{b['file']}:{b['line']}" if b.get("line") else b.get("file", "")
+                who = f"`{one(b['tool'])}` ({one(where)})" if b.get("tool") else f"`{one(where)}`"
+                lines.append(f"- {who}: {one(b['breaks'])}. **Fix:** {one(b['fix'])}. ({one(b['evidence'])})")
+            if len(breakages) > MAX_QUALITY_ROWS:
+                lines.append(f"- …and {len(breakages) - MAX_QUALITY_ROWS} more. Run it locally (below) for the full list.")
+        else:
+            lines += [f"**No known agent-breaking issues** (checked: {BREAKAGES_CHECKED})."]
         lines += [
+            "",
             "| | Grade | Score |",
             "|---|---|---|",
             f"| Quality (can an agent tell what each tool does?) | **{summary['quality_grade']}** | {summary['quality_percent']}% |",

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict
 
+from . import breakages as _breakages
 from .analyzer import Report
 from .schema_diff import SchemaChange
 
@@ -31,6 +32,11 @@ def render_text(
 
     lines: list[str] = []
     lines.append(c(BOLD, "mcp-doctor report"))
+    found = _breakages.find(report)
+    lines.append(c(RED if found else GREEN, _breakages.headline(found)))
+    for line in _breakages.lines(found):
+        lines.append(f"  {line}")
+    lines.append("")
     grade_color = _color_for_grade(report.grade) if use_color else ""
     if report.graded:
         lines.append(
@@ -106,6 +112,9 @@ def render_json(report: Report, schema_changes: list[SchemaChange] | None = None
         ],
         "repo_issues": [asdict(i) for i in report.repo_issues],
     }
+    found = _breakages.find(report)
+    payload["breakage_count"] = len(found)
+    payload["breakages"] = [asdict(b) for b in found]
     if schema_changes is not None:
         payload["schema_changes"] = [asdict(c) for c in schema_changes]
     return json.dumps(payload, indent=2)

@@ -66,7 +66,9 @@ _MANIFESTS = ("pyproject.toml", "setup.py", "requirements.txt")
 # A requirement on the SDK itself: `mcp`, `mcp[cli]`, not `mcp-server-git` or `fastmcp`.
 _QUOTED_REQ = re.compile(r"""["']mcp(?:\[[^\]]*\])?\s*([<>=!~^][^"';]*)?(?:;[^"']*)?["']""")
 _POETRY_REQ = re.compile(r"""^\s*["']?mcp["']?\s*=\s*(?:["']([^"']*)["']|\{[^}]*?version\s*=\s*["']([^"']*)["'])""", re.M)
-_REQ_LINE = re.compile(r"^\s*mcp(?:\[[^\]]*\])?\s*([<>=!~^][^;#]*)?(?:[;#].*)?$", re.M)
+# One line only: [^;#] alone also matched newlines, so the mcp specifier swallowed
+# every later requirement (and a later package's "<2" read as capping mcp).
+_REQ_LINE = re.compile(r"^[ \t]*mcp(?:\[[^\]]*\])?[ \t]*([<>=!~^][^;#\r\n]*)?(?:[;#][^\r\n]*)?\r?$", re.M)
 # Any specifier that keeps mcp below 2: <2, <2.0, <1.9, <=1.x, ==1.x, ~=1.x, poetry ^1 / ~1.
 _CAPPED = re.compile(r"<\s*=?\s*[01](?:\.|\s*$|\s*,)|<\s*2(?:\.0)*(?![.\d])|={2,3}\s*[01]\.|~=\s*[01]\.|\^\s*[01]\b|(?<![=<>!])~\s*[01]\b")
 
@@ -147,7 +149,12 @@ def _first_removed_import(tree: ast.Module) -> tuple[int, str] | None:
     guarded: set[int] = set()
     for node in ast.walk(tree):
         # Either branch of the shim may hold the v1 import.
-        if isinstance(node, ast.Try) and any(_catches_import_error(h) for h in node.handlers):
+        # A handler that only raises isn't a fallback: the server still fails to
+        # start, with the handler's message (ShadowLoveElysia/AiNiee-Next raises
+        # "Missing Python module" when mcp 2.x is installed).
+        if isinstance(node, ast.Try) and any(
+            _catches_import_error(h) and not isinstance(h.body[-1], ast.Raise) for h in node.handlers
+        ):
             guarded.update(id(n) for n in ast.walk(node))
     hits = [
         (node.lineno, what) for node in ast.walk(tree)

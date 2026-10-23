@@ -134,6 +134,18 @@ function render(target, report, meta) {
       (paste the GitHub link to that folder), or it registers tools in a way mcp-doctor can't read yet.
       If it does have tools, <a href="https://github.com/vishalhabib99/mcp-doctor/issues/new">tell us</a>: that's a bug worth fixing.</div>`;
   } else {
+    const breakages = report.breakages || [];
+    if (breakages.length) {
+      html += `<div class="note breakages"><strong>Will break an agent: ${breakages.length}</strong><ul>`;
+      for (const b of breakages.slice(0, MAX_ROWS)) {
+        const where = b.line ? `${b.file}:${b.line}` : b.file;
+        const who = b.tool ? `<code>${esc(b.tool)}</code> (${esc(where)})` : `<code>${esc(where)}</code>`;
+        html += `<li>${who}: ${esc(b.breaks)}. <strong>Fix:</strong> ${esc(b.fix)}. <span class="sub">(${esc(b.evidence)})</span></li>`;
+      }
+      html += `</ul></div>`;
+    } else if (report.breakages) {
+      html += `<div class="note ok"><strong>No known agent-breaking issues</strong> (checked: null defaults, stdout on stdio, mcp 2.x start-up).</div>`;
+    }
     html += `<div class="grades">
       ${gradeCard("Quality", report.grade, report.percent, "Can an agent tell what each tool does?")}
       ${gradeCard("Security", report.security_grade, report.security_percent, "Risky patterns in code an agent can reach")}
