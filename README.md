@@ -1,6 +1,6 @@
 # mcp-doctor
 
-**Full-lifecycle QA for the tools AI agents call (MCP).**
+**Lint, fuzz and guard MCP servers: catch what breaks an AI agent in the code, before release, and on every live call.**
 
 An agent is only as reliable as the tools it calls, and most MCP servers ship unchecked: tools with no description, parameters the model has to guess, errors that crash the session, a "success" that never happened, a prompt injection that walks a secret out the door. mcp-doctor checks a server at every stage, from the first line of code to the live agent call. Python, TypeScript, Go and Rust; runs in CI, Claude Code, Codex and Cursor.
 
