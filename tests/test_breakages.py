@@ -185,3 +185,57 @@ def test_import_guard_with_a_fallback_is_still_a_shim(tmp_path):
     )
     (tmp_path / "pyproject.toml").write_text('[project]\nname = "x"\ndependencies = ["mcp>=1.27.0"]\n')
     assert find(analyze_repo(tmp_path)) == []
+
+
+def test_ts_stdout_write_survives_in_a_pure_typescript_repo(tmp_path):
+    # Bug #135: the analyzer's Python-only stdio gate dropped every TypeScript
+    # stdout_write finding when a repo had no Python files at all.
+    (tmp_path / "package.json").write_text('{"name":"x","dependencies":{"@modelcontextprotocol/sdk":"^1.20.0"}}')
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "index.ts").write_text(
+        'import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";\n'
+        'import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";\n'
+        'import { z } from "zod";\n'
+        'const server = new McpServer({ name: "x", version: "1.0.0" });\n'
+        'server.tool("ping", "Check the server is alive.", { msg: z.string().describe("m") }, async ({ msg }) => {\n'
+        '  console.log("got", msg);\n'
+        '  return { content: [{ type: "text", text: msg }] };\n'
+        '});\n'
+        'await server.connect(new StdioServerTransport());\n'
+    )
+    report = analyze_repo(tmp_path)
+    assert [(b.check, b.tool, b.line) for b in find(report)] == [("stdout_write", "ping", 6)]
+
+
+def test_ts_stdout_write_is_judged_per_package(tmp_path):
+    # inkeep/agents, preset-io/agor: one package's stdio server must not make
+    # another package's HTTP route's console.log a stdio breakage.
+    stdio = (
+        'import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";\n'
+        'import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";\n'
+        'import { z } from "zod";\n'
+        'const server = new McpServer({ name: "a", version: "1.0.0" });\n'
+        'server.tool("quiet", "Check the server is alive.", { msg: z.string().describe("m") }, async ({ msg }) => {\n'
+        '  return { content: [{ type: "text", text: msg }] };\n'
+        '});\n'
+        'await server.connect(new StdioServerTransport());\n'
+    )
+    http = (
+        'import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";\n'
+        'import { z } from "zod";\n'
+        'const server = new McpServer({ name: "b", version: "1.0.0" });\n'
+        'server.tool("loud", "Log and echo.", { msg: z.string().describe("m") }, async ({ msg }) => {\n'
+        '  console.log("got", msg);\n'
+        '  return { content: [{ type: "text", text: msg }] };\n'
+        '});\n'
+        'export default server;\n'
+    )
+    for pkg, src in (("packages/cli", stdio), ("packages/web", http)):
+        (tmp_path / pkg / "src").mkdir(parents=True)
+        (tmp_path / pkg / "package.json").write_text('{"name":"%s"}' % pkg.split("/")[1])
+        (tmp_path / pkg / "src" / "index.ts").write_text(src)
+    assert [b for b in find(analyze_repo(tmp_path)) if b.check == "stdout_write"] == []
+    # The same console.log inside the stdio package is a breakage.
+    (tmp_path / "packages/cli/src/index.ts").write_text(stdio.replace(
+        'async ({ msg }) => {\n', 'async ({ msg }) => {\n  console.log("got", msg);\n'))
+    assert [(b.check, b.tool) for b in find(analyze_repo(tmp_path))] == [("stdout_write", "quiet")]

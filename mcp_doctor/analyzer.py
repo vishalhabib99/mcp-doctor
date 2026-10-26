@@ -2793,6 +2793,11 @@ def analyze_repo(root: Path) -> Report:
     agent_files = {rel for rel, tree in trees if _agent_framework_file(rel, tree)}
     network_files = {rel for rel, tree in trees if _runs_over_network_only(tree)}
     for t in tools:
+        # Python evidence gates Python tools only: find_ts_tools applies its own stdio
+        # check, and a pure TypeScript repo has no Python trees, so this dropped every
+        # TS stdout_write finding (bug #135).
+        if not t.file.endswith(".py"):
+            continue
         if not stdio or t.file in agent_files or t.file in network_files:
             t.issues = [i for i in t.issues if i.check != "stdout_write"]
 

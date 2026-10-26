@@ -1934,10 +1934,25 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
 
     findings.extend(_module_per_tool_findings(parsed, root, global_consts, {fd.name for fd in findings}))
     # console.log only corrupts anything over stdio; HTTP servers can log to stdout freely.
-    if not any(_STDIO_TS.search(src) for _, _, src in parsed):
-        for fd in findings:
+    # Judged per package (nearest package.json): in a monorepo, one package's stdio server
+    # says nothing about another package's HTTP route (inkeep/agents' Next.js
+    # createMcpHandler route, preset-io/agor's HTTP daemon).
+    stdio_packages = {_package_root(f, root) for f, _, src in parsed if _STDIO_TS.search(src)}
+    for fd in findings:
+        if _package_root(root / fd.file, root) not in stdio_packages:
             fd.issues = [i for i in fd.issues if i.check != "stdout_write"]
     return findings, unparseable
+
+
+def _package_root(path: Path, root: Path) -> Path:
+    """Nearest folder at or above `path` holding a package.json, else the scanned root."""
+    d = path.parent
+    while True:
+        if (d / "package.json").is_file():
+            return d
+        if d == root or root not in d.parents:
+            return root
+        d = d.parent
 
 
 def _member_path(node, src: bytes) -> tuple[str, list[str]] | None:
