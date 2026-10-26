@@ -40,11 +40,13 @@ _REMOVED_MODULES = (
     "mcp.server.lowlevel.experimental",
     "mcp.server.lowlevel.func_inspection",
 )
-_MESSAGE_UNIONS = {"ClientNotification", "ClientRequest", "ClientResult", "ServerNotification", "ServerRequest", "ServerResult"}
-# Names a v1 module exported that its v2 version doesn't.
+# Names a v1 module exported that its v2 version doesn't, checked against the
+# released 2.0.0, 2.1.0 and 2.3.0. JSONRPCMessage and the Client*/Server* message
+# unions are still exported by `mcp` and `mcp.types` in all of them, so they are
+# not here (databrickslabs/mcp's base.py was a false positive).
 _REMOVED_NAMES = {
-    "mcp": {"McpError"} | _MESSAGE_UNIONS,
-    "mcp.types": {"Content", "Cursor", "ResourceReference", "JSONRPCMessage"} | _MESSAGE_UNIONS,
+    "mcp": {"McpError"},
+    "mcp.types": {"Content", "Cursor", "ResourceReference"},
     "mcp.server": {"FastMCP", "fastmcp"},
     "mcp.shared.exceptions": {"McpError"},
     "mcp.client.streamable_http": {"streamablehttp_client"},
@@ -71,6 +73,8 @@ _POETRY_REQ = re.compile(r"""^\s*["']?mcp["']?\s*=\s*(?:["']([^"']*)["']|\{[^}]*
 _REQ_LINE = re.compile(r"^[ \t]*mcp(?:\[[^\]]*\])?[ \t]*([<>=!~^][^;#\r\n]*)?(?:[;#][^\r\n]*)?\r?$", re.M)
 # Any specifier that keeps mcp below 2: <2, <2.0, <1.9, <=1.x, ==1.x, ~=1.x, poetry ^1 / ~1.
 _CAPPED = re.compile(r"<\s*=?\s*[01](?:\.|\s*$|\s*,)|<\s*2(?:\.0)*(?![.\d])|={2,3}\s*[01]\.|~=\s*[01]\.|\^\s*[01]\b|(?<![=<>!])~\s*[01]\b")
+# A lower bound that already rules out 1.x (e.g. "mcp>=2.0.0,<3.0.0"): capped, but every install is 2.x.
+_V2_ONLY = re.compile(r">=\s*[2-9]|={2,3}\s*[2-9]|~=\s*[2-9]")
 
 
 def _is_removed_module(name: str) -> bool:
@@ -264,10 +268,11 @@ def scan_sdk_v2_breakage(root: Path, trees: list[tuple[str, ast.Module]]) -> lis
             fix = "pass the handlers to the constructor (`Server(on_list_tools=...)`)"
         else:
             fix = "migrate the import"
+        bound = "" if _V2_ONLY.search(spec) else " with no upper bound"
         issues.append(RepoIssue(
             "sdk_v2",
             f"{rel}:{line} `{what}` was removed in mcp 2.x, and {manifest.relative_to(root)} asks for "
-            f"'{req}' with no upper bound, so a fresh install gets mcp 2.x and the server fails to start "
+            f"'{req}'{bound}, so a fresh install gets mcp 2.x and the server fails to start "
             f"with an {'AttributeError' if what.startswith('@') else 'ImportError'}. Pin 'mcp<2', or {fix}: {_MIGRATION_URL}",
             "error",
         ))

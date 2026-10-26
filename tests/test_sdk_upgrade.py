@@ -92,6 +92,31 @@ def test_other_removed_imports_and_guarded_shims(tmp_path):
     assert sdk_v2(tmp_path) == []
 
 
+
+def test_names_still_exported_in_v2_are_not_flagged(tmp_path):
+    # JSONRPCMessage and the Client*/Server* message unions are still exported
+    # by mcp 2.0.0-2.3.0 (databrickslabs/mcp's base.py was a false positive).
+    write(tmp_path, "base.py", """
+        from mcp.types import JSONRPCMessage, ClientRequest, ServerResult
+        from mcp import ClientNotification, ServerRequest
+        """)
+    write(tmp_path, "pyproject.toml", '[project]\nname = "x"\ndependencies = ["mcp>=1.9.2"]\n')
+    assert sdk_v2(tmp_path) == []
+    write(tmp_path, "base.py", "from mcp.types import Content\n")
+    assert len(sdk_v2(tmp_path)) == 1
+
+
+def test_v2_only_requirement_is_not_called_unbounded(tmp_path):
+    # Tencent/AI-Infra-Guard: 'mcp>=2.0.0,<3.0.0' with a fastmcp import. Still a
+    # crash, but the requirement has an upper bound, so don't say it lacks one.
+    write(tmp_path, "server.py", SERVER_V1)
+    write(tmp_path, "pyproject.toml", '[project]\nname = "x"\ndependencies = ["mcp>=2.0.0,<3.0.0"]\n')
+    [msg] = sdk_v2(tmp_path)
+    assert "asks for 'mcp>=2.0.0,<3.0.0', so a fresh install" in msg and "no upper bound" not in msg
+    write(tmp_path, "pyproject.toml", '[project]\nname = "x"\ndependencies = ["mcp>1.5"]\n')
+    [msg] = sdk_v2(tmp_path)
+    assert "no upper bound" in msg
+
 def test_test_files_are_not_flagged(tmp_path):
     write(tmp_path, "tests/test_server.py", SERVER_V1)
     write(tmp_path, "requirements.txt", "mcp\n")
