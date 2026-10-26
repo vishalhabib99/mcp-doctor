@@ -41,7 +41,7 @@ An agent is only as reliable as the tools it calls, and most MCP servers ship un
 
 - **Recall is measured, misses are published.** A checker that can't see a tool quietly grades it as fine, so tool detection is measured against an independent count: 15,755 of 15,977 tools found across 805 real servers on 5 frameworks. Every miss is listed with its reason in [docs/coverage.md](docs/coverage.md).
 - **Breakages first, grades second.** Every report opens with what will break an agent calling the server, from checks maintainers have already acted on: an optional argument that rejects the `null` its own schema advertises (fixed by maintainers in 20 repos), stray stdout on a stdio server (3 repos), a server that won't start on a fresh install of `mcp` 2.x. Before the fix, 17 of the 19 such bugs maintainers merged showed up this way, while the grade gave most of those repos an A. On 20 repos it had never seen, the lines checked by hand were 96% right (53 of 55 read in full, plus 16 of 16 sampled from two repos with hundreds). The grades still follow, for everything else.
-- **132 of its own bugs found and fixed after release** by running it on real servers, up to the 91.5k★ official `modelcontextprotocol/servers` monorepo; a fix ships only when a before/after run on 120+ real repos changes nothing it shouldn't. [The log](docs/dogfooding.md) · [how 69 of them got through](docs/postmortem-69-bugs.md).
+- **133 of its own bugs found and fixed after release** by running it on real servers, up to the 91.5k★ official `modelcontextprotocol/servers` monorepo; a fix ships only when a before/after run on 120+ real repos changes nothing it shouldn't. [The log](docs/dogfooding.md) · [how 69 of them got through](docs/postmortem-69-bugs.md).
 - **Maintainers act on its reports:** fixes merged upstream, among them [ha-mcp](https://github.com/homeassistant-ai/ha-mcp/pull/2327), [telegram-mcp](https://github.com/chigwell/telegram-mcp/pull/266) (111 tools fixed in one PR) and [davinci-resolve-mcp](https://github.com/samuelgursky/davinci-resolve-mcp/pull/274) (shipped as its own release).
 - **Quality and security are graded separately,** so a well-documented A can't hide a security gap. Every audited repo is on the [leaderboard](https://vishalhabib99.github.io/mcp-doctor/) with a dated badge you can add to your README, and re-scans show ▲/▼ drift.
 - **What the first outside users hit, and what changed because of it:** [docs/what-users-taught-me.md](docs/what-users-taught-me.md).
@@ -231,7 +231,7 @@ Catch it before the push. Add to `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/vishalhabib99/mcp-doctor
-    rev: v1.35.1
+    rev: v1.35.2
     hooks:
       - id: mcp-doctor
         # args: ["--fail-under", "80", "path/to/server"]   # default: --fail-under 70 on the repo root

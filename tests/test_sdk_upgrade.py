@@ -117,6 +117,44 @@ def test_v2_only_requirement_is_not_called_unbounded(tmp_path):
     [msg] = sdk_v2(tmp_path)
     assert "no upper bound" in msg
 
+
+def test_version_branch_shim_is_not_flagged(tmp_path):
+    # strands-agents/harness-sdk: the v2 branch returns early, the v1 import follows it.
+    write(tmp_path, "compat.py", """
+        MCP_V2 = True
+
+        def transport(url):
+            if MCP_V2:
+                from mcp.client.streamable_http import streamable_http_client
+                return streamable_http_client(url=url)
+            from mcp.client.streamable_http import streamablehttp_client
+            return streamablehttp_client(url=url)
+        """)
+    write(tmp_path, "pyproject.toml", '[project]\nname = "x"\ndependencies = ["mcp>=1.23.0,<2.4"]\n')
+    assert sdk_v2(tmp_path) == []
+    # An unrelated early return doesn't make the v1 import safe.
+    write(tmp_path, "compat.py", """
+        def transport(url):
+            if not url:
+                return None
+            from mcp.client.streamable_http import streamablehttp_client
+            return streamablehttp_client(url=url)
+        """)
+    [msg] = sdk_v2(tmp_path)
+    assert "asks for 'mcp>=1.23.0,<2.4', which allows mcp 2.x" in msg and "no upper bound" not in msg
+
+
+def test_lockfile_pinning_v1_is_named(tmp_path):
+    # derisk-ai/OpenDerisk, worldbank/data360-mcp: the lock keeps `uv sync` on 1.x, pip still breaks.
+    write(tmp_path, "server.py", SERVER_V1)
+    write(tmp_path, "pyproject.toml", '[project]\nname = "x"\ndependencies = ["mcp>=1.1.3"]\n')
+    write(tmp_path, "uv.lock", 'version = 1\n\n[[package]]\nname = "mcp"\nversion = "1.8.1"\n')
+    [msg] = sdk_v2(tmp_path)
+    assert "(uv.lock pins mcp 1.8.1, so `uv sync` is unaffected; pip and uvx installs are not)" in msg
+    write(tmp_path, "uv.lock", 'version = 1\n\n[[package]]\nname = "mcp"\nversion = "2.3.0"\n')
+    [msg] = sdk_v2(tmp_path)
+    assert "uv.lock pins" not in msg
+
 def test_test_files_are_not_flagged(tmp_path):
     write(tmp_path, "tests/test_server.py", SERVER_V1)
     write(tmp_path, "requirements.txt", "mcp\n")

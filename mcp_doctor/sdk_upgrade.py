@@ -149,6 +149,47 @@ def _lowlevel_decorators(tree: ast.Module) -> list[tuple[int, str]]:
     return hits
 
 
+# Names that only a v2-aware branch would use; seeing one next to a v1 import
+# means the code picks per version.
+_V2_NAMES = {"streamable_http_client", "MCPServer", "mcpserver", "MCPError"}
+
+
+def _mentions_v2(nodes: list[ast.stmt]) -> bool:
+    for stmt in nodes:
+        for n in ast.walk(stmt):
+            if isinstance(n, ast.ImportFrom) and (
+                (n.module or "").endswith(".mcpserver") or any(a.name in _V2_NAMES for a in n.names)
+            ):
+                return True
+            if isinstance(n, ast.Name) and n.id in _V2_NAMES:
+                return True
+    return False
+
+
+def _version_branch_guarded(tree: ast.Module) -> set[int]:
+    """v1 imports behind an `if` that dispatches to the v2 API.
+
+    strands-agents/harness-sdk: `if MCP_V2: from ... import streamable_http_client; ...; return ...`
+    followed by `from mcp.client.streamable_http import streamablehttp_client`. Only an `if` whose
+    branch uses a v2 name counts, so an unrelated early return doesn't hide a real crash.
+    """
+    guarded: set[int] = set()
+    for owner in ast.walk(tree):
+        for body in (getattr(owner, f, None) for f in ("body", "orelse", "finalbody")):
+            if not isinstance(body, list):
+                continue
+            for i, stmt in enumerate(body):
+                if not isinstance(stmt, ast.If):
+                    continue
+                if _mentions_v2(stmt.body):
+                    guarded.update(id(n) for b in stmt.orelse for n in ast.walk(b))
+                    if stmt.body and isinstance(stmt.body[-1], (ast.Return, ast.Raise)):
+                        guarded.update(id(n) for b in body[i + 1:] for n in ast.walk(b))
+                if _mentions_v2(stmt.orelse):
+                    guarded.update(id(n) for b in stmt.body for n in ast.walk(b))
+    return guarded
+
+
 def _first_removed_import(tree: ast.Module) -> tuple[int, str] | None:
     guarded: set[int] = set()
     for node in ast.walk(tree):
@@ -160,6 +201,7 @@ def _first_removed_import(tree: ast.Module) -> tuple[int, str] | None:
             _catches_import_error(h) and not isinstance(h.body[-1], ast.Raise) for h in node.handlers
         ):
             guarded.update(id(n) for n in ast.walk(node))
+    guarded |= _version_branch_guarded(tree)
     hits = [
         (node.lineno, what) for node in ast.walk(tree)
         if id(node) not in guarded and (what := _removed_import(node))
@@ -245,6 +287,20 @@ def _declaring_manifest(path: Path, root: Path) -> tuple[Path, str] | None:
         d = d.parent
 
 
+def _lock_note(manifest: Path) -> str:
+    """Say so when a lockfile next to the manifest pins mcp 1.x: `uv sync` users are fine, pip/uvx are not."""
+    for lock in (manifest.parent / "uv.lock", manifest.parent / "poetry.lock"):
+        try:
+            text = lock.read_text(errors="ignore")
+        except OSError:
+            continue
+        m = re.search(r'(?m)^name = "mcp"\nversion = "([^"]+)"', text)
+        if m and m.group(1).split(".")[0] in ("0", "1"):
+            tool = "uv sync" if lock.name == "uv.lock" else "poetry install"
+            return f" ({lock.name} pins mcp {m.group(1)}, so `{tool}` is unaffected; pip and uvx installs are not)"
+    return ""
+
+
 def scan_sdk_v2_breakage(root: Path, trees: list[tuple[str, ast.Module]]) -> list[RepoIssue]:
     """One issue per manifest whose uncapped `mcp` lets a v1-only import crash on install."""
     by_manifest: dict[Path, tuple[str, str, int, str]] = {}
@@ -268,7 +324,13 @@ def scan_sdk_v2_breakage(root: Path, trees: list[tuple[str, ast.Module]]) -> lis
             fix = "pass the handlers to the constructor (`Server(on_list_tools=...)`)"
         else:
             fix = "migrate the import"
-        bound = "" if _V2_ONLY.search(spec) else " with no upper bound"
+        if _V2_ONLY.search(spec):
+            bound = ""
+        elif re.search(r"<\s*=?\s*[2-9]", spec):
+            bound = ", which allows mcp 2.x"
+        else:
+            bound = " with no upper bound"
+        bound += _lock_note(manifest)
         issues.append(RepoIssue(
             "sdk_v2",
             f"{rel}:{line} `{what}` was removed in mcp 2.x, and {manifest.relative_to(root)} asks for "
