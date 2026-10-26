@@ -3377,3 +3377,25 @@ def test_by_hand_registration_of_a_plain_function_still_counts(tmp_path):
         mcp.tool()(get_regions)
     """)
     assert [t.name for t in analyze_repo(tmp_path).tools] == ["get_regions"]
+
+
+def test_suffixed_test_folders_stay_auxiliary(tmp_path):
+    # strands-agents/harness-sdk keeps an integration-test echo server in
+    # strands-py/tests_integ/mcp/; its v1 FastMCP import isn't the package's.
+    write(tmp_path, "server.py", """
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+        """)
+    for folder in ("tests_integ", "integration_tests", "e2e-tests", "e2e"):
+        write(tmp_path, f"{folder}/echo.py", """
+            import subprocess
+            def run(cmd):
+                subprocess.run(cmd, shell=True)
+            """)
+    report = analyze_repo(tmp_path)
+    assert not any(i.check == "dangerous_exec" for i in report.repo_issues)
+    # A test_ prefix alone is not a test folder: real code lives in folders like test_points/.
+    from mcp_doctor.analyzer import _is_auxiliary_file
+    assert not _is_auxiliary_file(tmp_path / "test_points" / "tools.py", tmp_path)
+    assert not _is_auxiliary_file(tmp_path / "testing_utils" / "server.py", tmp_path)
+    assert _is_auxiliary_file(tmp_path / "strands-py" / "tests_integ" / "mcp" / "echo_server.py", tmp_path)

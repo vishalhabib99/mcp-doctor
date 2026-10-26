@@ -2582,7 +2582,13 @@ def _is_auxiliary_file(path: Path, root: Path | None = None) -> bool:
         return not (is_server and not _PY_TEST_CONTENT.search(text))
     if name.endswith(_JS_TEST_SUFFIXES):
         return True
-    return any(part in ("test", "tests", "scripts", "benchmarks") for part in parts)
+    return any(part in ("test", "tests", "scripts", "benchmarks", "e2e") or _is_test_dir_name(part) for part in parts)
+
+
+def _is_test_dir_name(part: str) -> bool:
+    # tests_integ/, integration_tests/, e2e-tests/ (strands-agents/harness-sdk's echo
+    # server). Not a test_ prefix: real code lives in folders like test_points/.
+    return part.startswith(("tests_", "tests-")) or part.endswith(("_tests", "-tests"))
 
 
 # Third-party or generated code committed into a repo: vendored libraries,
