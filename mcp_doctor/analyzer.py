@@ -2587,8 +2587,10 @@ def _is_auxiliary_file(path: Path, root: Path | None = None) -> bool:
 
 def _is_test_dir_name(part: str) -> bool:
     # tests_integ/, integration_tests/, e2e-tests/ (strands-agents/harness-sdk's echo
-    # server). Not a test_ prefix: real code lives in folders like test_points/.
-    return part.startswith(("tests_", "tests-")) or part.endswith(("_tests", "-tests"))
+    # server), testkit-*/. Same rule as the TypeScript analyzer.
+    from .ts_analyzer import is_test_dir_name
+
+    return is_test_dir_name(part)
 
 
 # Third-party or generated code committed into a repo: vendored libraries,

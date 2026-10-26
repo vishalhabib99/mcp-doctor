@@ -239,3 +239,26 @@ def test_ts_stdout_write_is_judged_per_package(tmp_path):
     (tmp_path / "packages/cli/src/index.ts").write_text(stdio.replace(
         'async ({ msg }) => {\n', 'async ({ msg }) => {\n  console.log("got", msg);\n'))
     assert [(b.check, b.tool) for b in find(analyze_repo(tmp_path))] == [("stdout_write", "quiet")]
+
+
+def test_ts_vendored_and_test_kit_servers_are_not_the_repos_tools(tmp_path):
+    # openmake_llm's infra/mcp-runtime/vendor/kakao-api-mcp-server/ and lunar's
+    # mcpx/testkit-mcp-server/: real console.log on stdio, but not code the repo owns.
+    server = (
+        'import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";\n'
+        'import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";\n'
+        'import { z } from "zod";\n'
+        'const server = new McpServer({ name: "x", version: "1.0.0" });\n'
+        'server.tool("TOOL", "Log and echo.", { msg: z.string().describe("m") }, async ({ msg }) => {\n'
+        '  console.log("got", msg);\n'
+        '  return { content: [{ type: "text", text: msg }] };\n'
+        '});\n'
+        'await server.connect(new StdioServerTransport());\n'
+    )
+    for folder, tool in (("infra/vendor/kakao/src", "vendored"), ("mcpx/testkit-mcp-server/src", "testkit"),
+                         ("pkg/tests_integ/src", "integ"), ("app/src", "real")):
+        (tmp_path / folder).mkdir(parents=True)
+        (tmp_path / folder / "index.ts").write_text(server.replace("TOOL", tool))
+    report = analyze_repo(tmp_path)
+    assert sorted(t.name for t in report.tools) == ["real"]
+    assert [(b.check, b.tool) for b in find(report)] == [("stdout_write", "real")]

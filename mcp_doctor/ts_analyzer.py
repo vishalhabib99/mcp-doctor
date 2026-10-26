@@ -455,6 +455,12 @@ def _extract_definition_object(node, src: bytes):
     return None, src
 
 
+def is_test_dir_name(part: str) -> bool:
+    """tests_integ/, integration_tests/, e2e-tests/, testkit-mcp-server/. Not a bare test_
+    prefix: real code lives in folders like test_points/. Shared with the Python analyzer."""
+    return part.startswith(("tests_", "tests-", "testkit")) or part.endswith(("_tests", "-tests"))
+
+
 _STDOUT_CONSOLE_METHODS = ("log", "info", "debug", "dir", "table")
 
 
@@ -1252,6 +1258,11 @@ def find_ts_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
         # Fixture folders too (swarmclaw's `__fixtures__/fake-mcp-stdio-server.mjs`,
         # peta-core's `scripts/compat-smoke/fixtures/`): test servers, not the product.
         if _is_test_file(p) or any(part in ("test", "tests", "__tests__", "fixtures", "__fixtures__") for part in rel_parts):
+            continue
+        # Folders the Python side already treats as test code (bug #134), test kits
+        # (TheLunarCompany/lunar's mcpx/testkit-mcp-server/), and vendored third-party
+        # servers (openmake_llm's infra/mcp-runtime/vendor/kakao-api-mcp-server/).
+        if any(part in ("e2e", "vendor", "vendored") or is_test_dir_name(part) for part in rel_parts[:-1]):
             continue
         files.append(p)
 
