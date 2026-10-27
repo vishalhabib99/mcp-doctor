@@ -3258,6 +3258,80 @@ def test_stdout_write_not_flagged_in_agent_framework_or_example_files(tmp_path):
     assert not any(i.check == "stdout_write" for t in report.tools for i in t.issues)
 
 
+def test_stdout_write_not_flagged_for_argparse_network_transport_or_uvicorn(tmp_path):
+    # Bug #140: temporalio/samples-python runs `mcp.run(transport=args.transport)`
+    # with argparse choices ["streamable-http", "sse"], and Azure-Samples/AI-Gateway
+    # serves an SSE app with `uvicorn.run(app)`. Another file in each repo runs
+    # over stdio, so the repo-level gate kept both files' stdout findings.
+    write(tmp_path, "stdio_server.py", """
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("stdio")
+        if __name__ == "__main__":
+            mcp.run()
+        """)
+    write(tmp_path, "argparse_server.py", """
+        import argparse
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("tools")
+
+        @mcp.tool()
+        def add(a: int, b: int) -> int:
+            \"\"\"Add.\"\"\"
+            print(f"add({a}, {b})")
+            return a + b
+
+        if __name__ == "__main__":
+            parser = argparse.ArgumentParser()
+            parser.add_argument("--transport", choices=["streamable-http", "sse"], default="streamable-http")
+            args = parser.parse_args()
+            mcp.run(transport=args.transport)
+        """)
+    write(tmp_path, "uvicorn_server.py", """
+        import uvicorn
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("sse")
+
+        @mcp.tool()
+        def lookup(q: str) -> str:
+            \"\"\"Lookup.\"\"\"
+            print(q)
+            return q
+
+        if __name__ == "__main__":
+            uvicorn.run(create_starlette_app(mcp._mcp_server), host="0.0.0.0", port=8080)
+        """)
+    report = analyze_repo(tmp_path)
+    assert not any(i.check == "stdout_write" for t in report.tools for i in t.issues)
+
+
+def test_stdout_write_still_flagged_when_argparse_allows_stdio(tmp_path):
+    # The #140 rule needs every argparse value to be a network transport.
+    write(tmp_path, "main.py", """
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("stdio")
+        if __name__ == "__main__":
+            mcp.run()
+        """)
+    write(tmp_path, "server.py", """
+        import argparse
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("tools")
+
+        @mcp.tool()
+        def add(a: int, b: int) -> int:
+            \"\"\"Add.\"\"\"
+            print(f"add({a}, {b})")
+            return a + b
+
+        if __name__ == "__main__":
+            parser = argparse.ArgumentParser()
+            parser.add_argument("--transport", choices=["stdio", "sse"], default="sse")
+            mcp.run(transport=parser.parse_args().transport)
+        """)
+    report = analyze_repo(tmp_path)
+    assert [t.name for t in report.tools for i in t.issues if i.check == "stdout_write"] == ["add"]
+
+
 def test_tool_module_named_like_a_test_without_sdk_import_is_scanned(tmp_path):
     # Bug #109: jesse-ai/jesse's significance_test.py registers 8 tools through
     # register_*(mcp) and imports no MCP library; it was skipped as a test file.
@@ -3296,6 +3370,104 @@ def test_langchain_and_crewai_tool_decorators_are_not_mcp_tools(tmp_path):
             return "ok"
     """)
     assert analyze_repo(tmp_path).tools == []
+
+
+def test_repo_own_non_mcp_tool_decorator_is_not_an_mcp_tool(tmp_path):
+    # Bug #141: amd/gaia's `@tool(atomic=True)` (from gaia.agents.base.tools,
+    # re-exported from gaia/__init__.py) fills the agent's own registry. Its
+    # null defaults were flagged as MCP breakages; the repo's real MCP tools
+    # live in FastMCP servers that must still count.
+    write(tmp_path, "src/gaia/agents/base/tools.py", """
+        _REGISTRY = {}
+
+        def tool(func=None, *, atomic=False):
+            def register(f):
+                _REGISTRY[f.__name__] = f
+                return f
+            return register(func) if func else register
+    """)
+    write(tmp_path, "src/gaia/__init__.py", """
+        from gaia.agents.base.tools import tool
+    """)
+    write(tmp_path, "src/gaia/agents/tools/file_io_tools.py", """
+        from gaia.agents.base.tools import tool
+
+        @tool(atomic=True)
+        def write_file(path: str, title: str = None) -> str:
+            \"\"\"Write a file.\"\"\"
+            return path
+    """)
+    write(tmp_path, "examples/notes_agent.py", """
+        from gaia import tool
+
+        @tool
+        def add_note(title: str = None) -> str:
+            \"\"\"Add a note.\"\"\"
+            return "ok"
+    """)
+    write(tmp_path, "src/gaia/mcp/server.py", """
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("gaia")
+
+        @mcp.tool()
+        def ping(x: str) -> str:
+            \"\"\"Ping.\"\"\"
+            return x
+    """)
+    assert [t.name for t in analyze_repo(tmp_path).tools] == ["ping"]
+
+
+def test_repo_own_tool_wrapper_that_registers_with_mcp_still_counts(tmp_path):
+    write(tmp_path, "app/registry.py", """
+        from app.server import mcp
+
+        def tool(fn):
+            return mcp.tool()(fn)
+    """)
+    write(tmp_path, "app/server.py", """
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("x")
+    """)
+    write(tmp_path, "app/tools.py", """
+        from app.registry import tool
+
+        @tool
+        def ping(x: str) -> str:
+            \"\"\"Ping.\"\"\"
+            return x
+    """)
+    assert [t.name for t in analyze_repo(tmp_path).tools] == ["ping"]
+
+
+def test_repo_tool_decorator_whose_registry_feeds_mcp_still_counts(tmp_path):
+    # alpha_vantage_mcp: `@tool` appends to `_all_tools_registry`, and the MCP
+    # server imports that list and registers each function with `mcp.tool()`,
+    # so FastMCP builds the schema from the signature. Found by the #141
+    # before/after run, which first dropped all 132 tools.
+    write(tmp_path, "api/av_api/registry.py", """
+        _all_tools_registry = []
+
+        def tool(func):
+            _all_tools_registry.append(func)
+            return func
+    """)
+    write(tmp_path, "api/av_api/tools/quotes.py", """
+        from av_api.registry import tool
+
+        @tool
+        def quote(symbol: str, datatype: str = None) -> str:
+            \"\"\"Get a quote.\"\"\"
+            return symbol
+    """)
+    write(tmp_path, "mcp/av_mcp/server.py", """
+        from mcp.server.fastmcp import FastMCP
+        from av_api.registry import _all_tools_registry
+
+        mcp = FastMCP("av")
+        for func in _all_tools_registry:
+            mcp.tool()(func)
+    """)
+    assert "quote" in [t.name for t in analyze_repo(tmp_path).tools]
 
 
 def test_fastmcp_standalone_tool_decorator_still_counts(tmp_path):

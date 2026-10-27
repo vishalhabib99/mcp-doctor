@@ -1461,14 +1461,110 @@ _NON_MCP_TOOL_MODULES = (
 )
 
 
-def _foreign_tool_names(tree: ast.Module) -> set[str]:
-    """Local names bound to a non-MCP framework's `tool` decorator."""
+def _foreign_tool_names(tree: ast.Module, local_modules: frozenset[str] = frozenset()) -> set[str]:
+    """Local names bound to a non-MCP framework's `tool` decorator, including a
+    repo's own non-MCP `tool` (see `_local_non_mcp_tool_modules`)."""
     names = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
-            if any(node.module == m or node.module.startswith(m + ".") for m in _NON_MCP_TOOL_MODULES):
+            if (any(node.module == m or node.module.startswith(m + ".") for m in _NON_MCP_TOOL_MODULES)
+                    or _matches_local_module(node.module, local_modules)):
                 names.update(a.asname or a.name for a in node.names if a.name == "tool")
     return names
+
+
+def _module_name(rel: str) -> str:
+    """Dotted module path for a repo file: `src/gaia/__init__.py` -> `src.gaia`."""
+    dotted = rel[:-3].replace("/", ".")
+    return dotted[: -len(".__init__")] if dotted.endswith(".__init__") else dotted
+
+
+def _matches_local_module(module: str, local_modules: frozenset[str]) -> bool:
+    """An absolute import names a repo file if the file's dotted path ends with
+    it (`gaia.agents.base.tools` matches `src/gaia/agents/base/tools.py`)."""
+    return any(m == module or m.endswith("." + module) for m in local_modules)
+
+
+def _local_non_mcp_tool_modules(trees: list[tuple[str, ast.Module]]) -> frozenset[str]:
+    """Repo modules whose `tool` is the repo's own decorator, not MCP's: the file
+    defines a top-level `def tool` that never calls `.tool(` / `.add_tool(` and
+    imports neither mcp nor fastmcp. Modules that re-export such a `tool`
+    (`from gaia.agents.base.tools import tool` in `gaia/__init__.py`) count too.
+    amd/gaia's `@tool(atomic=True)` fills an internal registry; its tools reach
+    MCP through a bridge that builds its own schema, so mcp-doctor's FastMCP
+    checks (null defaults) don't apply to them (bug #141)."""
+    mcp_files = [tree for _, tree in trees if _imports_fastmcp(tree) or _imports_mcp(tree)]
+    modules = set()
+    for rel, tree in trees:
+        defs = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "tool"]
+        if not defs or _imports_fastmcp(tree) or _imports_mcp(tree):
+            continue
+        registers = any(
+            isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute) and c.func.attr in ("tool", "add_tool")
+            for d in defs for c in ast.walk(d)
+        )
+        if registers:
+            continue
+        # The registry the decorator fills must not feed an MCP server either:
+        # alpha_vantage_mcp's `@tool` appends to `_all_tools_registry`, which its
+        # MCP server imports and passes, function by function, to `mcp.tool()`.
+        mod = _module_name(rel)
+        registry = _names_written_by(defs)
+        if registry and any(_imports_name_from(t, mod, registry) for t in mcp_files):
+            continue
+        modules.add(mod)
+    changed = True
+    while changed:
+        changed = False
+        for rel, tree in trees:
+            mod = _module_name(rel)
+            if mod in modules:
+                continue
+            for node in tree.body:
+                if (isinstance(node, ast.ImportFrom) and node.module and node.level == 0
+                        and any(a.name == "tool" for a in node.names)
+                        and _matches_local_module(node.module, frozenset(modules))):
+                    modules.add(mod)
+                    changed = True
+                    break
+    return frozenset(modules)
+
+
+def _names_written_by(defs: list[ast.AST]) -> set[str]:
+    """Module-level names a decorator mutates: `REG.append(f)`, `REG[name] = f`."""
+    names = set()
+    for d in defs:
+        for n in ast.walk(d):
+            if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                    and n.func.attr in ("append", "add", "update", "setdefault", "extend")
+                    and isinstance(n.func.value, ast.Name)):
+                names.add(n.func.value.id)
+            elif isinstance(n, (ast.Assign, ast.AugAssign)):
+                for t in (n.targets if isinstance(n, ast.Assign) else [n.target]):
+                    if isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name):
+                        names.add(t.value.id)
+    return names
+
+
+def _imports_name_from(tree: ast.Module, module: str, names: set[str]) -> bool:
+    """Whether a file imports any of `names` from the repo module `module`."""
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.ImportFrom) and node.module and node.level == 0
+                and _matches_local_module(node.module, frozenset({module}))
+                and any(a.name in names for a in node.names)):
+            return True
+    return False
+
+
+def _imports_mcp(tree: ast.Module) -> bool:
+    """Whether a file imports the official `mcp` package at all."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            if node.module == "mcp" or node.module.startswith("mcp."):
+                return True
+        elif isinstance(node, ast.Import) and any(a.name.split(".")[0] == "mcp" for a in node.names):
+            return True
+    return False
 
 
 def _disables_tool(node: ast.AST) -> bool:
@@ -1517,9 +1613,10 @@ def _find_fastmcp_tools(
     plain_string_ok: bool = True,
     decorator_names: set[str] = FASTMCP_DECORATOR_NAMES,
     disabled_kwargs: set[str] = frozenset(),
+    local_non_mcp_tool_modules: frozenset[str] = frozenset(),
 ) -> list[ToolFinding]:
     findings = []
-    foreign = _foreign_tool_names(tree)
+    foreign = _foreign_tool_names(tree, local_non_mcp_tool_modules)
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
@@ -1703,15 +1800,51 @@ def _runs_over_network_only(tree: ast.Module) -> bool:
     """This file starts its server with an explicit network transport and never
     mentions stdio: `mcp.run(transport="sse")`. Its tools' stdout is harmless even
     when some other file in the repo looks like stdio (Zerone-Laboratories/RIGEL:
-    a GLib `loop.run()` elsewhere read as FastMCP's default stdio run)."""
+    a GLib `loop.run()` elsewhere read as FastMCP's default stdio run).
+
+    Two more shapes count (bug #140): a transport read from argparse, whose
+    `choices`/`default` are all network transports (`mcp.run(transport=args.transport)`
+    with `choices=["streamable-http", "sse"]`, temporalio/samples-python), and an
+    ASGI app served by `uvicorn.run(app, ...)` (Azure-Samples/AI-Gateway's SSE servers)."""
+    argparse_values = _argparse_string_values(tree)
     literals = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "run":
+            if isinstance(node.func.value, ast.Name) and node.func.value.id == "uvicorn":
+                literals.add("http")
+                continue
             if not node.args and not node.keywords:
                 return False  # FastMCP's bare run() is stdio
             for a in [*node.args, *(k.value for k in node.keywords)]:
                 literals.update(c.value for c in ast.walk(a) if isinstance(c, ast.Constant) and isinstance(c.value, str))
+                if isinstance(a, ast.Attribute) and a.attr in argparse_values:
+                    literals.update(argparse_values[a.attr])
     return bool(literals & _NETWORK_TRANSPORTS) and "stdio" not in literals
+
+
+def _argparse_string_values(tree: ast.Module) -> dict[str, set[str]]:
+    """`add_argument("--transport", choices=[...], default="...")` -> {"transport": {...}}:
+    every string a parsed option can take, keyed by its attribute name on the
+    parsed namespace. Only options with string `choices` or a string `default`."""
+    out: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "add_argument"):
+            continue
+        flags = [a.value for a in node.args if isinstance(a, ast.Constant) and isinstance(a.value, str)]
+        dest = _kwarg_str(node, "dest") or next(
+            (f.lstrip("-").replace("-", "_") for f in flags if f.startswith("--")), None)
+        if dest is None:
+            continue
+        values = set()
+        for kw in node.keywords:
+            if kw.arg == "choices" and isinstance(kw.value, (ast.List, ast.Tuple, ast.Set)):
+                values.update(e.value for e in kw.value.elts if isinstance(e, ast.Constant) and isinstance(e.value, str))
+            elif kw.arg == "default" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                values.add(kw.value.value)
+        if values:
+            out[dest] = values
+    return out
 
 
 _AGENT_FRAMEWORKS = ("langchain", "langchain_core", "langgraph", "strands", "pydantic_ai", "crewai",
@@ -2752,11 +2885,12 @@ def analyze_repo(root: Path) -> Report:
     class_tool_bases = _repo_class_tool_bases(trees)
     class_tool_skip_names = _func_metadata_skip_names(trees)
     disabled_kwargs = _collect_disabled_kwargs(trees)
+    local_non_mcp_tool_modules = _local_non_mcp_tool_modules(trees)
     tools: list[ToolFinding] = []
     for rel, tree in trees:
         tools.extend(_find_fastmcp_tools(
             tree, rel, alias_registry, error_handling_registry, plain_string_ok, decorator_names,
-            disabled_kwargs,
+            disabled_kwargs, local_non_mcp_tool_modules,
         ))
         tools.extend(_find_direct_call_tools(
             tree, rel, alias_registry, error_handling_registry, plain_string_ok,
