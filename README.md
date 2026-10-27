@@ -19,7 +19,7 @@ An agent is only as reliable as the tools it calls, and most MCP servers ship un
 
 <p align="center"><img src="docs/demo.svg" width="940" alt="Animated demo: mcp-doctor lints a server (1 finding that will break an agent, quality 22%, grade F), gives a release verdict (BLOCK, then SHIP), and guards a live call that reported success without writing the file"></p>
 
-*Real output from mcp-doctor 0.35.0 on the bundled example servers and guard's test fixture, long lines cut and some findings left out ([how it's built](docs/demo/make_demo.py)).*
+*Real output from mcp-doctor 0.35.10 on the bundled example servers and guard's test fixture, long lines cut and some findings left out ([how it's built](docs/demo/make_demo.py)).*
 
 **In use:** [jupyter-mcp-server](https://github.com/datalayer/jupyter-mcp-server/pull/488) (1.3K★) runs the Action on every PR, added after its maintainer asked for it. Fixes from mcp-doctor's findings have been merged upstream in [telegram-mcp](https://github.com/chigwell/telegram-mcp/pull/266) (111 tools in one PR), [davinci-resolve-mcp](https://github.com/samuelgursky/davinci-resolve-mcp/pull/274) (shipped as its own release) and [ha-mcp](https://github.com/homeassistant-ai/ha-mcp/pull/2327) (5.3K★), and at NVIDIA ([aistore](https://github.com/NVIDIA/aistore/pull/395)), Intel ([dokimi](https://github.com/intel/dokimi/pull/243)) and AMD Research ([intellikit](https://github.com/AMDResearch/intellikit/pull/202)); [69 merged upstream fixes in 65 repos](https://github.com/vishalhabib99#-proof-from-outside).
 
@@ -40,7 +40,7 @@ An agent is only as reliable as the tools it calls, and most MCP servers ship un
 ## Why trust its findings
 
 - **Recall is measured, misses are published.** A checker that can't see a tool quietly grades it as fine, so tool detection is measured against an independent count: 15,755 of 15,977 tools found across 805 real servers on 5 frameworks. Every miss is listed with its reason in [docs/coverage.md](docs/coverage.md).
-- **Breakages first, grades second.** Every report opens with what will break an agent calling the server, from checks maintainers have already acted on: an optional argument that rejects the `null` its own schema advertises (fixed by maintainers in 20 repos), stray stdout on a stdio server (3 repos), a server that won't start on a fresh install of `mcp` 2.x. Before the fix, 17 of the 19 such bugs maintainers merged showed up this way, while the grade gave most of those repos an A. On 20 repos it had never seen, the lines checked by hand were 96% right (53 of 55 read in full, plus 16 of 16 sampled from two repos with hundreds). The grades still follow, for everything else.
+- **Breakages first, grades second.** Every report opens with what will break an agent calling the server, from checks maintainers have already acted on: an optional argument that rejects the `null` its own schema advertises (fixed by maintainers in 22 repos), stray stdout on a stdio server (3 repos), a server that won't start on a fresh install of `mcp` 2.x (3 repos). Before the fix, 17 of the 19 such bugs maintainers merged showed up this way, while the grade gave most of those repos an A. On 20 repos it had never seen, the lines checked by hand were 96% right (53 of 55 read in full, plus 16 of 16 sampled from two repos with hundreds). The grades still follow, for everything else.
 - **142 of its own bugs found and fixed after release** by running it on real servers, up to the 91.6k★ official `modelcontextprotocol/servers` monorepo; a fix ships only when a before/after run on 180+ real repos changes nothing it shouldn't. [The log](docs/dogfooding.md) · [how 69 of them got through](docs/postmortem-69-bugs.md).
 - **Maintainers act on its reports:** fixes merged upstream, among them [ha-mcp](https://github.com/homeassistant-ai/ha-mcp/pull/2327), [telegram-mcp](https://github.com/chigwell/telegram-mcp/pull/266) (111 tools fixed in one PR) and [davinci-resolve-mcp](https://github.com/samuelgursky/davinci-resolve-mcp/pull/274) (shipped as its own release).
 - **Quality and security are graded separately,** so a well-documented A can't hide a security gap. Every audited repo is on the [leaderboard](https://vishalhabib99.github.io/mcp-doctor/) with a dated badge you can add to your README, and re-scans show ▲/▼ drift.
@@ -57,11 +57,11 @@ $ mcp-doctor .
 mcp-doctor report
 Will break an agent: 3
   search(limit) (server.py:5): a client that sends the advertised null default gets a validation error, and the tool never runs.
-      Fix: type it `T | None` (`mcp-doctor --fix` does this). (fixed by maintainers in 20 repos)
+      Fix: type it `T | None` (`mcp-doctor --fix` does this). (fixed by maintainers in 22 repos)
   search (server.py:12): stray stdout on stdio corrupts the JSON-RPC stream: calls time out (Python) or the client logs parse errors (Node).
       Fix: write to stderr or use logging. (fixed by maintainers in 3 repos)
   server.py:1: a fresh install gets mcp 2.x and the server fails to start.
-      Fix: pin `mcp<2`, or migrate the removed import. (removed in mcp 2.x; fails on import)
+      Fix: pin `mcp<2`, or migrate the removed import. (removed in mcp 2.x; fails on import; fixed by maintainers in 3 repos)
 
 Quality:  34%  Grade: F  (1 tool(s) found)
 ```
@@ -77,7 +77,7 @@ $ mcp-doctor examples/bad_server
 mcp-doctor report
 Will break an agent: 1
   run(timeout) (server.py:18): a client that sends the advertised null default gets a validation error, and the tool never runs.
-      Fix: type it `T | None` (`mcp-doctor --fix` does this). (fixed by maintainers in 20 repos)
+      Fix: type it `T | None` (`mcp-doctor --fix` does this). (fixed by maintainers in 22 repos)
 
 Quality:  22%  Grade: F  (2 tool(s) found)
 Security: 100%  Grade: A
@@ -231,7 +231,7 @@ Catch it before the push. Add to `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/vishalhabib99/mcp-doctor
-    rev: v1.35.9
+    rev: v1.35.10
     hooks:
       - id: mcp-doctor
         # args: ["--fail-under", "80", "path/to/server"]   # default: --fail-under 70 on the repo root

@@ -7,7 +7,9 @@ other line was re-checked against 0.32.1 the same day: unchanged.
 Every line re-checked against 0.33.0 on 2026-10-20: unchanged.
 Re-checked against 0.35.0 on 2026-10-23. Same day, examples/bad_server gained a null-default
 bug (run's `timeout: int = None`) so the lint report opens with a real breakage; scene 1 and
-the BLOCK line were re-captured then (quality 24% -> 22%). Scene 1 leaves out some findings
+the BLOCK line were re-captured then (quality 24% -> 22%). Re-checked against 0.35.10 on
+2026-10-27: the lint and verdict lines are unchanged except the evidence count (20 -> 22
+repos); guard and its fixture haven't changed since 0.35.0. Scene 1 leaves out some findings
 to fit (the repo-level ones among them); the README sample has the full report.
 
     python docs/demo/make_demo.py   (writes docs/demo.svg)
@@ -29,7 +31,7 @@ SCENES = [
         [("mcp-doctor report", "dim")],
         [("Will break an agent: 1", "red")],
         [("  run(timeout) (server.py:18): ", "fg"), ("a client that sends the advertised null default gets a validation error, …", "fg")],
-        [("      Fix: ", "green"), ("type it `T | None` (`mcp-doctor --fix` does this). ", "fg"), ("(fixed by maintainers in 20 repos)", "dim")],
+        [("      Fix: ", "green"), ("type it `T | None` (`mcp-doctor --fix` does this). ", "fg"), ("(fixed by maintainers in 22 repos)", "dim")],
         [("Quality:  22%  Grade: ", "fg"), ("F", "red"), ("  (2 tool(s) found)", "dim")],
         [("Security: 100%  Grade: ", "fg"), ("A", "green")],
         [("  [FAIL] ", "red"), ("do_thing (server.py:12)", "fg")],

@@ -30,7 +30,7 @@ KINDS: dict[str, BreakageKind] = {
             "none_default_type",
             "a client that sends the advertised null default gets a validation error, and the tool never runs",
             "type it `T | None` (`mcp-doctor --fix` does this)",
-            "fixed by maintainers in 20 repos",
+            "fixed by maintainers in 22 repos",
         ),
         BreakageKind(
             "stdout_write",
@@ -42,7 +42,7 @@ KINDS: dict[str, BreakageKind] = {
             "sdk_v2",
             "a fresh install gets mcp 2.x and the server fails to start",
             "pin `mcp<2`, or migrate the removed import",
-            "removed in mcp 2.x; fails on import",
+            "removed in mcp 2.x; fails on import; fixed by maintainers in 3 repos",
         ),
     )
 }
