@@ -1068,3 +1068,78 @@ def test_very_long_string_concat_chain_does_not_crash(tmp_path):
     findings, _ = find_go_tools(tmp_path)
     assert [t.name for t in findings] == ["big"]
     assert "description" not in {i.check for i in findings[0].issues}
+
+
+def test_tools_built_through_a_new_tool_forwarder_are_found(tmp_path):
+    # bug #138: chronosphere-mcp builds all 40 tools through
+    # tools.NewMetadata(name, opts...) -> mcp.NewTool(name, opts...), and 0 were found
+    write(tmp_path, "pkg/tools/tools.go", """
+        package tools
+
+        import "github.com/mark3labs/mcp-go/mcp"
+
+        func NewMetadata(name string, opts ...mcp.ToolOption) Metadata {
+            mcpTool := mcp.NewTool(name, opts...)
+            return Metadata{Name: name, Description: mcpTool.Description}
+        }
+        """)
+    write(tmp_path, "pkg/generated/dashboards.gen.go", """
+        package generated
+
+        import (
+            "github.com/mark3labs/mcp-go/mcp"
+            "example.com/x/pkg/tools"
+        )
+
+        func Tools() []tools.MCPTool {
+            return []tools.MCPTool{{
+                Metadata: tools.NewMetadata("get_dashboard",
+                    mcp.WithDescription("Get a dashboard"),
+                    mcp.WithString("slug", mcp.Required(), mcp.Description("Dashboard slug")),
+                ),
+            }}
+        }
+        """)
+    findings, _ = find_go_tools(tmp_path)
+    assert [f.name for f in findings] == ["get_dashboard"]
+    assert findings[0].param_count == 1
+    assert findings[0].has_description
+    assert not findings[0].issues
+
+
+def test_function_that_builds_its_own_tool_name_is_not_a_forwarder(tmp_path):
+    write(tmp_path, "server.go", """
+        package main
+
+        import "github.com/mark3labs/mcp-go/mcp"
+
+        func helper(prefix string, opts ...mcp.ToolOption) mcp.Tool {
+            return mcp.NewTool(prefix + "_tool", opts...)
+        }
+
+        func main() {
+            _ = helper("db", mcp.WithDescription("x"))
+        }
+        """)
+    findings, _ = find_go_tools(tmp_path)
+    assert findings == []
+
+
+def test_empty_builder_param_description_counts_as_undocumented(tmp_path):
+    # bug #139: generated code emits mcp.Description("") for fields with no doc comment
+    write(tmp_path, "server.go", """
+        package main
+
+        import "github.com/mark3labs/mcp-go/mcp"
+
+        func main() {
+            s.AddTool(mcp.NewTool("get_slo",
+                mcp.WithDescription("Get an SLO"),
+                mcp.WithString("slug", mcp.Description("")),
+                mcp.WithString("team", mcp.Description(teamDoc)),
+            ), handler)
+        }
+        """)
+    findings, _ = find_go_tools(tmp_path)
+    assert len(findings) == 1
+    assert [i.message[:4] for i in findings[0].issues if i.check == "param_docs"] == ["1/2 "]

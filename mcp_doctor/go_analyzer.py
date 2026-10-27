@@ -599,12 +599,25 @@ def _analyze_new_tool_call(new_tool_call, src: bytes, const_registry: dict[str, 
             param_count += 1
             has_desc = any(
                 a.type == "call_expression" and _selector_field(a.child_by_field_name("function")) == "Description"
+                and not _empty_string_arg(a, src)
                 for a in opt_args[1:]
             )
             if has_desc:
                 documented += 1
 
     return name_val, description, param_count, documented
+
+
+def _empty_string_arg(call, src: bytes) -> bool:
+    """`mcp.Description("")`: a literal empty string documents nothing (generated
+    code emits it for fields with no doc comment). A name that can't be resolved
+    statically is given the benefit of the doubt."""
+    args_node = call.child_by_field_name("arguments")
+    args = [c for c in args_node.children if c.type not in ("(", ")", ",")] if args_node is not None else []
+    if not args:
+        return True
+    value = _string_value(args[0], src)
+    return value is not None and not value.strip()
 
 
 def _build_mark3labs_finding(new_tool_call, rel: str, line: int, src: bytes, const_registry: dict[str, str]) -> ToolFinding | None:
@@ -650,7 +663,7 @@ def _build_mark3labs_finding(new_tool_call, rel: str, line: int, src: bytes, con
     if param_count and not finding.has_docstring_params:
         finding.issues.append(ToolIssue(
             name_val, rel, finding.line, "param_docs",
-            f"{param_count - documented}/{param_count} builder options have no mcp.Description(...) — "
+            f"{param_count - documented}/{param_count} builder options have no (or an empty) mcp.Description(...) — "
             "the model only sees names, not intent.",
             "warning",
         ))
@@ -1353,7 +1366,84 @@ def find_go_tools(root: Path) -> tuple[list[ToolFinding], list[str]]:
             known_names.add(finding.name)
             findings.append(finding)
 
+    # A repo function that forwards its own name parameter to `mcp.NewTool`
+    # (`func NewMetadata(name string, opts ...mcp.ToolOption) Metadata {
+    # return ... mcp.NewTool(name, opts...) }`) leaves that NewTool call with
+    # no name to read, so every tool built through it was missed: 0 of 41 in
+    # chronosphereio/chronosphere-mcp. Each call to the forwarder with a
+    # literal or const name is then a tool definition, read the same way as a
+    # NewTool call, since the options are passed straight through.
+    forwarders: set[str] = set()
+    for f, file_root, src in parsed:
+        mcp_aliases = _mark3labs_mcp_aliases(file_root, src)
+        if mcp_aliases:
+            forwarders |= _new_tool_forwarders(file_root, src, mcp_aliases)
+    if forwarders:
+        for f, file_root, src in parsed:
+            rel = str(f.relative_to(root))
+            for node in _walk(file_root):
+                if node.type != "call_expression":
+                    continue
+                func = node.child_by_field_name("function")
+                if func is None:
+                    continue
+                if func.type == "identifier":
+                    called = _text(func, src)
+                elif func.type == "selector_expression":
+                    called = _selector_field(func)
+                else:
+                    continue
+                if called not in forwarders:
+                    continue
+                finding = _build_mark3labs_finding(node, rel, node.start_point[0] + 1, src, const_registry)
+                if finding is None or finding.name in known_names:
+                    continue
+                known_names.add(finding.name)
+                findings.append(finding)
+
     return findings, unparseable
+
+
+def _new_tool_forwarders(tree_root, src: bytes, mcp_aliases: set[str]) -> set[str]:
+    """Names of functions in this file whose first parameter is passed as the
+    name of a `mcp.NewTool(...)` call in their body, with the tool options
+    forwarded as a variadic parameter (`opts...`)."""
+    names: set[str] = set()
+    for decl in _walk(tree_root):
+        if decl.type != "function_declaration":
+            continue
+        name_node = decl.child_by_field_name("name")
+        params = decl.child_by_field_name("parameters")
+        body = decl.child_by_field_name("body")
+        if name_node is None or params is None or body is None:
+            continue
+        decls = [c for c in params.children if c.type in ("parameter_declaration", "variadic_parameter_declaration")]
+        if len(decls) < 2 or decls[0].type != "parameter_declaration" or decls[-1].type != "variadic_parameter_declaration":
+            continue
+        first = [c for c in decls[0].children if c.type == "identifier"]
+        rest = [c for c in decls[-1].children if c.type == "identifier"]
+        if len(first) != 1 or len(rest) != 1:
+            continue
+        name_param, opts_param = _text(first[0], src), _text(rest[0], src)
+        for call in _walk(body):
+            if call.type != "call_expression":
+                continue
+            func = call.child_by_field_name("function")
+            if func is None or func.type != "selector_expression" or _selector_field(func) != "NewTool":
+                continue
+            operand = func.child_by_field_name("operand")
+            if operand is None or _text(operand, src) not in mcp_aliases:
+                continue
+            args_node = call.child_by_field_name("arguments")
+            args = [c for c in args_node.children if c.type not in ("(", ")", ",")] if args_node is not None else []
+            if (
+                len(args) == 2
+                and args[0].type == "identifier" and _text(args[0], src) == name_param
+                and args[1].type == "variadic_argument" and _text(args[1], src) == f"{opts_param}..."
+            ):
+                names.add(_text(name_node, src))
+                break
+    return names
 
 
 def _mark3labs_mcp_aliases(tree_root, src: bytes) -> set[str]:
