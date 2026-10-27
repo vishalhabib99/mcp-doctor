@@ -3332,6 +3332,31 @@ def test_stdout_write_still_flagged_when_argparse_allows_stdio(tmp_path):
     assert [t.name for t in report.tools for i in t.issues if i.check == "stdout_write"] == ["add"]
 
 
+def test_stdout_write_flagged_when_argparse_transport_defaults_to_stdio(tmp_path):
+    # Bug #142: the repo-level stdio gate only read string literals inside
+    # run(), so `mcp.run(transport=args.transport)` with argparse
+    # `default="stdio"` gave no stdio evidence and every stdout finding was dropped.
+    write(tmp_path, "server.py", """
+        import argparse
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("tools")
+
+        @mcp.tool()
+        def add(a: int, b: int) -> int:
+            \"\"\"Add.\"\"\"
+            print(f"add({a}, {b})")
+            return a + b
+
+        if __name__ == "__main__":
+            parser = argparse.ArgumentParser()
+            parser.add_argument("--transport", choices=["stdio", "sse"], default="stdio")
+            args = parser.parse_args()
+            mcp.run(transport=args.transport)
+        """)
+    report = analyze_repo(tmp_path)
+    assert [t.name for t in report.tools for i in t.issues if i.check == "stdout_write"] == ["add"]
+
+
 def test_tool_module_named_like_a_test_without_sdk_import_is_scanned(tmp_path):
     # Bug #109: jesse-ai/jesse's significance_test.py registers 8 tools through
     # register_*(mcp) and imports no MCP library; it was skipped as a test file.

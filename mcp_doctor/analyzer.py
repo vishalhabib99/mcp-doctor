@@ -1775,8 +1775,12 @@ def _runs_over_stdio(trees: list[tuple[str, ast.Module]]) -> bool:
     """Evidence a Python server in this repo serves over stdio: `X.run()` with no
     transport (FastMCP's default is stdio), a `"stdio"` literal among `run()`'s
     arguments (`transport=os.getenv("TRANSPORT", "stdio")` counts), `run_stdio_async()`,
-    or the low-level SDK's `stdio_server()`."""
+    or the low-level SDK's `stdio_server()`. A transport read from argparse counts
+    when `stdio` is among its `choices` or its `default` (bug #142:
+    `mcp.run(transport=args.transport)` with `default="stdio"` gave no stdio
+    evidence, so the repo's stdout findings were all dropped)."""
     for _, tree in trees:
+        argparse_values = None
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -1785,10 +1789,17 @@ def _runs_over_stdio(trees: list[tuple[str, ast.Module]]) -> bool:
             if name in ("run_stdio_async", "stdio_server"):
                 return True
             if name == "run" and isinstance(f, ast.Attribute):
+                if isinstance(f.value, ast.Name) and f.value.id == "uvicorn":
+                    continue
                 if not node.args and not node.keywords:
                     return True
-                if any(isinstance(c, ast.Constant) and c.value == "stdio"
-                       for a in [*node.args, *(k.value for k in node.keywords)] for c in ast.walk(a)):
+                args = [*node.args, *(k.value for k in node.keywords)]
+                if any(isinstance(c, ast.Constant) and c.value == "stdio" for a in args for c in ast.walk(a)):
+                    return True
+                if argparse_values is None:
+                    argparse_values = _argparse_string_values(tree)
+                if any(isinstance(a, ast.Attribute) and "stdio" in argparse_values.get(a.attr, ())
+                       for a in args):
                     return True
     return False
 
