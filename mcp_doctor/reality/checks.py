@@ -18,6 +18,7 @@ this family of tools.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 
@@ -73,7 +74,39 @@ REFUSAL_WINDOW_CHARS = 200
 
 def check_refusal_in_disguise(response_text: str) -> str | None:
     match = _REFUSAL_RE.search(response_text.lstrip())
-    return match.group(0) if match and match.start() < REFUSAL_WINDOW_CHARS else None
+    if match and match.start() < REFUSAL_WINDOW_CHARS:
+        return match.group(0)
+    return _error_payload(response_text)
+
+
+# A JSON record of a job, run or check can carry its own "error" field and still be a
+# real answer ("this run failed because ..."), so a status/state key means a record.
+_RECORD_KEYS = {"status", "state"}
+
+
+def _error_payload(response_text: str) -> str | None:
+    """A "successful" response whose whole body is a JSON error object, like
+    {"error": "Connection refused", "hint": "..."}: the tool failed and said so in
+    the text, but isError is false, so a client checking the flag counts a success."""
+    text = response_text.strip()
+    if not text.startswith("{"):
+        return None
+    try:
+        obj = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(obj, dict) or _RECORD_KEYS & obj.keys():
+        return None
+    error = obj.get("error")
+    if isinstance(error, dict):
+        error = error.get("message") or error.get("detail")
+    if not isinstance(error, str) or not error.strip():
+        return None
+    # Real data next to the error (a list of results, a nested object) means a
+    # partial answer, not a failure; only flag when everything else is short metadata.
+    if any(isinstance(v, (list, dict)) and v for k, v in obj.items() if k != "error"):
+        return None
+    return f'error payload: "{error.strip()[:60]}"'
 
 
 def check_empty_content(response_text: str) -> bool:

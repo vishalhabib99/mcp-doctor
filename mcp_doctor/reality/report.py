@@ -141,7 +141,9 @@ def render_text(report: Report) -> str:
             lines.append(f"  [n/a]  {tool.name} — {tool.skip_reason}")
             continue
         flags = []
-        if tool.refusal_in_disguise:
+        if tool.refusal_in_disguise and tool.refusal_in_disguise.startswith("error payload: "):
+            flags.append(f"error reported as success (isError false): {tool.refusal_in_disguise[15:]}")
+        elif tool.refusal_in_disguise:
             flags.append(f'refusal in disguise: "{tool.refusal_in_disguise}"')
         if tool.empty_content:
             flags.append("empty content on success")

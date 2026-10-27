@@ -1,3 +1,5 @@
+import json
+
 from mcp_doctor.reality.checks import (
     check_echo_mismatch,
     check_empty_content,
@@ -73,3 +75,29 @@ def test_tightened_phrases_skip_ordinary_prose():
     assert check_refusal_in_disguise("An agent has no access to server source, only metadata.") is None
     assert check_refusal_in_disguise("As an AI language model, I cannot browse the internet.") is not None
     assert check_refusal_in_disguise("I have no access to the user's calendar.") is not None
+
+
+def test_json_error_payload_reported_as_success_is_flagged():
+    # bug #137: astro-airflow-mcp answered every call with Airflow down like this, isError false
+    text = json.dumps({
+        "error": "Failed to detect Airflow version at http://127.0.0.1:9. Connection refused",
+        "error_type": "RuntimeError",
+        "hint": "The Airflow API call failed",
+        "retryable": False,
+        "dag_id": "x",
+    }, indent=2)
+    assert check_refusal_in_disguise(text).startswith('error payload: "Failed to detect Airflow')
+    assert check_refusal_in_disguise('{"error": {"message": "Unauthorized", "code": 401}}')
+    assert check_refusal_in_disguise('{"success": false, "error": "not found"}')
+
+
+def test_json_error_field_in_real_data_is_not_flagged():
+    assert check_refusal_in_disguise('{"error": null, "rows": 3}') is None
+    assert check_refusal_in_disguise('{"error": "", "result": "ok"}') is None
+    # a record that reports a failure is still a real answer
+    assert check_refusal_in_disguise('{"run_id": "r1", "state": "failed", "error": "OOM"}') is None
+    assert check_refusal_in_disguise('{"status": "error", "error": "timeout"}') is None
+    # partial results next to an error
+    assert check_refusal_in_disguise('{"results": [{"id": 1}], "error": "page 2 failed"}') is None
+    assert check_refusal_in_disguise('[{"error": "x"}]') is None
+    assert check_refusal_in_disguise('error: not json') is None

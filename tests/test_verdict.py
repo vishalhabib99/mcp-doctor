@@ -69,6 +69,12 @@ def test_disguised_refusal_blocks_and_names_the_tool():
     assert "search" in d.blockers[0]
 
 
+def test_error_returned_as_success_blocks_with_its_own_reason():
+    d = decide(_doctor(), _fuzz(), _reality(_tool("list_dags", refusal_in_disguise='error payload: "Connection refused"')))
+    assert d.verdict == BLOCK
+    assert d.blockers == ["fuzz --truth: error returned with isError false from list_dags"]
+
+
 def test_security_error_blocks_but_security_warning_only_needs_a_fix():
     assert decide(_doctor(_issue("shell_injection", "error", "security")), None, None).verdict == BLOCK
     assert decide(_doctor(_issue("broad_fs", "warning", "security")), None, None).verdict == FIX_FIRST

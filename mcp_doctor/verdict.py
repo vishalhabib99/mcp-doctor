@@ -125,10 +125,14 @@ def decide(doctor: dict | None, fuzz: dict | None, reality: dict | None) -> Deci
         if reality.get("connect_error"):
             blockers.append(f"fuzz --truth: server never connected ({reality['connect_error']})")
         tools = reality.get("tools", [])
-        refusals = [t["name"] for t in tools if t.get("refusal_in_disguise")]
+        flagged = [t for t in tools if t.get("refusal_in_disguise")]
+        errors = [t["name"] for t in flagged if str(t["refusal_in_disguise"]).startswith("error payload: ")]
+        refusals = [t["name"] for t in flagged if t["name"] not in errors]
         if refusals:
             # An agent reads a disguised refusal as success and acts on it: the worst silent failure.
             blockers.append(f"fuzz --truth: disguised refusal from {', '.join(refusals)}")
+        if errors:
+            blockers.append(f"fuzz --truth: error returned with isError false from {', '.join(errors)}")
         empty = [t["name"] for t in tools if t.get("empty_content")]
         if empty:
             fixes.append(f"fuzz --truth: empty content from {', '.join(empty)}")
