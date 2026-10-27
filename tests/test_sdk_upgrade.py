@@ -236,3 +236,34 @@ def test_lowlevel_server_decorators_fail_at_start(tmp_path):
             return []
         """)
     assert sdk_v2(tmp_path) == []
+
+
+def test_a_co_installed_package_that_caps_mcp_below_2(tmp_path):
+    # google/adk-recipes genmedia-for-commerce: `mcp[cli]>=1.27.0` next to
+    # `google-adk>=1.31.0,<2.0.0`, and every google-adk 1.x since 1.20 requires
+    # mcp<2, so a fresh install resolves mcp 1.30.0. aws-samples/
+    # sample-genai-on-eks-starter-kit: a bare `mcp` next to a bare
+    # `langchain-mcp-adapters`, whose newest release (0.3.2) requires mcp<2.0.0.
+    write(tmp_path, "adk/server.py", SERVER_V1)
+    write(tmp_path, "adk/pyproject.toml", """
+        [project]
+        name = "adk"
+        dependencies = ["google-adk>=1.31.0,<2.0.0", "mcp[cli]>=1.27.0"]
+        """)
+    write(tmp_path, "lc/server.py", SERVER_V1.replace('"x"', '"lc"'))
+    write(tmp_path, "lc/requirements.txt", "langchain-mcp-adapters\nlanggraph\nmcp\n")
+    assert sdk_v2(tmp_path) == []
+
+
+def test_a_co_installed_package_that_still_allows_mcp_2(tmp_path):
+    # google-adk 2.x allows mcp<3, strands-agents allows mcp<2.2 (a fresh
+    # install gets 2.1.1), and langchain-mcp-adapters before 0.3.2 had no cap.
+    # (Distinct server names: identical files are scanned once.)
+    for name, reqs in (
+        ("adk", "google-adk>=1.31.0\nmcp>=1.27.0\n"),
+        ("strands", "strands-agents[otel]>=1.4.0\nmcp\n"),
+        ("lc", "langchain-mcp-adapters<0.3\nmcp\n"),
+    ):
+        write(tmp_path, f"{name}/server.py", SERVER_V1.replace('"x"', f'"{name}"'))
+        write(tmp_path, f"{name}/requirements.txt", reqs)
+    assert len(sdk_v2(tmp_path)) == 3

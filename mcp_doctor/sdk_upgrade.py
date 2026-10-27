@@ -15,7 +15,9 @@ Imports inside `try: ... except ImportError:` are a deliberate v1/v2 shim
 and aren't flagged. The dependency is read from the nearest pyproject.toml,
 setup.py or requirements.txt that declares `mcp` (the files the in-browser
 check also downloads); a server that declares none isn't flagged, since
-which `mcp` it gets can't be known.
+which `mcp` it gets can't be known. Nor is one whose manifest also asks for
+a package that itself requires mcp<2 (`_CAPPING_PACKAGES`): the resolver
+keeps mcp on 1.x for it.
 """
 
 from __future__ import annotations
@@ -75,6 +77,21 @@ _REQ_LINE = re.compile(r"^[ \t]*mcp(?:\[[^\]]*\])?[ \t]*([<>=!~^][^;#\r\n]*)?(?:
 _CAPPED = re.compile(r"<\s*=?\s*[01](?:\.|\s*$|\s*,)|<\s*2(?:\.0)*(?![.\d])|={2,3}\s*[01]\.|~=\s*[01]\.|\^\s*[01]\b|(?<![=<>!])~\s*[01]\b")
 # A lower bound that already rules out 1.x (e.g. "mcp>=2.0.0,<3.0.0"): capped, but every install is 2.x.
 _V2_ONLY = re.compile(r">=\s*[2-9]|={2,3}\s*[2-9]|~=\s*[2-9]")
+
+# Packages whose releases require mcp<2, and when a manifest's specifier for
+# them means a fresh install gets one of those releases. Read from PyPI on
+# 2026-10-27; a later release that lifts the cap turns these back into misses.
+#  - google-adk: every 1.x since 1.20 requires mcp<2; 2.x allows mcp<3. So it
+#    caps only when held below 2 (google/adk-recipes: `google-adk>=1.31.0,<2.0.0`).
+#  - langchain-mcp-adapters: only 0.3.2, the newest, requires mcp<2.0.0. So it
+#    caps only with no upper bound or pin (aws-samples/sample-genai-on-eks-starter-kit).
+# Not here: strands-agents (mcp<2.2: a fresh install gets 2.1.1), openai-agents (<3).
+_REQ_NAME = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*([^;#]*)")
+_CAPPING_PACKAGES = {
+    "google-adk": lambda spec: bool(re.search(r"<\s*2(?:\.0)*(?![.\d])|<=?\s*1\.", spec))
+    and not re.search(r"={2,3}\s*1\.(?:1?\d)(?![\d])", spec),
+    "langchain-mcp-adapters": lambda spec: not re.search(r"[<=~^]", spec.replace(">=", "")),
+}
 
 
 def _is_removed_module(name: str) -> bool:
@@ -273,6 +290,29 @@ def _mcp_requirement(manifest: Path) -> str | None:
     return (m.group(1) or "").strip() if m else None
 
 
+def _capping_package(manifest: Path) -> str | None:
+    """A package `manifest` also asks for whose release a fresh install gets requires mcp<2."""
+    try:
+        text = manifest.read_text(errors="ignore")
+    except OSError:
+        return None
+    if manifest.name == "requirements.txt":
+        reqs = text.splitlines()
+    elif manifest.name == "pyproject.toml":
+        reqs = _pyproject_requirements(text) or []
+    else:
+        return None
+    for req in reqs:
+        m = _REQ_NAME.match(req)
+        if not m:
+            continue
+        name = re.sub(r"[._]", "-", m.group(1).lower())
+        capped = _CAPPING_PACKAGES.get(name)
+        if capped and capped(m.group(2).strip()):
+            return name
+    return None
+
+
 def _declaring_manifest(path: Path, root: Path) -> tuple[Path, str] | None:
     d = path.parent
     while True:
@@ -312,7 +352,7 @@ def scan_sdk_v2_breakage(root: Path, trees: list[tuple[str, ast.Module]]) -> lis
         if not found:
             continue
         manifest, spec = found
-        if _CAPPED.search(spec):
+        if _CAPPED.search(spec) or _capping_package(manifest):
             continue
         by_manifest.setdefault(manifest, (rel, spec, *hit))
     issues = []

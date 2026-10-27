@@ -42,7 +42,7 @@ KINDS: dict[str, BreakageKind] = {
             "sdk_v2",
             "a fresh install gets mcp 2.x and the server fails to start",
             "pin `mcp<2`, or migrate the removed import",
-            "removed in mcp 2.x; fails on import; fixed by maintainers in 3 repos",
+            "removed in mcp 2.x; fails on import; fixed by maintainers in 4 repos",
         ),
     )
 }
