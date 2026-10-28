@@ -1,6 +1,6 @@
 # Experiment: do MCP authors use mcp-doctor when there's nothing to install?
 
-**Status:** running, 2026-09-27 to 2026-10-27. Pre-registered 2026-09-28, on day 1, with 0 outside requests. The readout at the bottom is filled in once, on 2026-10-27, whatever the number is.
+**Status:** closed. It ran 2026-09-27 to 2026-10-27, and the result is 4 outside requests against a bar of 10 (see the readout). Pre-registered 2026-09-28, on day 1, with 0 outside requests. The readout at the bottom is filled in once, on 2026-10-27, whatever the number is.
 
 ## Why
 
@@ -56,13 +56,13 @@ gh issue list -R vishalhabib99/mcp-doctor --label scan-request --state all \
 - **2026-10-15: the decision rule was dropped, before the readout.** At 3 outside requests, I decided to keep growing mcp-doctor in the open whatever the number, so "under 10 → stop promoting" no longer applies. The metric, the counting rule and the 2026-10-27 readout are unchanged, and the readout will say the rule was dropped.
 - **2026-10-16: two requests the metric doesn't count.** #6 and #7 (one outside maintainer, same repo) were opened from the GitHub CLI, which can't apply the `scan-request` label without triage permission, so the bot never ran. The requester closed both. They fail the label rule above and aren't counted; they're reported here because they show a real gap: a request that doesn't come through the issue form gets no reply.
 
-## Readout (fill in on 2026-10-27)
+## Readout (filled in on 2026-10-27)
 
-- Outside scan requests: **_**
-- Decision: **_**
-- Distinct requesters / repeat: _ / _
-- Opted into leaderboard: _
-- Failed scans (reasons): _
-- Maintainer changes after a report: _
-- Invited vs. uninvited: _ / _
-- What I'd do differently: _
+- Outside scan requests: **4. The bar was 10, so this is a miss.** #3, #4 and #5 from [@bruchris](https://github.com/bruchris) (2026-09-29) and #8 from [@rajudandigam](https://github.com/rajudandigam) (2026-10-16). The command above returns exactly these four.
+- Decision: **none triggered.** The "under 10, stop promoting" rule was dropped on 2026-10-15 (see Changes), so mcp-doctor keeps growing in the open. The miss is recorded here as it stands.
+- Distinct requesters / repeat: 2 / 0. bruchris filed three repos in one sitting. Neither requester came back later for a second scan.
+- Opted into leaderboard: 3 (#3, #4, #5).
+- Failed scans (reasons): 2 of 4 first came back with 0 tools, and both were mcp-doctor misses, not the requesters' mistakes. #3 (`canvas-lms-mcp`: tools registered by a loop) was fixed as bug #46 in v1.12.4. #8 (`agent-inspect`: a `tools/list` array built with `.map(...)`) was fixed as bug #117 in v1.27.2. Both were re-scanned with the right tool count. The two uncounted CLI attempts (#6, #7) never got a scan.
+- Maintainer changes after a report: none confirmed. I didn't track the requesters' repos after the reports.
+- Invited vs. uninvited: 4 / 0. Every counted request came from a maintainer I'd invited directly. None came from the LinkedIn post, the profile or search.
+- What I'd do differently: removing the install step wasn't enough to bring in strangers. Distribution was the barrier, not installation. Next time I'd put the check where maintainers already are, in a registry or a CI step, before relying on an issue form. I'd also make a request that doesn't come through the form (like #6 and #7) still get a reply.
