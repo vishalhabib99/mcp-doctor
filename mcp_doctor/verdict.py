@@ -77,6 +77,15 @@ def decide(doctor: dict | None, fuzz: dict | None, reality: dict | None) -> Deci
             if i.get("category") != "security" and i.get("severity") == "error" and i.get("check") != "sdk_v2"
         ]
         sdk_v2 = [i for i in issues if i.get("check") == "sdk_v2"]
+        # The report's "Will break an agent" list: deterministic, confirmed on real servers, and
+        # often hiding under an A grade, so each one blocks however high the scores are.
+        breakages = doctor.get("breakages") or []
+        for b in breakages[:3]:
+            where = f"{b['file']}:{b['line']}" if b.get("line") else b["file"]
+            who = f"{b['tool']} ({where})" if b.get("tool") else where
+            blockers.append(f"static scan: will break an agent: {who}: {b['breaks']}. Fix: {b['fix']}")
+        if len(breakages) > 3:
+            blockers.append(f"static scan: {_count(len(breakages) - 3, 'more finding')} that will break an agent (see the report)")
         if sec_errors:
             checks = sorted({i["check"] for i in sec_errors})
             blockers.append(f"static scan: {_count(len(sec_errors), 'security error')} ({', '.join(checks)})")
@@ -84,7 +93,7 @@ def decide(doctor: dict | None, fuzz: dict | None, reality: dict | None) -> Deci
             fixes.append(f"static scan: {_count(len(sec_warnings), 'security warning')}")
         if quality_errors:
             fixes.append(f"static scan: {_count(len(quality_errors), 'spec/documentation error')}")
-        if sdk_v2:
+        if sdk_v2 and not any(b.get("check") == "sdk_v2" for b in breakages):
             fixes.append("static scan: a fresh install gets mcp 2.x, which removed an import the server uses (pin 'mcp<2' or migrate)")
 
     if fuzz is not None:

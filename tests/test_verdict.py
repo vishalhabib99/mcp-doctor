@@ -116,6 +116,51 @@ def test_blockers_outrank_fixes_and_all_reasons_are_kept():
     assert len(d.blockers) == 1 and len(d.fixes) == 1
 
 
+def _breakage(check="none_default_type", tool="run(timeout)", file="server.py", line=18):
+    return {"check": check, "tool": tool, "file": file, "line": line,
+            "breaks": "a client that sends the advertised null default gets a validation error, and the tool never runs",
+            "fix": "type it `T | None` (`mcp-doctor --fix` does this)", "evidence": "", "detail": ""}
+
+
+def test_breakage_blocks_even_with_an_a_grade_and_clean_runtime():
+    # The report leads with these because the grade was an A for ~80% of servers maintainers fixed.
+    doctor = {**_doctor(_issue("none_default_type", "warning")), "breakages": [_breakage()]}
+    d = decide(doctor, _fuzz(), _reality(_tool("a")))
+    assert d.verdict == BLOCK
+    assert d.blockers == ["static scan: will break an agent: run(timeout) (server.py:18): a client that sends the "
+                          "advertised null default gets a validation error, and the tool never runs. "
+                          "Fix: type it `T | None` (`mcp-doctor --fix` does this)"]
+
+
+def test_repo_level_breakage_names_the_file_and_many_are_summarised():
+    sdk = _breakage("sdk_v2", tool="", file="pyproject.toml", line=0)
+    doctor = {**_doctor(repo_issues=[_issue("sdk_v2", "error")]), "breakages": [sdk]}
+    d = decide(doctor, None, None)
+    assert d.verdict == BLOCK
+    assert d.blockers[0].startswith("static scan: will break an agent: pyproject.toml: ")
+    assert not any("mcp 2.x" in f for f in d.fixes)  # listed once, as the blocker
+    many = {**_doctor(), "breakages": [_breakage(line=n) for n in range(1, 6)]}
+    d = decide(many, None, None)
+    assert len(d.blockers) == 4 and d.blockers[-1] == "static scan: 2 more findings that will break an agent (see the report)"
+
+
+def test_sdk_v2_finding_outside_the_breakage_list_still_needs_a_fix():
+    # e.g. found only in archived code, which the breakage list leaves out
+    d = decide(_doctor(repo_issues=[_issue("sdk_v2", "error")]), None, None)
+    assert d.verdict == FIX_FIRST
+
+
+def test_verdict_cli_blocks_the_one_bug_example(capsys):
+    from mcp_doctor.cli import main
+
+    root = Path(__file__).resolve().parent.parent / "examples"
+    assert main(["verdict", str(root / "one_bug_server"), "--json", "--fail-on", "BLOCK"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == BLOCK
+    assert payload["scores"]["static"] >= 90  # an A, and still blocked
+    assert len(payload["blockers"]) == 1 and "get_forecast(units)" in payload["blockers"][0]
+
+
 def test_connect_error_blocks():
     assert decide(_doctor(), _fuzz(connect_error="boom"), _reality(connect_error="boom")).verdict == BLOCK
 

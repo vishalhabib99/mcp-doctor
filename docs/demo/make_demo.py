@@ -1,17 +1,17 @@
-"""Build docs/demo.svg: an animated terminal walking the four steps (find, fix,
-ship, guard) on the bundled examples, then an end card. Every terminal line is
-real output, captured 2026-10-29 from mcp-doctor 0.35.11 with mcp 2.3.0
-(examples/bad_server, a copy of it after `mcp-doctor --fix`, examples/good_server,
-and guard in front of tests/fixtures/guard_server.py fs_broken). Long lines are
-wrapped, never reworded. Scene 1 leaves out some findings to fit (the README sample
-has the full report), scene 2 shows only the changed lines of `git diff`, and
-scene 3 shows verdict's Markdown rendered (no ###, ** or emoji) without the
-server's own stderr logging. The end card's numbers come from docs/coverage.md and
-the merged PRs linked from the profile README.
+"""Build docs/demo.svg: an animated terminal taking one server from find to block
+to fix to guard, then an end card. Every terminal line is real output, captured
+2026-10-29 from mcp-doctor 0.36.0 with mcp 2.3.0 (examples/one_bug_server, a copy
+of it after `mcp-doctor --fix`, and guard in front of tests/fixtures/guard_server.py
+fs_broken). Long lines are wrapped, never reworded. Scene 1 leaves out the warning
+that restates the breakage (the README sample has a full report), verdict's
+Markdown is shown rendered (no ###, ** or emoji) without the server's own stderr
+logging, and scene 3 shows only the changed lines of `git diff`, the `--fix` run's
+"Fixed" and breakage lines, and the second verdict's first line. The end card's numbers come from
+docs/coverage.md and the merged PRs linked from the profile README.
 
-Earlier versions opened the release scene with `verdict` on examples/bad_server,
-which BLOCKs only because that example never calls mcp.run() ("server never
-connected"), so it no longer appears here.
+The bug is real, not just a finding: on mcp 2.3.0, calling get_forecast with
+"units": null returns isError true (a validation error) before the fix and the
+forecast after it.
 
     python docs/demo/make_demo.py   (writes docs/demo.svg)
 """
@@ -21,52 +21,52 @@ from pathlib import Path
 W, H = 940, 420
 FONT, CH, LH = 13.5, 8.13, 21  # font size, monospace char width, line height
 X0, Y0 = 24, 82
-CYCLE = 46.0  # seconds
+CYCLE = 52.0  # seconds
 SANS = "-apple-system,Segoe UI,Helvetica,Arial,sans-serif"
 C = {"fg": "#e6edf3", "dim": "#8b949e", "green": "#3fb950", "red": "#f85149", "yellow": "#d29922",
      "blue": "#58a6ff", "purple": "#bc8cff", "bg": "#0d1117", "bar": "#161b22", "add": "#12261e", "del": "#2d1517"}
-STEPS = ["Find", "Fix", "Ship", "Guard"]
+STEPS = ["Find", "Block", "Fix", "Guard"]
+RUN = 'mcp-doctor verdict examples/one_bug_server --run "python examples/one_bug_server/server.py" \\'
 
-# (step index, caption, start, end, lines); a line is a list of (text, color) or ("$", command)
+# (step index, caption, start, end, lines); a line is a list of (text, color), a diff row
+# [(text, color, tint)], or ("$", command)
 SCENES = [
-    (0, "Find what will break an agent, before anyone calls the tool", 0.0, 10.5, [
-        ("$", "mcp-doctor examples/bad_server"),
+    (0, "It grades an A, and it still breaks agents", 0.0, 10.0, [
+        ("$", "mcp-doctor examples/one_bug_server"),
         [("mcp-doctor report", "dim")],
         [("Will break an agent: 1", "red")],
-        [("  run(timeout) (server.py:18): ", "fg"), ("a client that sends the advertised null default gets", "fg")],
-        [("  a validation error, and the tool never runs.", "fg")],
+        [("  get_forecast(units) (server.py:14): ", "fg"), ("a client that sends the advertised null default", "fg")],
+        [("  gets a validation error, and the tool never runs.", "fg")],
         [("      Fix: ", "green"), ("type it `T | None` (`mcp-doctor --fix` does this). ", "fg"), ("(fixed by maintainers in 22 repos)", "dim")],
         [("", "fg")],
-        [("Quality:  22%  Grade: ", "fg"), ("F", "red"), ("  (2 tool(s) found)", "dim")],
+        [("Quality:  97%  Grade: ", "fg"), ("A", "green"), ("  (1 tool(s) found)", "dim")],
         [("Security: 100%  Grade: ", "fg"), ("A", "green")],
-        [("  [FAIL] ", "red"), ("do_thing (server.py:12)", "fg")],
-        [("      ERROR  ", "red"), ("Tool has no description. An agent cannot decide when to call this.", "fg")],
-        [("  [FAIL] ", "red"), ("run (server.py:18)", "fg")],
-        [("      ERROR  ", "red"), ("Bare 'except:' swallows all errors including cancellation — catch specific exceptions.", "fg")],
     ]),
-    (1, "Fix it in place, and the re-check comes back clean", 10.5, 19.5, [
-        ("$", "mcp-doctor --fix examples/bad_server"),
+    (1, "Every score is an A, and the release gate still says no", 10.0, 21.0, [
+        ("$", RUN),
+        [("    --include-destructive", "fg")],
+        [("mcp-doctor verdict: ", "fg"), ("BLOCK", "red"), (" (HIGH confidence) · static 97% (A) · fuzz 100% (A) · truth 100% (A)", "dim")],
+        [("", "fg")],
+        [("Release decision: ", "fg"), ("BLOCK", "red")],
+        [("Blockers", "red"), (" (any one of these blocks release):", "dim")],
+        [("- static scan: will break an agent: get_forecast(units) (server.py:14): a client that", "fg")],
+        [("  sends the advertised null default gets a validation error, and the tool never runs.", "fg")],
+        [("  Fix: ", "green"), ("type it `T | None` (`mcp-doctor --fix` does this)", "fg")],
+    ]),
+    (2, "Fix it in place, and BLOCK becomes SHIP", 21.0, 34.0, [
+        ("$", "mcp-doctor --fix examples/one_bug_server"),
         [("Fixed 1 file(s): server.py", "green")],
-        [("mcp-doctor report", "dim")],
         [("No known agent-breaking issues ", "green"), ("(checked: null defaults, stdout on stdio, mcp 2.x start-up)", "dim")],
         [("", "fg")],
-        ("$", "git diff examples/bad_server"),
-        [("-def run(cmd, timeout: int = None):", "red", "del")],
-        [("+def run(cmd, timeout: int | None = None):", "green", "add")],
-        [("-    except:", "red", "del")],
-        [("+    except Exception:", "green", "add")],
-    ]),
-    (2, "Launch a server, fuzz it, and get one release decision", 19.5, 28.5, [
-        ("$", 'mcp-doctor verdict examples/good_server --run "python examples/good_server/server.py" \\'),
+        ("$", "git diff examples/one_bug_server"),
+        [("-def get_forecast(city: str, days: int, units: str = None) -> str:", "red", "del")],
+        [("+def get_forecast(city: str, days: int, units: str | None = None) -> str:", "green", "add")],
+        [("", "fg")],
+        ("$", RUN),
         [("    --include-destructive", "fg")],
         [("mcp-doctor verdict: ", "fg"), ("SHIP", "green"), (" (HIGH confidence) · static 100% (A) · fuzz 100% (A) · truth 100% (A)", "dim")],
-        [("", "fg")],
-        [("Release decision: ", "fg"), ("SHIP", "green")],
-        [("No rule fired.", "fg")],
-        [("Confidence: HIGH", "fg"), (" · needs human review: no", "dim")],
-        [("- fuzz called 1 of 1 tools (100%).", "dim")],
     ]),
-    (3, "Catch a \"success\" that didn't happen, live", 28.5, 39.5, [
+    (3, "In production: catch a \"success\" that didn't happen", 34.0, 45.0, [
         ("$", "mcp-doctor guard -- python tests/fixtures/guard_server.py fs_broken"),
         [("agent  → ", "blue"), ('tools/call write_file {"path": "/tmp/report.md", "content": "# Q3 report"}', "fg")],
         [("server → ", "purple"), ('"Successfully wrote to /tmp/report.md"', "fg")],
@@ -78,7 +78,7 @@ SCENES = [
         [("so it can retry or tell you instead of saying \"done\".", "dim")],
     ]),
 ]
-END = (39.5, CYCLE)
+END = (45.0, CYCLE)
 
 css, body, n = [], [], 0
 
@@ -154,7 +154,7 @@ start, end = END
 cx = W // 2
 card = [
     (150, f'<text x="{cx}" y="150" text-anchor="middle" fill="{C["fg"]}" style="font:700 30px {SANS}">mcp-doctor</text>'),
-    (190, f'<text x="{cx}" y="190" text-anchor="middle" fill="{C["dim"]}" style="font:15px {SANS}">Find → Fix → Ship → Guard, in one open-source CLI</text>'),
+    (190, f'<text x="{cx}" y="190" text-anchor="middle" fill="{C["dim"]}" style="font:15px {SANS}">Find → Block → Fix → Guard, in one open-source CLI</text>'),
     (240, f'<rect x="{cx - 170}" y="216" width="340" height="38" rx="8" fill="{C["bar"]}" stroke="#30363d"/>'
           f'<text x="{cx}" y="241" text-anchor="middle"><tspan fill="{C["green"]}">$ </tspan><tspan fill="{C["fg"]}">pip install mcp-server-lint</tspan></text>'),
     (292, f'<text x="{cx}" y="292" text-anchor="middle" fill="{C["fg"]}" style="font:14.5px {SANS}">'
@@ -167,7 +167,7 @@ for i, (_, el) in enumerate(card):
     body.append(f'<g class="{window(start, end, start + 0.3 + 0.35 * i)}">{el}</g>')
 
 svg = f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" role="img"
- aria-label="mcp-doctor demo: find a bug that will break an agent (quality 22%, grade F), fix it with mcp-doctor --fix and re-check clean, get a SHIP release verdict on a clean server, and guard a live call that reported success without writing the file">
+ aria-label="mcp-doctor demo: a server that grades an A still has a bug that will break an agent, the release verdict blocks it, mcp-doctor --fix fixes it and the verdict becomes SHIP, then guard catches a live call that reported success without writing the file">
 <style>
 text{{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;font-size:{FONT}px;white-space:pre}}
 {"".join(css)}
