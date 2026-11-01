@@ -8,7 +8,6 @@
   {"owner": "hangwin", "repo": "mcp-chrome", "language": "TS"},
   {"owner": "BeehiveInnovations", "repo": "pal-mcp-server", "language": "Python"},
   {"owner": "wonderwhy-er", "repo": "DesktopCommanderMCP", "language": "TS"},
-  {"owner": "MODSetter", "repo": "SurfSense", "language": "Python", "subdir": "surfsense_mcp"},
   {"owner": "0x4m4", "repo": "hexstrike-ai", "language": "Python"},
   {"owner": "CursorTouch", "repo": "Windows-MCP", "language": "Python"},
   {"owner": "idosal", "repo": "git-mcp", "language": "TS"},
