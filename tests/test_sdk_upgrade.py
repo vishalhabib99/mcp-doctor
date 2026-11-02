@@ -255,6 +255,41 @@ def test_a_co_installed_package_that_caps_mcp_below_2(tmp_path):
     assert sdk_v2(tmp_path) == []
 
 
+def test_agno_with_the_mcp_extra_held_below_3_0_6_caps_mcp(tmp_path):
+    # IBM/ibmi-mcp-server's client: `agno[mcp]==2.9.0` next to `mcp>=1.20.0`.
+    # agno 2.8.6 through 3.0.5 require mcp<2 through the [mcp] extra, so a
+    # fresh install resolves mcp 1.30.0 and the 1.x import works.
+    for name, dep in (
+        ("pin", "agno[mcp]==2.9.0"),
+        ("below3", "agno[mcp,openai]>=2.0,<3"),
+        ("compat", "agno[mcp]~=2.9"),
+        ("le", "agno[mcp]<=3.0.5"),
+    ):
+        write(tmp_path, f"{name}/server.py", SERVER_V1.replace('"x"', f'"{name}"'))
+        write(tmp_path, f"{name}/pyproject.toml", f"""
+            [project]
+            name = "{name}"
+            dependencies = ["{dep}", "mcp>=1.20.0"]
+            """)
+    assert sdk_v2(tmp_path) == []
+
+
+def test_agno_that_still_lets_mcp_2_in(tmp_path):
+    # No [mcp] extra (agno itself doesn't require mcp), no upper bound (3.1.x
+    # requires mcp>=2.1), held below 2.8.6 (mcp>=1.9.2, uncapped), or pinned
+    # at 3.0.6+: each fresh install gets mcp 2.x.
+    for name, dep in (
+        ("noextra", "agno==2.9.0"),
+        ("unbounded", "agno[mcp]>=2.9.0"),
+        ("old", "agno[mcp]<2.8.6"),
+        ("new", "agno[mcp]==3.0.6"),
+        ("wide", "agno[mcp]<3.1"),
+    ):
+        write(tmp_path, f"{name}/server.py", SERVER_V1.replace('"x"', f'"{name}"'))
+        write(tmp_path, f"{name}/requirements.txt", f"{dep}\nmcp>=1.20.0\n")
+    assert len(sdk_v2(tmp_path)) == 5
+
+
 def test_a_co_installed_package_that_still_allows_mcp_2(tmp_path):
     # google-adk 2.x allows mcp<3, strands-agents allows mcp<2.2 (a fresh
     # install gets 2.1.1), and langchain-mcp-adapters before 0.3.2 had no cap.

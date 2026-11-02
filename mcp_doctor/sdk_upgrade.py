@@ -80,17 +80,54 @@ _V2_ONLY = re.compile(r">=\s*[2-9]|={2,3}\s*[2-9]|~=\s*[2-9]")
 
 # Packages whose releases require mcp<2, and when a manifest's specifier for
 # them means a fresh install gets one of those releases. Read from PyPI on
-# 2026-10-27; a later release that lifts the cap turns these back into misses.
+# 2026-10-27 (agno 2026-11-02); a later release that lifts the cap turns these back into misses.
 #  - google-adk: every 1.x since 1.20 requires mcp<2; 2.x allows mcp<3. So it
 #    caps only when held below 2 (google/adk-recipes: `google-adk>=1.31.0,<2.0.0`).
 #  - langchain-mcp-adapters: only 0.3.2, the newest, requires mcp<2.0.0. So it
 #    caps only with no upper bound or pin (aws-samples/sample-genai-on-eks-starter-kit).
+#  - agno: 2.8.6 up to 3.0.5 require mcp<2, but only through the [mcp] extra;
+#    3.0.6+ require mcp>=2.1. So `agno[mcp]` caps only when held in that range
+#    (IBM/ibmi-mcp-server's client: `agno[mcp]==2.9.0`).
 # Not here: strands-agents (mcp<2.2: a fresh install gets 2.1.1), openai-agents (<3).
-_REQ_NAME = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*([^;#]*)")
+_REQ_NAME = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[([^\]]*)\])?\s*([^;#]*)")
+
+
+def _ver(text: str) -> tuple[int, ...]:
+    return tuple(int(p) for p in re.findall(r"\d+", text)[:3]) or (0,)
+
+
+def _held_in(spec: str, low: tuple[int, ...], high: tuple[int, ...]) -> bool:
+    """Whether the newest release `spec` allows is in [low, high), assuming releases exist up to any bound."""
+    clauses = re.findall(r"(===?|~=|<=|>=|!=|<|>|\^|~)\s*([\d][\w.*]*)", spec)
+    newest, inclusive = None, False
+    for op, v in clauses:
+        n = _ver(v)
+        if op in ("==", "==="):
+            return low <= n < high
+        if op in ("~=", "^", "~"):
+            parts = list(n)
+            if op == "~=" and len(parts) > 1:
+                parts = parts[:-1]
+            elif op == "^" or len(parts) == 1:
+                parts = parts[:1]
+            parts[-1] += 1
+            bound, incl = tuple(parts), False
+        elif op in ("<", "<="):
+            bound, incl = n, op == "<="
+        else:
+            continue
+        if newest is None or bound < newest or (bound == newest and not incl):
+            newest, inclusive = bound, incl
+    if newest is None:
+        return False
+    return (low <= newest < high) if inclusive else (low < newest <= high)
+
+
 _CAPPING_PACKAGES = {
-    "google-adk": lambda spec: bool(re.search(r"<\s*2(?:\.0)*(?![.\d])|<=?\s*1\.", spec))
+    "google-adk": lambda spec, extras: bool(re.search(r"<\s*2(?:\.0)*(?![.\d])|<=?\s*1\.", spec))
     and not re.search(r"={2,3}\s*1\.(?:1?\d)(?![\d])", spec),
-    "langchain-mcp-adapters": lambda spec: not re.search(r"[<=~^]", spec.replace(">=", "")),
+    "langchain-mcp-adapters": lambda spec, extras: not re.search(r"[<=~^]", spec.replace(">=", "")),
+    "agno": lambda spec, extras: "mcp" in extras and _held_in(spec, (2, 8, 6), (3, 0, 6)),
 }
 
 
@@ -308,7 +345,8 @@ def _capping_package(manifest: Path) -> str | None:
             continue
         name = re.sub(r"[._]", "-", m.group(1).lower())
         capped = _CAPPING_PACKAGES.get(name)
-        if capped and capped(m.group(2).strip()):
+        extras = {e.strip().lower() for e in (m.group(2) or "").split(",")}
+        if capped and capped(m.group(3).strip(), extras):
             return name
     return None
 
