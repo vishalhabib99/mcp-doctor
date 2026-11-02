@@ -80,7 +80,7 @@ _V2_ONLY = re.compile(r">=\s*[2-9]|={2,3}\s*[2-9]|~=\s*[2-9]")
 
 # Packages whose releases require mcp<2, and when a manifest's specifier for
 # them means a fresh install gets one of those releases. Read from PyPI on
-# 2026-10-27 (agno 2026-11-02); a later release that lifts the cap turns these back into misses.
+# 2026-10-27 (agno, chainlit, semantic-kernel 2026-11-02); a later release that lifts the cap turns these back into misses.
 #  - google-adk: every 1.x since 1.20 requires mcp<2; 2.x allows mcp<3. So it
 #    caps only when held below 2 (google/adk-recipes: `google-adk>=1.31.0,<2.0.0`).
 #  - langchain-mcp-adapters: only 0.3.2, the newest, requires mcp<2.0.0. So it
@@ -88,6 +88,11 @@ _V2_ONLY = re.compile(r">=\s*[2-9]|={2,3}\s*[2-9]|~=\s*[2-9]")
 #  - agno: 2.8.6 up to 3.0.5 require mcp<2, but only through the [mcp] extra;
 #    3.0.6+ require mcp>=2.1. So `agno[mcp]` caps only when held in that range
 #    (IBM/ibmi-mcp-server's client: `agno[mcp]==2.9.0`).
+#  - chainlit: every release since 2.4.0 requires mcp<2 (newest, 2.12.0, too), so it
+#    caps unless held below 2.4.0 (microsoft/mcp-for-beginners 09-CaseStudy: bare
+#    `chainlit` next to a bare `mcp`).
+#  - semantic-kernel: every release since 1.44.1 requires mcp<2 (newest, 1.46.0, too);
+#    1.39.4 to 1.44.0 required mcp>=1.26 with no cap. So it caps unless held below 1.44.1.
 # Not here: strands-agents (mcp<2.2: a fresh install gets 2.1.1), openai-agents (<3).
 _REQ_NAME = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[([^\]]*)\])?\s*([^;#]*)")
 
@@ -96,8 +101,10 @@ def _ver(text: str) -> tuple[int, ...]:
     return tuple(int(p) for p in re.findall(r"\d+", text)[:3]) or (0,)
 
 
-def _held_in(spec: str, low: tuple[int, ...], high: tuple[int, ...]) -> bool:
-    """Whether the newest release `spec` allows is in [low, high), assuming releases exist up to any bound."""
+def _held_in(spec: str, low: tuple[int, ...], high: tuple[int, ...], latest: tuple[int, ...] | None = None) -> bool:
+    """Whether the newest release `spec` allows is in [low, high), assuming releases exist up to any bound.
+
+    With no upper bound or pin, the newest release is `latest` (the newest on PyPI when the table was read)."""
     clauses = re.findall(r"(===?|~=|<=|>=|!=|<|>|\^|~)\s*([\d][\w.*]*)", spec)
     newest, inclusive = None, False
     for op, v in clauses:
@@ -119,7 +126,7 @@ def _held_in(spec: str, low: tuple[int, ...], high: tuple[int, ...]) -> bool:
         if newest is None or bound < newest or (bound == newest and not incl):
             newest, inclusive = bound, incl
     if newest is None:
-        return False
+        return latest is not None and low <= latest < high
     return (low <= newest < high) if inclusive else (low < newest <= high)
 
 
@@ -128,6 +135,8 @@ _CAPPING_PACKAGES = {
     and not re.search(r"={2,3}\s*1\.(?:1?\d)(?![\d])", spec),
     "langchain-mcp-adapters": lambda spec, extras: not re.search(r"[<=~^]", spec.replace(">=", "")),
     "agno": lambda spec, extras: "mcp" in extras and _held_in(spec, (2, 8, 6), (3, 0, 6)),
+    "chainlit": lambda spec, extras: _held_in(spec, (2, 4, 0), (99,), latest=(2, 12, 0)),
+    "semantic-kernel": lambda spec, extras: _held_in(spec, (1, 44, 1), (99,), latest=(1, 46, 0)),
 }
 
 

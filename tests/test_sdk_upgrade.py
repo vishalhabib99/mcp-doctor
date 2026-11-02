@@ -290,6 +290,33 @@ def test_agno_that_still_lets_mcp_2_in(tmp_path):
     assert len(sdk_v2(tmp_path)) == 5
 
 
+def test_chainlit_or_semantic_kernel_cap_mcp(tmp_path):
+    # microsoft/mcp-for-beginners 09-CaseStudy/docs-mcp: `chainlit`, `mcp` and
+    # `semantic-kernel`, all bare. chainlit 2.4.0+ and semantic-kernel 1.44.1+
+    # require mcp<2, so a fresh install resolves mcp 1.30.0.
+    for name, reqs in (
+        ("case", "chainlit\nmcp\nsemantic-kernel\n"),
+        ("cl", "chainlit>=2.6\nmcp>=1.20\n"),
+        ("sk", "semantic-kernel>=1.40\nmcp\n"),
+        ("skpin", "semantic-kernel==1.45.0\nmcp\n"),
+    ):
+        write(tmp_path, f"{name}/server.py", SERVER_V1.replace('"x"', f'"{name}"'))
+        write(tmp_path, f"{name}/requirements.txt", reqs)
+    assert sdk_v2(tmp_path) == []
+
+
+def test_chainlit_or_semantic_kernel_held_below_their_cap(tmp_path):
+    # chainlit before 2.4.0 and semantic-kernel before 1.44.1 don't cap mcp.
+    for name, reqs in (
+        ("cl", "chainlit<2.4\nmcp\n"),
+        ("sk", "semantic-kernel<1.44.1\nmcp\n"),
+        ("skpin", "semantic-kernel==1.40.0\nmcp\n"),
+    ):
+        write(tmp_path, f"{name}/server.py", SERVER_V1.replace('"x"', f'"{name}"'))
+        write(tmp_path, f"{name}/requirements.txt", reqs)
+    assert len(sdk_v2(tmp_path)) == 3
+
+
 def test_a_co_installed_package_that_still_allows_mcp_2(tmp_path):
     # google-adk 2.x allows mcp<3, strands-agents allows mcp<2.2 (a fresh
     # install gets 2.1.1), and langchain-mcp-adapters before 0.3.2 had no cap.
