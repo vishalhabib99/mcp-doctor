@@ -27,6 +27,7 @@ import re
 from pathlib import Path
 
 from .analyzer import RepoIssue
+from . import pypi_caps
 
 # Modules that no longer exist in mcp 2.x (any submodule too).
 _REMOVED_MODULES = (
@@ -78,66 +79,74 @@ _CAPPED = re.compile(r"<\s*=?\s*[01](?:\.|\s*$|\s*,)|<\s*2(?:\.0)*(?![.\d])|={2,
 # A lower bound that already rules out 1.x (e.g. "mcp>=2.0.0,<3.0.0"): capped, but every install is 2.x.
 _V2_ONLY = re.compile(r">=\s*[2-9]|={2,3}\s*[2-9]|~=\s*[2-9]")
 
-# Packages whose releases require mcp<2, and when a manifest's specifier for
-# them means a fresh install gets one of those releases. Read from PyPI on
-# 2026-10-27 (agno, chainlit, semantic-kernel 2026-11-02); a later release that lifts the cap turns these back into misses.
-#  - google-adk: every 1.x since 1.20 requires mcp<2; 2.x allows mcp<3. So it
-#    caps only when held below 2 (google/adk-recipes: `google-adk>=1.31.0,<2.0.0`).
-#  - langchain-mcp-adapters: only 0.3.2, the newest, requires mcp<2.0.0. So it
-#    caps only with no upper bound or pin (aws-samples/sample-genai-on-eks-starter-kit).
-#  - agno: 2.8.6 up to 3.0.5 require mcp<2, but only through the [mcp] extra;
-#    3.0.6+ require mcp>=2.1. So `agno[mcp]` caps only when held in that range
+# Packages known to keep mcp below 2, as release ranges read from PyPI on
+# 2026-11-02 (`pypi_caps` looks up any other package when online). A manifest's
+# requirement counts only if EVERY release it allows is in the capping range:
+# resolvers differ, and uv backtracks the other package to an older release
+# when `mcp` is listed first, so "the newest release caps" isn't enough
+# (bug #146: `mcp` then `semantic-kernel` resolves mcp 2.3.0 with 1.44.0).
+#   name: (first capping release, first release after the range, newest release,
+#          extras the cap needs or None)
+#  - google-adk: 1.11.0+ require mcp<2; 2.0-2.9 only through [mcp]/[all]/[test];
+#    2.10+ allow mcp<3 (google/adk-recipes: `google-adk>=1.31.0,<2.0.0`).
+#  - langchain-mcp-adapters: only 0.3.2 (the newest) requires mcp<2.
+#  - agno: 2.8.6 to 3.0.5 require mcp<2, only through [mcp]; 3.0.6+ need mcp>=2.1
 #    (IBM/ibmi-mcp-server's client: `agno[mcp]==2.9.0`).
-#  - chainlit: every release since 2.4.0 requires mcp<2 (newest, 2.12.0, too), so it
-#    caps unless held below 2.4.0 (microsoft/mcp-for-beginners 09-CaseStudy: bare
-#    `chainlit` next to a bare `mcp`).
-#  - semantic-kernel: every release since 1.44.1 requires mcp<2 (newest, 1.46.0, too);
-#    1.39.4 to 1.44.0 required mcp>=1.26 with no cap. So it caps unless held below 1.44.1.
-# Not here: strands-agents (mcp<2.2: a fresh install gets 2.1.1), openai-agents (<3).
+#  - chainlit: 2.4.0+ (newest 2.12.0) require mcp<2; older ones don't depend on mcp.
+#  - semantic-kernel: 1.44.1+ (newest 1.46.0) require mcp<2.
+#  - mcp-proxy-for-aws: 1.2.0+ (newest 1.7.0) pin fastmcp 3.2-3.4, whose
+#    fastmcp-slim requires mcp<2; earlier fastmcp ranges let mcp 2.x in.
+# Not here: strands-agents (mcp<2.2 allows 2.1.x), openai-agents (<3).
 _REQ_NAME = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[([^\]]*)\])?\s*([^;#]*)")
+_CAPPING_PACKAGES = {
+    "google-adk": [((1, 11, 0), (2, 0, 0), (2, 13, 0), None), ((1, 11, 0), (2, 10, 0), (2, 13, 0), {"mcp", "all", "test"})],
+    "langchain-mcp-adapters": [((0, 3, 2), (99,), (0, 3, 2), None)],
+    "agno": [((2, 8, 6), (3, 0, 6), (3, 1, 12), {"mcp"})],
+    "chainlit": [((2, 4, 0), (99,), (2, 12, 0), None)],
+    "semantic-kernel": [((1, 44, 1), (99,), (1, 46, 0), None)],
+    "mcp-proxy-for-aws": [((1, 2, 0), (99,), (1, 7, 0), None)],
+}
 
 
 def _ver(text: str) -> tuple[int, ...]:
-    return tuple(int(p) for p in re.findall(r"\d+", text)[:3]) or (0,)
+    return _pad(tuple(int(p) for p in re.findall(r"\d+", text)[:3]))
 
 
-def _held_in(spec: str, low: tuple[int, ...], high: tuple[int, ...], latest: tuple[int, ...] | None = None) -> bool:
-    """Whether the newest release `spec` allows is in [low, high), assuming releases exist up to any bound.
+def _pad(v: tuple[int, ...]) -> tuple[int, ...]:
+    """Three parts, so (1, 2) compares equal to (1, 2, 0), not below it."""
+    return (tuple(v) + (0, 0, 0))[:3]
 
-    With no upper bound or pin, the newest release is `latest` (the newest on PyPI when the table was read)."""
-    clauses = re.findall(r"(===?|~=|<=|>=|!=|<|>|\^|~)\s*([\d][\w.*]*)", spec)
-    newest, inclusive = None, False
-    for op, v in clauses:
+
+def _range_of(spec: str, latest: tuple[int, ...]) -> tuple[tuple[int, ...], tuple[int, ...], bool]:
+    """The (lowest, highest, highest-is-inclusive) releases `spec` can allow."""
+    lo, hi, incl = (0, 0, 0), _pad(latest), True
+    for op, v in re.findall(r"(===?|~=|<=|>=|!=|<|>|\^|~)\s*([\d][\w.*]*)", spec):
         n = _ver(v)
         if op in ("==", "==="):
-            return low <= n < high
+            return n, n, True
+        if op in (">=", ">", "~=", "^", "~"):
+            lo = max(lo, n)
         if op in ("~=", "^", "~"):
-            parts = list(n)
-            if op == "~=" and len(parts) > 1:
-                parts = parts[:-1]
-            elif op == "^" or len(parts) == 1:
-                parts = parts[:1]
+            parts = [int(x) for x in re.findall(r"\d+", v)[:3]]  # as written: ~=2.9 is <3, ~=2.9.1 is <2.10
+            parts = parts[:-1] if op == "~=" and len(parts) > 1 else parts[:1] if (op == "^" or len(parts) == 1) else parts[:2]
             parts[-1] += 1
-            bound, incl = tuple(parts), False
+            if _pad(tuple(parts)) <= hi:
+                hi, incl = _pad(tuple(parts)), False
         elif op in ("<", "<="):
-            bound, incl = n, op == "<="
-        else:
+            if n < hi or (n == hi and op == "<"):
+                hi, incl = n, op == "<="
+    return lo, hi, incl
+
+
+def _always_caps(spec: str, extras: set[str], ranges) -> bool:
+    for low, high, latest, needs in ranges:
+        if needs and not (needs & extras):
             continue
-        if newest is None or bound < newest or (bound == newest and not incl):
-            newest, inclusive = bound, incl
-    if newest is None:
-        return latest is not None and low <= latest < high
-    return (low <= newest < high) if inclusive else (low < newest <= high)
-
-
-_CAPPING_PACKAGES = {
-    "google-adk": lambda spec, extras: bool(re.search(r"<\s*2(?:\.0)*(?![.\d])|<=?\s*1\.", spec))
-    and not re.search(r"={2,3}\s*1\.(?:1?\d)(?![\d])", spec),
-    "langchain-mcp-adapters": lambda spec, extras: not re.search(r"[<=~^]", spec.replace(">=", "")),
-    "agno": lambda spec, extras: "mcp" in extras and _held_in(spec, (2, 8, 6), (3, 0, 6)),
-    "chainlit": lambda spec, extras: _held_in(spec, (2, 4, 0), (99,), latest=(2, 12, 0)),
-    "semantic-kernel": lambda spec, extras: _held_in(spec, (1, 44, 1), (99,), latest=(1, 46, 0)),
-}
+        low, high = _pad(low), _pad(high)
+        lo, hi, incl = _range_of(spec, latest)
+        if lo >= low and (hi < high if incl else hi <= high):
+            return True
+    return False
 
 
 def _is_removed_module(name: str) -> bool:
@@ -272,8 +281,13 @@ def _first_removed_import(tree: ast.Module) -> tuple[int, str] | None:
     return min(hits) if hits else None
 
 
-def _pyproject_requirements(text: str) -> list[str] | None:
-    """Requirement strings from a pyproject's dependency tables, or None without a TOML parser."""
+def _pyproject_requirements(text: str, base_only: bool = False) -> list[str] | None:
+    """Requirement strings from a pyproject's dependency tables, or None without a TOML parser.
+
+    `base_only`: just `[project].dependencies`, what every install gets. A cap in an
+    optional extra or dependency group isn't guaranteed to be installed next to the
+    server that needs it (temporalio/samples-python: the cap is in `google-genai`,
+    the server that breaks installs `google-adk`)."""
     try:
         import tomllib  # Python 3.11+
     except ImportError:
@@ -288,6 +302,8 @@ def _pyproject_requirements(text: str) -> list[str] | None:
     reqs: list[str] = []
     project = data.get("project") or {}
     reqs += project.get("dependencies") or []
+    if base_only:
+        return [r for r in reqs if isinstance(r, str)]
     for group in (project.get("optional-dependencies") or {}).values():
         reqs += group or []
     for group in (data.get("dependency-groups") or {}).values():
@@ -345,19 +361,29 @@ def _capping_package(manifest: Path) -> str | None:
     if manifest.name == "requirements.txt":
         reqs = text.splitlines()
     elif manifest.name == "pyproject.toml":
-        reqs = _pyproject_requirements(text) or []
+        reqs = _pyproject_requirements(text, base_only=True) or []
     else:
         return None
+    others: list[tuple[str, str, set[str]]] = []
     for req in reqs:
+        req = req.split("#", 1)[0].strip()
+        if not req or req.startswith("-") or "://" in req or " @ " in req:
+            continue
         m = _REQ_NAME.match(req)
         if not m:
             continue
         name = re.sub(r"[._]", "-", m.group(1).lower())
-        capped = _CAPPING_PACKAGES.get(name)
-        extras = {e.strip().lower() for e in (m.group(2) or "").split(",")}
-        if capped and capped(m.group(3).strip(), extras):
-            return name
-    return None
+        if name == "mcp":
+            continue
+        ranges = _CAPPING_PACKAGES.get(name)
+        extras = {e.strip().lower() for e in (m.group(2) or "").split(",") if e.strip()}
+        if ranges:
+            if _always_caps(m.group(3).strip(), extras, ranges):
+                return name
+            continue
+        others.append((name, m.group(3).strip(), extras))
+    # Not on the list: ask PyPI (skipped offline; any failure keeps the finding).
+    return pypi_caps.first_capping(others)
 
 
 def _declaring_manifest(path: Path, root: Path) -> tuple[Path, str] | None:

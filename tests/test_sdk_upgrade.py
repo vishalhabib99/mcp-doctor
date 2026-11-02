@@ -251,7 +251,7 @@ def test_a_co_installed_package_that_caps_mcp_below_2(tmp_path):
         dependencies = ["google-adk>=1.31.0,<2.0.0", "mcp[cli]>=1.27.0"]
         """)
     write(tmp_path, "lc/server.py", SERVER_V1.replace('"x"', '"lc"'))
-    write(tmp_path, "lc/requirements.txt", "langchain-mcp-adapters\nlanggraph\nmcp\n")
+    write(tmp_path, "lc/requirements.txt", "langchain-mcp-adapters>=0.3.2\nlanggraph\nmcp\n")
     assert sdk_v2(tmp_path) == []
 
 
@@ -261,9 +261,9 @@ def test_agno_with_the_mcp_extra_held_below_3_0_6_caps_mcp(tmp_path):
     # fresh install resolves mcp 1.30.0 and the 1.x import works.
     for name, dep in (
         ("pin", "agno[mcp]==2.9.0"),
-        ("below3", "agno[mcp,openai]>=2.0,<3"),
+        ("below3", "agno[mcp,openai]>=2.9,<3"),
         ("compat", "agno[mcp]~=2.9"),
-        ("le", "agno[mcp]<=3.0.5"),
+        ("le", "agno[mcp]>=2.8.6,<=3.0.5"),
     ):
         write(tmp_path, f"{name}/server.py", SERVER_V1.replace('"x"', f'"{name}"'))
         write(tmp_path, f"{name}/pyproject.toml", f"""
@@ -291,13 +291,11 @@ def test_agno_that_still_lets_mcp_2_in(tmp_path):
 
 
 def test_chainlit_or_semantic_kernel_cap_mcp(tmp_path):
-    # microsoft/mcp-for-beginners 09-CaseStudy/docs-mcp: `chainlit`, `mcp` and
-    # `semantic-kernel`, all bare. chainlit 2.4.0+ and semantic-kernel 1.44.1+
-    # require mcp<2, so a fresh install resolves mcp 1.30.0.
+    # chainlit 2.4.0+ and semantic-kernel 1.44.1+ require mcp<2, so a range
+    # that only allows those releases keeps mcp on 1.x whatever the resolver does.
     for name, reqs in (
-        ("case", "chainlit\nmcp\nsemantic-kernel\n"),
         ("cl", "chainlit>=2.6\nmcp>=1.20\n"),
-        ("sk", "semantic-kernel>=1.40\nmcp\n"),
+        ("sk", "semantic-kernel>=1.44.1\nmcp\n"),
         ("skpin", "semantic-kernel==1.45.0\nmcp\n"),
     ):
         write(tmp_path, f"{name}/server.py", SERVER_V1.replace('"x"', f'"{name}"'))
@@ -305,16 +303,40 @@ def test_chainlit_or_semantic_kernel_cap_mcp(tmp_path):
     assert sdk_v2(tmp_path) == []
 
 
-def test_chainlit_or_semantic_kernel_held_below_their_cap(tmp_path):
+def test_chainlit_or_semantic_kernel_that_may_let_mcp_2_in(tmp_path):
     # chainlit before 2.4.0 and semantic-kernel before 1.44.1 don't cap mcp.
+    # Bare or loose requirements stay flagged too (bug #146): they allow an older
+    # release without the cap, and a resolver that takes the newest mcp first
+    # backtracks to it. uv resolves `mcp>=1.9` then `semantic-kernel` to mcp
+    # 2.3.0 with semantic-kernel 1.44.0. (mcp-for-beginners' 09-CaseStudy lists
+    # bare chainlit, mcp and semantic-kernel.)
     for name, reqs in (
         ("cl", "chainlit<2.4\nmcp\n"),
         ("sk", "semantic-kernel<1.44.1\nmcp\n"),
         ("skpin", "semantic-kernel==1.40.0\nmcp\n"),
+        ("case", "chainlit\nmcp\nsemantic-kernel\n"),
+        ("mcpfirst", "mcp>=1.9\nsemantic-kernel\n"),
+        ("sk140", "semantic-kernel>=1.40\nmcp\n"),
+        ("lc", "langchain-mcp-adapters\nmcp\n"),
     ):
         write(tmp_path, f"{name}/server.py", SERVER_V1.replace('"x"', f'"{name}"'))
         write(tmp_path, f"{name}/requirements.txt", reqs)
-    assert len(sdk_v2(tmp_path)) == 3
+    assert len(sdk_v2(tmp_path)) == 7
+
+
+def test_mcp_proxy_for_aws_caps_mcp_offline(tmp_path):
+    # aws-samples/sample-agent-platform-with-agentcore runtimes/agent-sdk-kernel:
+    # `mcp-proxy-for-aws>=0.1.0` next to `mcp>=1.9.0`. mcp-proxy-for-aws 1.2.0+
+    # pins fastmcp 3.2-3.4, whose fastmcp-slim requires mcp<2: resolves 1.30.0.
+    # Known without PyPI; before 1.2.0 it doesn't cap.
+    # Only a range inside 1.2.0+ is sure to cap: `>=0.1.0` (the sample's own line)
+    # allows 1.1.x, and with `mcp` listed first uv picks 1.1.6 and mcp 2.3.0.
+    for name, reqs in (("cur", "mcp-proxy-for-aws>=1.2\nmcp>=1.9.0\n"), ("old", "mcp-proxy-for-aws<1.2\nmcp>=1.9.0\n"),
+                       ("loose", "mcp-proxy-for-aws>=0.1.0\nmcp>=1.9.0\n")):
+        write(tmp_path, f"{name}/server.py", SERVER_V1.replace('"x"', f'"{name}"'))
+        write(tmp_path, f"{name}/requirements.txt", reqs)
+    msgs = sdk_v2(tmp_path)
+    assert len(msgs) == 2 and not any("cur/server.py" in m for m in msgs)
 
 
 def test_a_co_installed_package_that_still_allows_mcp_2(tmp_path):
@@ -329,3 +351,31 @@ def test_a_co_installed_package_that_still_allows_mcp_2(tmp_path):
         write(tmp_path, f"{name}/server.py", SERVER_V1.replace('"x"', f'"{name}"'))
         write(tmp_path, f"{name}/requirements.txt", reqs)
     assert len(sdk_v2(tmp_path)) == 3
+
+
+def test_release_range_of_a_specifier():
+    from mcp_doctor.sdk_upgrade import _range_of
+    latest = (9, 9, 9)
+    assert _range_of("~=2.9", latest) == ((2, 9, 0), (3, 0, 0), False)
+    assert _range_of("~=2.9.1", latest) == ((2, 9, 1), (2, 10, 0), False)
+    assert _range_of(">=1.2,<2", latest) == ((1, 2, 0), (2, 0, 0), False)
+    assert _range_of("==2.9.0", latest) == ((2, 9, 0), (2, 9, 0), True)
+    assert _range_of("<=3.0.5", latest) == ((0, 0, 0), (3, 0, 5), True)
+    assert _range_of("", latest) == ((0, 0, 0), (9, 9, 9), True)
+
+
+def test_a_cap_in_an_optional_group_does_not_count(tmp_path):
+    # temporalio/samples-python: `mcp>=1.0.0` in one dependency group and the
+    # capping `temporalio-google-genai[mcp]` in another; the echo server's own
+    # group resolves mcp 2.3.0. Only [project].dependencies are sure to be installed.
+    write(tmp_path, "server.py", SERVER_V1)
+    write(tmp_path, "pyproject.toml", """
+        [project]
+        name = "x"
+        dependencies = []
+
+        [dependency-groups]
+        genai = ["chainlit>=2.6"]
+        agents = ["mcp>=1.0.0"]
+        """)
+    assert len(sdk_v2(tmp_path)) == 1
