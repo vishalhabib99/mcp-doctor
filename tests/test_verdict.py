@@ -150,6 +150,13 @@ def test_sdk_v2_finding_outside_the_breakage_list_still_needs_a_fix():
     assert d.verdict == FIX_FIRST
 
 
+def test_sdk_v2_warning_only_needs_a_fix_and_says_may():
+    # Only a co-installed package's newest release keeps mcp on 1.x (bug #147): not a block.
+    d = decide(_doctor(repo_issues=[_issue("sdk_v2", "warning")]), None, None)
+    assert d.verdict == FIX_FIRST
+    assert any("can still pick it" in f for f in d.fixes)
+
+
 def test_verdict_cli_blocks_the_one_bug_example(capsys):
     from mcp_doctor.cli import main
 

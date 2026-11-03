@@ -95,7 +95,8 @@ def _find(report: Report) -> list[Breakage]:
                 out.append(Breakage(i.check, tool, i.file, i.line, kind.breaks, kind.fix, kind.evidence, i.message))
     for i in report.repo_issues:
         kind = KINDS.get(i.check)
-        if kind and not _NOT_SERVED.search(i.message.split(" ", 1)[0]):
+        # A warning (sdk_v2 when only the newest co-installed release caps mcp) may not break anything today.
+        if kind and i.severity == "error" and not _NOT_SERVED.search(i.message.split(" ", 1)[0]):
             # sdk_v2 messages start with "path:line `import`"; keep that as the location.
             where = i.message.split(" ", 1)[0]
             file, _, line = where.rpartition(":")

@@ -94,7 +94,11 @@ def decide(doctor: dict | None, fuzz: dict | None, reality: dict | None) -> Deci
         if quality_errors:
             fixes.append(f"static scan: {_count(len(quality_errors), 'spec/documentation error')}")
         if sdk_v2 and not any(b.get("check") == "sdk_v2" for b in breakages):
-            fixes.append("static scan: a fresh install gets mcp 2.x, which removed an import the server uses (pin 'mcp<2' or migrate)")
+            if any(i.get("severity") == "error" for i in sdk_v2):
+                fixes.append("static scan: a fresh install gets mcp 2.x, which removed an import the server uses (pin 'mcp<2' or migrate)")
+            else:
+                fixes.append("static scan: mcp 2.x, which removed an import the server uses, is only kept out by a co-installed "
+                             "package's newest release; a resolver can still pick it (pin 'mcp<2' or migrate)")
 
     if fuzz is not None:
         if fuzz.get("connect_error"):

@@ -17,7 +17,10 @@ setup.py or requirements.txt that declares `mcp` (the files the in-browser
 check also downloads); a server that declares none isn't flagged, since
 which `mcp` it gets can't be known. Nor is one whose manifest also asks for
 a package that itself requires mcp<2 (`_CAPPING_PACKAGES`): the resolver
-keeps mcp on 1.x for it.
+keeps mcp on 1.x for it. When only the newest release it allows caps mcp
+(older allowed ones don't) and it's listed above `mcp`, pip and uv install
+mcp 1.x today but a resolver may still backtrack to the uncapped release, so
+that's a warning, not an error. Listed below `mcp`, uv takes mcp 2.x: an error.
 """
 
 from __future__ import annotations
@@ -145,6 +148,17 @@ def _always_caps(spec: str, extras: set[str], ranges) -> bool:
         low, high = _pad(low), _pad(high)
         lo, hi, incl = _range_of(spec, latest)
         if lo >= low and (hi < high if incl else hi <= high):
+            return True
+    return False
+
+
+def _newest_caps(spec: str, extras: set[str], ranges) -> bool:
+    """The newest release `spec` allows (what pip and uv pick first) is in a capping range."""
+    for low, high, latest, needs in ranges:
+        if needs and not (needs & extras):
+            continue
+        _, hi, incl = _range_of(spec, latest)
+        if incl and _pad(low) <= hi < _pad(high):
             return True
     return False
 
@@ -352,8 +366,13 @@ def _mcp_requirement(manifest: Path) -> str | None:
     return (m.group(1) or "").strip() if m else None
 
 
-def _capping_package(manifest: Path) -> str | None:
-    """A package `manifest` also asks for whose release a fresh install gets requires mcp<2."""
+def _capping_package(manifest: Path) -> tuple[str, bool] | None:
+    """A package `manifest` also asks for that keeps mcp below 2, and whether it's sure to.
+
+    (name, True): every release its requirement allows caps mcp.
+    (name, False): only the newest allowed release does; resolvers pick that one
+    today, but one that backtracks can reach an older, uncapped release.
+    """
     try:
         text = manifest.read_text(errors="ignore")
     except OSError:
@@ -365,6 +384,9 @@ def _capping_package(manifest: Path) -> str | None:
     else:
         return None
     others: list[tuple[str, str, set[str]]] = []
+    before_mcp: list[tuple[str, str, set[str]]] = []  # listed above `mcp`
+    newest: str | None = None
+    seen_mcp = False
     for req in reqs:
         req = req.split("#", 1)[0].strip()
         if not req or req.startswith("-") or "://" in req or " @ " in req:
@@ -374,16 +396,33 @@ def _capping_package(manifest: Path) -> str | None:
             continue
         name = re.sub(r"[._]", "-", m.group(1).lower())
         if name == "mcp":
+            seen_mcp = True
             continue
         ranges = _CAPPING_PACKAGES.get(name)
         extras = {e.strip().lower() for e in (m.group(2) or "").split(",") if e.strip()}
         if ranges:
             if _always_caps(m.group(3).strip(), extras, ranges):
-                return name
+                return name, True
+            # Only when listed above `mcp`: with `mcp` first, uv takes mcp 2.3.0 and backtracks
+            # semantic-kernel, langchain-mcp-adapters and mcp-proxy-for-aws to uncapped releases.
+            if newest is None and not seen_mcp and _newest_caps(m.group(3).strip(), extras, ranges):
+                newest = name
             continue
         others.append((name, m.group(3).strip(), extras))
+        if not seen_mcp:
+            before_mcp.append(others[-1])
     # Not on the list: ask PyPI (skipped offline; any failure keeps the finding).
-    return pypi_caps.first_capping(others)
+    looked_up = pypi_caps.first_capping(others)
+    if looked_up and looked_up[1]:
+        return looked_up
+    if newest:
+        return newest, False
+    if looked_up and before_mcp:
+        partial = pypi_caps.first_capping(before_mcp)
+        # A partial reads "name version requires mcp<2"; the message wants the name.
+        if partial:
+            return partial[0].split(" ", 1)[0], False
+    return None
 
 
 def _declaring_manifest(path: Path, root: Path) -> tuple[Path, str] | None:
@@ -416,7 +455,7 @@ def _lock_note(manifest: Path) -> str:
 
 def scan_sdk_v2_breakage(root: Path, trees: list[tuple[str, ast.Module]]) -> list[RepoIssue]:
     """One issue per manifest whose uncapped `mcp` lets a v1-only import crash on install."""
-    by_manifest: dict[Path, tuple[str, str, int, str]] = {}
+    by_manifest: dict[Path, tuple[str, str, int, str, str | None]] = {}
     for rel, tree in trees:
         hit = _first_removed_import(tree)
         if not hit:
@@ -425,11 +464,14 @@ def scan_sdk_v2_breakage(root: Path, trees: list[tuple[str, ast.Module]]) -> lis
         if not found:
             continue
         manifest, spec = found
-        if _CAPPED.search(spec) or _capping_package(manifest):
+        if _CAPPED.search(spec):
             continue
-        by_manifest.setdefault(manifest, (rel, spec, *hit))
+        capper = _capping_package(manifest)
+        if capper and capper[1]:
+            continue
+        by_manifest.setdefault(manifest, (rel, spec, *hit, capper[0] if capper else None))
     issues = []
-    for manifest, (rel, spec, line, what) in sorted(by_manifest.items()):
+    for manifest, (rel, spec, line, what, held_by) in sorted(by_manifest.items()):
         req = f"mcp{spec}" if spec else "mcp"
         if "fastmcp" in what or "FastMCP" in what:
             fix = "migrate to MCPServer (`from mcp.server.mcpserver import MCPServer`)"
@@ -444,6 +486,20 @@ def scan_sdk_v2_breakage(root: Path, trees: list[tuple[str, ast.Module]]) -> lis
         else:
             bound = " with no upper bound"
         bound += _lock_note(manifest)
+        crash = f"{'AttributeError' if what.startswith('@') else 'ImportError'}"
+        if held_by:
+            # chainlit's newest release requires mcp<2, so pip and uv install mcp 1.30
+            # in either order, but chainlit<2.4 allows mcp 2.x (mcp-for-beginners 09-CaseStudy).
+            issues.append(RepoIssue(
+                "sdk_v2",
+                f"{rel}:{line} `{what}` was removed in mcp 2.x, and {manifest.relative_to(root)} asks for "
+                f"'{req}'{bound}. The newest {held_by} requires mcp<2, so pip and uv install mcp 1.x today, "
+                f"but older {held_by} releases the manifest also allows don't, so a resolver can still pick mcp 2.x "
+                f"and the server would fail to start with an {crash}. Pin 'mcp<2' (or a {held_by} range that caps it), "
+                f"or {fix}: {_MIGRATION_URL}",
+                "warning",
+            ))
+            continue
         issues.append(RepoIssue(
             "sdk_v2",
             f"{rel}:{line} `{what}` was removed in mcp 2.x, and {manifest.relative_to(root)} asks for "

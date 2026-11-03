@@ -108,3 +108,19 @@ def test_sdk_v2_uses_the_lookup_when_online(tmp_path, online):
         _write(tmp_path, f"{name}/requirements.txt", reqs)
     flagged = [i.message for i in analyze_repo(tmp_path).repo_issues if i.check == "sdk_v2"]
     assert len(flagged) == 1 and "open/server.py" in flagged[0]
+
+
+def test_only_the_newest_release_capping_is_a_warning(tmp_path, online):
+    # "outer-mcp" unbounded: 3.1.0 (the newest) needs mcp>=2.1, so not even partial.
+    # "proxy" unbounded: 2.0.0 (the newest) caps through outer-mcp 2.5.0, but 1.0.0
+    # doesn't, so pip/uv pick the capped one today and a backtracking resolver might not.
+    assert pypi_caps.first_capping([("proxy", "", set())]) == (
+        "proxy 2.0.0 -> outer-mcp 2.5.0 -> outer-mcp-slim 2.5.0 requires mcp<2.0,>=1.24", False)
+    assert pypi_caps.first_capping([("outer-mcp", "", set())]) is None
+    assert pypi_caps.first_capping([("proxy", "", set()), ("direct", "", set())])[1] is True
+    for name, reqs in (("above", "proxy\nmcp>=1.9\n"), ("below", "mcp>=1.9\nproxy\n")):
+        _write(tmp_path, f"{name}/server.py", SERVER_V1.replace('"x"', f'"{name}"'))
+        _write(tmp_path, f"{name}/requirements.txt", reqs)
+    found = {i.message.split("/")[0]: i for i in analyze_repo(tmp_path).repo_issues if i.check == "sdk_v2"}
+    assert found["above"].severity == "warning" and "The newest proxy requires mcp<2" in found["above"].message
+    assert found["below"].severity == "error"  # with mcp first, uv takes mcp 2.x

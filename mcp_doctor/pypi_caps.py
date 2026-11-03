@@ -189,10 +189,28 @@ def caps_mcp(name: str, spec: str, extras: set[str], depth: int = 0, budget: _Bu
     return f"{_norm(name)} {span} {why}"
 
 
-def first_capping(reqs: list[tuple[str, str, set[str]]]) -> str | None:
-    """Of a manifest's other requirements, the first chain that keeps mcp below 2 (looked up in parallel)."""
+def newest_caps_mcp(name: str, spec: str, extras: set[str]) -> str | None:
+    """Why the newest release `spec` allows (what pip and uv pick first) keeps mcp below 2, or None."""
+    versions = _allowed(name, spec)
+    if not versions:
+        return None
+    why = _release_caps(name, versions[-1], extras, 0, _Budget(_MAX_RELEASES))
+    return f"{_norm(name)} {versions[-1]} {why}" if why else None
+
+
+def first_capping(reqs: list[tuple[str, str, set[str]]]) -> tuple[str, bool] | None:
+    """Of a manifest's other requirements, the first chain that keeps mcp below 2 (looked up in parallel).
+
+    (why, True) if every release a requirement allows caps mcp; else (why, False)
+    if the newest allowed release of one does; else None.
+    """
     if offline() or not reqs:
         return None
     with ThreadPoolExecutor(max_workers=min(8, len(reqs))) as ex:
         results = list(ex.map(lambda r: caps_mcp(*r), reqs))
-    return next((r for r in results if r), None)
+        sure = next((r for r in results if r), None)
+        if sure:
+            return sure, True
+        newest = list(ex.map(lambda r: newest_caps_mcp(*r), reqs))
+    partial = next((r for r in newest if r), None)
+    return (partial, False) if partial else None

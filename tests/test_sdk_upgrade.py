@@ -303,25 +303,59 @@ def test_chainlit_or_semantic_kernel_cap_mcp(tmp_path):
     assert sdk_v2(tmp_path) == []
 
 
-def test_chainlit_or_semantic_kernel_that_may_let_mcp_2_in(tmp_path):
-    # chainlit before 2.4.0 and semantic-kernel before 1.44.1 don't cap mcp.
-    # Bare or loose requirements stay flagged too (bug #146): they allow an older
-    # release without the cap, and a resolver that takes the newest mcp first
-    # backtracks to it. uv resolves `mcp>=1.9` then `semantic-kernel` to mcp
-    # 2.3.0 with semantic-kernel 1.44.0. (mcp-for-beginners' 09-CaseStudy lists
-    # bare chainlit, mcp and semantic-kernel.)
+def sdk_v2_by_severity(tmp_path: Path) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    for i in analyze_repo(tmp_path).repo_issues:
+        if i.check == "sdk_v2":
+            out.setdefault(i.severity, []).append(i.message)
+    return out
+
+
+def test_chainlit_or_semantic_kernel_that_let_mcp_2_in(tmp_path):
+    # chainlit before 2.4.0 and semantic-kernel before 1.44.1 don't cap mcp:
+    # every release these ranges allow lets mcp 2.x in, so it's an error.
+    # Listed below `mcp`, an unbounded one is an error too: uv resolves `mcp>=1.9`
+    # then `semantic-kernel` to mcp 2.3.0 with semantic-kernel 1.44.0 (and the
+    # same for langchain-mcp-adapters 0.3.1, mcp-proxy-for-aws 1.1.6; IBM/smith).
     for name, reqs in (
         ("cl", "chainlit<2.4\nmcp\n"),
         ("sk", "semantic-kernel<1.44.1\nmcp\n"),
         ("skpin", "semantic-kernel==1.40.0\nmcp\n"),
-        ("case", "chainlit\nmcp\nsemantic-kernel\n"),
         ("mcpfirst", "mcp>=1.9\nsemantic-kernel\n"),
-        ("sk140", "semantic-kernel>=1.40\nmcp\n"),
-        ("lc", "langchain-mcp-adapters\nmcp\n"),
+        ("lcfirst", "mcp\nlangchain-mcp-adapters\n"),
+        ("proxyfirst", "mcp>=1.9.0\nmcp-proxy-for-aws>=0.1.0\n"),
     ):
         write(tmp_path, f"{name}/server.py", SERVER_V1.replace('"x"', f'"{name}"'))
         write(tmp_path, f"{name}/requirements.txt", reqs)
-    assert len(sdk_v2(tmp_path)) == 7
+    found = sdk_v2_by_severity(tmp_path)
+    assert len(found.get("error", [])) == 6 and not found.get("warning")
+
+
+def test_only_the_newest_co_installed_release_caps_mcp_is_a_warning(tmp_path):
+    # Bare or loose ranges whose newest release caps mcp but older ones don't,
+    # listed above `mcp` (bug #146 made these errors; bug #147 makes them
+    # warnings). pip and uv install mcp 1.30.0 for mcp-for-beginners'
+    # 09-CaseStudy (bare chainlit, mcp, semantic-kernel), so an ERROR that
+    # blocks was a false alarm; but a backtracking resolver could still reach
+    # an uncapped release, so it doesn't go silent either.
+    for name, reqs in (
+        ("case", "chainlit\nmcp\nsemantic-kernel\n"),
+        ("cl", "chainlit\nmcp\n"),
+        ("sk", "semantic-kernel\nmcp>=1.9\n"),
+        ("sk140", "semantic-kernel>=1.40\nmcp\n"),
+        ("lc", "langchain-mcp-adapters\nmcp\n"),
+        ("proxy", "mcp-proxy-for-aws>=0.1.0\nmcp>=1.9.0\n"),
+    ):
+        write(tmp_path, f"{name}/server.py", SERVER_V1.replace('"x"', f'"{name}"'))
+        write(tmp_path, f"{name}/requirements.txt", reqs)
+    found = sdk_v2_by_severity(tmp_path)
+    assert not found.get("error")
+    assert len(found["warning"]) == 6
+    case = next(m for m in found["warning"] if m.startswith("case/"))
+    assert "The newest chainlit requires mcp<2" in case and "pip and uv install mcp 1.x today" in case
+    report = analyze_repo(tmp_path)
+    from mcp_doctor import breakages
+    assert breakages.find(report) == []
 
 
 def test_mcp_proxy_for_aws_caps_mcp_offline(tmp_path):
@@ -335,8 +369,9 @@ def test_mcp_proxy_for_aws_caps_mcp_offline(tmp_path):
                        ("loose", "mcp-proxy-for-aws>=0.1.0\nmcp>=1.9.0\n")):
         write(tmp_path, f"{name}/server.py", SERVER_V1.replace('"x"', f'"{name}"'))
         write(tmp_path, f"{name}/requirements.txt", reqs)
-    msgs = sdk_v2(tmp_path)
-    assert len(msgs) == 2 and not any("cur/server.py" in m for m in msgs)
+    found = sdk_v2_by_severity(tmp_path)
+    assert [m.split(":")[0] for m in found["error"]] == ["old/server.py"]
+    assert [m.split(":")[0] for m in found["warning"]] == ["loose/server.py"]
 
 
 def test_a_co_installed_package_that_still_allows_mcp_2(tmp_path):
