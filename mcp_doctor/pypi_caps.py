@@ -15,6 +15,7 @@ Approximations, on purpose:
   contains "mcp", are followed (up to `_MAX_DEPTH` levels), so a lookup
   costs a few requests, not a crawl of boto3's tree.
 - Markers other than `extra == ...` are treated as true.
+- Prereleases are read only when a requirement pins one exactly.
 
 Any failure (no network, Pyodide, timeout, odd metadata) means "unknown",
 and the finding stays. `MCP_DOCTOR_OFFLINE=1` turns lookups off.
@@ -35,6 +36,7 @@ _INDEX = "https://pypi.org/pypi"
 _cache: dict[str, object] = {}
 
 _FINAL = re.compile(r"^\d+(?:\.\d+)*$")
+_EXACT_PIN = re.compile(r"^\s*={2,3}\s*([^\s,;*]+)\s*$")
 _CLAUSE = re.compile(r"(===|==|!=|~=|<=|>=|<|>)\s*([0-9][0-9A-Za-z.*+!-]*)")
 _REQ = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[([^\]]*)\])?\s*\(?([^;()]*)\)?\s*(?:;(.*))?$")
 # Keeps mcp below 2: <2, <2.0, <1.x, <=1.x, ==1.x, ~=1.x.
@@ -107,8 +109,15 @@ def _allowed(name: str, spec: str) -> list[str] | None:
     data = _get(f"{_INDEX}/{_norm(name)}/json")
     if not isinstance(data, dict):
         return None
+    releases = data.get("releases") or {}
+    pin = _EXACT_PIN.match(spec)
+    if pin and not _FINAL.match(pin.group(1)):
+        # pip and uv take an exactly pinned prerelease (microsoft/frontiertour27-BRK240:
+        # agent-framework-foundry-hosting==1.0.0a260709, which requires mcp<2).
+        files = releases.get(pin.group(1))
+        return [pin.group(1)] if files and not all(f.get("yanked") for f in files) else []
     versions = [
-        v for v, files in (data.get("releases") or {}).items()
+        v for v, files in releases.items()
         if _FINAL.match(v) and files and not all(f.get("yanked") for f in files) and satisfies(v, spec)
     ]
     return sorted(versions, key=_ver)

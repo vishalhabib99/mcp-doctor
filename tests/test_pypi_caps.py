@@ -26,6 +26,8 @@ FAKE = {
     "extra-only": {"1.0.0": ['mcp<2; extra == "mcp"']},
     "loose": {"1.0.0": ["mcp>=1.2"]},
     "boto3": {"1.0.0": []},
+    "pre-capped": {"0.9.0": ["mcp>=1.2"], "1.0.0a260709": ["mcp<2,>=1.24.0"]},
+    "pre-loose": {"1.0.0b1": ["mcp>=1.2"]},
 }
 
 
@@ -124,3 +126,26 @@ def test_only_the_newest_release_capping_is_a_warning(tmp_path, online):
     found = {i.message.split("/")[0]: i for i in analyze_repo(tmp_path).repo_issues if i.check == "sdk_v2"}
     assert found["above"].severity == "warning" and "The newest proxy requires mcp<2" in found["above"].message
     assert found["below"].severity == "error"  # with mcp first, uv takes mcp 2.x
+
+
+def test_an_exact_pin_to_a_prerelease_is_looked_up(tmp_path, online):
+    # microsoft/frontiertour27-BRK240: agent-framework-foundry-hosting==1.0.0a260709
+    # requires mcp<2 and uv resolves mcp 1.30.0, but only final releases were read,
+    # so the lookup came back "unknown". pip and uv both take an explicitly pinned
+    # prerelease, and it's the only release this requirement allows.
+    assert pypi_caps.caps_mcp("pre-capped", "==1.0.0a260709", set()) == (
+        "pre-capped 1.0.0a260709 requires mcp<2,>=1.24.0"
+    )
+    assert pypi_caps.caps_mcp("pre-loose", "==1.0.0b1", set()) is None
+    # Only an exact pin: a range still reads final releases, as before.
+    assert pypi_caps.caps_mcp("pre-capped", ">=0.9", set()) is None
+    assert pypi_caps.caps_mcp("pre-capped", "==2.0.0a1", set()) is None
+
+
+def test_a_manifest_pinning_a_capped_prerelease_is_not_flagged(tmp_path, online):
+    (tmp_path / "server.py").write_text(dedent(SERVER_V1))
+    (tmp_path / "requirements.txt").write_text("pre-capped==1.0.0a260709\nmcp>=1.0.0")
+    assert not [i for i in analyze_repo(tmp_path).repo_issues if i.check == "sdk_v2"]
+    (tmp_path / "requirements.txt").write_text("pre-loose==1.0.0b1\nmcp>=1.0.0")
+    pypi_caps._cache.clear()
+    assert [i for i in analyze_repo(tmp_path).repo_issues if i.check == "sdk_v2"]

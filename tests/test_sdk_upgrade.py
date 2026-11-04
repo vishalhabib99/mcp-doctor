@@ -414,3 +414,51 @@ def test_a_cap_in_an_optional_group_does_not_count(tmp_path):
         agents = ["mcp>=1.0.0"]
         """)
     assert len(sdk_v2(tmp_path)) == 1
+
+
+def test_a_project_testing_both_mcp_majors_is_not_flagged(tmp_path):
+    # braintrustdata/braintrust-sdk-python: test groups pin mcp>=2.2,<3 and mcp==1.30.0,
+    # with _server_v1.py and _server_v2.py. `mcp` isn't a runtime dependency at all, and
+    # the old result depended on which group came first.
+    write(tmp_path, "client.py", """
+        def send():
+            from mcp.shared.session import BaseSession
+            return BaseSession
+        """)
+    for first, second in (("mcp>=2.2.0,<3", "mcp==1.30.0"), ("mcp==1.30.0", "mcp>=2.2.0,<3")):
+        write(tmp_path, "pyproject.toml", f"""
+            [project]
+            name = "x"
+            dependencies = []
+
+            [dependency-groups]
+            a = ["{first}"]
+            b = ["{second}"]
+            """)
+        assert sdk_v2(tmp_path) == []
+
+
+def test_only_a_v2_or_uncapped_group_is_still_flagged(tmp_path):
+    # Nothing here says the v1 import is deliberate.
+    write(tmp_path, "server.py", SERVER_V1)
+    for spec in ("mcp>=2.2.0,<3", "mcp>=1.0.0"):
+        write(tmp_path, "pyproject.toml", f"""
+            [project]
+            name = "x"
+            dependencies = []
+
+            [dependency-groups]
+            a = ["{spec}"]
+            """)
+        assert len(sdk_v2(tmp_path)) == 1
+    # An uncapped dependency next to a 1.x pin isn't a two-major test matrix either.
+    write(tmp_path, "pyproject.toml", """
+        [project]
+        name = "x"
+        dependencies = ["mcp>=1.0.0"]
+
+        [dependency-groups]
+        a = ["mcp==1.30.0"]
+        """)
+    assert len(sdk_v2(tmp_path)) == 1
+

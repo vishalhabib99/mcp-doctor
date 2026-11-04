@@ -21,6 +21,8 @@ keeps mcp on 1.x for it. When only the newest release it allows caps mcp
 (older allowed ones don't) and it's listed above `mcp`, pip and uv install
 mcp 1.x today but a resolver may still backtrack to the uncapped release, so
 that's a warning, not an error. Listed below `mcp`, uv takes mcp 2.x: an error.
+A pyproject that pins mcp to 1.x in one place and 2.x in another isn't flagged
+either: it tests both majors, so its v1 imports are deliberate.
 """
 
 from __future__ import annotations
@@ -366,6 +368,23 @@ def _mcp_requirement(manifest: Path) -> str | None:
     return (m.group(1) or "").strip() if m else None
 
 
+def _tests_both_majors(manifest: Path) -> bool:
+    """A pyproject that pins `mcp` to 1.x in one place and 2.x in another supports both on purpose.
+
+    braintrustdata/braintrust-sdk-python: test groups with mcp==1.30.0 and mcp>=2.2,<3, and
+    _server_v1.py next to _server_v2.py, so its v1 imports are the 1.x path, not a crash.
+    Both pins have to be there: one uncapped requirement says nothing about intent.
+    """
+    if manifest.name != "pyproject.toml":
+        return False
+    try:
+        reqs = _pyproject_requirements(manifest.read_text(errors="ignore")) or []
+    except OSError:
+        return False
+    specs = [(m.group(1) or "").strip() for m in map(_REQ_LINE.match, reqs) if m]
+    return any(_V2_ONLY.search(s) for s in specs) and any(_CAPPED.search(s) and not _V2_ONLY.search(s) for s in specs)
+
+
 def _capping_package(manifest: Path) -> tuple[str, bool] | None:
     """A package `manifest` also asks for that keeps mcp below 2, and whether it's sure to.
 
@@ -464,7 +483,7 @@ def scan_sdk_v2_breakage(root: Path, trees: list[tuple[str, ast.Module]]) -> lis
         if not found:
             continue
         manifest, spec = found
-        if _CAPPED.search(spec):
+        if _CAPPED.search(spec) or _tests_both_majors(manifest):
             continue
         capper = _capping_package(manifest)
         if capper and capper[1]:
