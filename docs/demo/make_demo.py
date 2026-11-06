@@ -37,7 +37,7 @@ SCENES = [
         [("Will break an agent: 1", "red")],
         [("  get_forecast(units) (server.py:14): ", "fg"), ("a client that sends the advertised null default", "fg")],
         [("  gets a validation error, and the tool never runs.", "fg")],
-        [("      Fix: ", "green"), ("type it `T | None` (`mcp-doctor --fix` does this). ", "fg"), ("(fixed by maintainers in 22 repos)", "dim")],
+        [("      Fix: ", "green"), ("type it `T | None` (`mcp-doctor --fix` does this). ", "fg"), ("(fixed by maintainers in 27 repos)", "dim")],
         [("", "fg")],
         [("Quality:  97%  Grade: ", "fg"), ("A", "green"), ("  (1 tool(s) found)", "dim")],
         [("Security: 100%  Grade: ", "fg"), ("A", "green")],

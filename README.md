@@ -40,7 +40,7 @@ An agent is only as reliable as the tools it calls, and most MCP servers ship un
 ## Why trust its findings
 
 - **Recall is measured, misses are published.** A checker that can't see a tool quietly grades it as fine, so tool detection is measured against an independent count: 15,755 of 15,977 tools found across 805 real servers on 5 frameworks. Every miss is listed with its reason in [docs/coverage.md](docs/coverage.md).
-- **Breakages first, grades second.** Every report opens with what will break an agent calling the server, from checks maintainers have already acted on: an optional argument that rejects the `null` its own schema advertises (fixed by maintainers in 22 repos), stray stdout on a stdio server (3 repos), a server that won't start on a fresh install of `mcp` 2.x (15 repos). Before the fix, 17 of the 19 such bugs maintainers merged showed up this way, while the grade gave most of those repos an A. On 20 repos it had never seen, the lines checked by hand were 96% right (53 of 55 read in full, plus 16 of 16 sampled from two repos with hundreds). The grades still follow, for everything else.
+- **Breakages first, grades second.** Every report opens with what will break an agent calling the server, from checks maintainers have already acted on: an optional argument that rejects the `null` its own schema advertises (fixed by maintainers in 27 repos), stray stdout on a stdio server (4 repos), a server that won't start on a fresh install of `mcp` 2.x (15 repos). Before the fix, 17 of the 19 such bugs maintainers merged showed up this way, while the grade gave most of those repos an A. On 20 repos it had never seen, the lines checked by hand were 96% right (53 of 55 read in full, plus 16 of 16 sampled from two repos with hundreds). The grades still follow, for everything else.
 - **149 of its own bugs found and fixed after release** by running it on real servers, up to the 91.8k★ official `modelcontextprotocol/servers` monorepo; a fix ships only when a before/after run on 180+ real repos changes nothing it shouldn't. [The log](docs/dogfooding.md) · [how 69 of them got through](docs/postmortem-69-bugs.md).
 - **Maintainers act on its reports:** fixes merged upstream, among them [ha-mcp](https://github.com/homeassistant-ai/ha-mcp/pull/2327), [telegram-mcp](https://github.com/chigwell/telegram-mcp/pull/266) (111 tools fixed in one PR) and [davinci-resolve-mcp](https://github.com/samuelgursky/davinci-resolve-mcp/pull/274) (shipped as its own release).
 - **Quality and security are graded separately,** so a well-documented A can't hide a security gap. Every audited repo is on the [leaderboard](https://vishalhabib99.github.io/mcp-doctor/) with a dated badge you can add to your README, and re-scans show ▲/▼ drift.
@@ -57,11 +57,11 @@ $ mcp-doctor .
 mcp-doctor report
 Will break an agent: 3
   search(limit) (server.py:5): a client that sends the advertised null default gets a validation error, and the tool never runs.
-      Fix: type it `T | None` (`mcp-doctor --fix` does this). (fixed by maintainers in 22 repos)
+      Fix: type it `T | None` (`mcp-doctor --fix` does this). (fixed by maintainers in 27 repos)
   search (server.py:12): stray stdout on stdio corrupts the JSON-RPC stream: calls time out (Python) or the client logs parse errors (Node).
-      Fix: write to stderr or use logging. (fixed by maintainers in 3 repos)
+      Fix: write to stderr or use logging. (fixed by maintainers in 4 repos)
   server.py:1: a fresh install gets mcp 2.x and the server fails to start.
-      Fix: pin `mcp<2`, or migrate the removed import. (removed in mcp 2.x; fails on import; fixed by maintainers in 4 repos)
+      Fix: pin `mcp<2`, or migrate the removed import. (removed in mcp 2.x; fails on import; fixed by maintainers in 15 repos)
 
 Quality:  34%  Grade: F  (1 tool(s) found)
 ```
@@ -77,7 +77,7 @@ $ mcp-doctor examples/bad_server
 mcp-doctor report
 Will break an agent: 1
   run(timeout) (server.py:18): a client that sends the advertised null default gets a validation error, and the tool never runs.
-      Fix: type it `T | None` (`mcp-doctor --fix` does this). (fixed by maintainers in 22 repos)
+      Fix: type it `T | None` (`mcp-doctor --fix` does this). (fixed by maintainers in 27 repos)
 
 Quality:  22%  Grade: F  (2 tool(s) found)
 Security: 100%  Grade: A
